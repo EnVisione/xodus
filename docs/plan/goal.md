@@ -4,18 +4,18 @@ Complete every mandatory requirement XODUS-REQ-001 through XODUS-REQ-022 and eve
 Immediate checkpoint:
 Preserve all existing legitimate work. Refresh and inspect `origin` without altering the remote. Verify `origin` is the intended repository, fetch `origin` without altering the remote, and verify the fetched remote-tracking ref against the current remote default-branch head. Classify the local default branch as equal, behind, ahead, or diverged; fast-forward only when safe. Do not reset, force, discard, or overwrite unexpected history. Search local branches, remote branches, and repository-wide open pull requests; resume applicable work, otherwise branch from the verified authoritative baseline. Do not invent a branch while an applicable active branch exists. Create or resume an implementation branch before modifying tracked files.
 
-The Forza XVD header places XVC metadata at 943,964,160 bytes. A 536,870,912 byte prefix cache retained 7,772 bytes before the parser panicked on its bounded seek. It retained no response, payload, key, signed URL, or decrypted executable. This proves a reader boundary only, not successful base inspection, transport integrity, compatibility, lifecycle, or Phase 2 authority. EXT-009 remains available only as synthetic entry evidence; no corpus consumer or package transaction has passed. Do not begin XODUS-PHASE-002 implementation while EXT-002 is unavailable. Make one bounded authorized attempt to close EXT-002's remaining metadata contract, then complete only independent mandatory work if it remains unavailable.
+Forza XVC metadata begins at 943,964,160 bytes; a 536,870,912 byte prefix cap retained 7,772 bytes before a bounded seek panic. A direct authenticated HTTP range fetched exactly 4,096 bytes there with `206 Partial Content` and exact `Content-Range`; in memory, `XvcInfo` parsed version 2 with 1,964 regions, 1,990 region specifiers, and 21,490 update segments. It retained no response, payload, key, signed URL, or decrypted executable. This closes only limited Forza metadata inspection, not complete parsing, integrity, update, runtime, online, anti-cheat, apply, rollback, recovery, or Phase 2 authority. EXT-009 remains synthetic entry evidence only. Do not begin XODUS-PHASE-002 implementation while EXT-002 is unavailable. Make one bounded authorized attempt at the remaining EXT-002 contract, then complete independent mandatory work if it stays unavailable.
 
 Perform one bounded inspection that ends as soon as each mandatory criterion is classified as implemented with valid evidence, incomplete, stale evidence, or externally blocked. Immediately execute the first incomplete or stale-evidence criterion. The map is not a deliverable: do not stop after producing it, do not rebuild it while unchanged evidence remains valid, and do not produce a narrative audit before implementation.
 
 Authoritative plan:
 /home/envy/Documents/Codex/2026-08-20/ca/work/xodus/docs/cachyos/plan.md
-Plan SHA-256: ecf74a42f0a9288b120c4159a8122d2e30ac4e9a05fc39535e873848240364a7
-Validated handoff plan-set SHA-256: e1973c532d21e40bd33a81e701d4f83f57b3b159ae2483b8c60a7d915a99eb8f
+Plan SHA-256: a554eaf6066d5e88f4aa7fa8c5e962aca52d4de8d664c6644d805bff10477026
+Validated handoff plan-set SHA-256: 151d9ffa63fcfa9fe6790d5ea65abfdb85c730a1e215ba09f00282dcef8f3127
 Completion endpoint: Xodus stable release is complete only when the signed public CachyOS release and repository local PKGBUILD install on the Tier 1 Lenovo Legion 9 18IAX10, Minecraft for Windows and Forza Horizon 5 each pass the authorized local login, entitlement, license, clean install, update, two consecutive launch, runtime, save, shutdown, repair, and uninstall workflows, Forza passes both absolute performance profiles, Tier 2 compatibility gates pass, MSIXVC2 and XSP update support pass, unsupported anti cheat titles hand off separately to Xbox cloud gaming, all mandatory security, recovery, documentation, and release evidence passes, and no cloud result substitutes for either local target.
 
 Observed checkout branch: envy/target-metadata-evidence
-Observed checkout commit: 9074e6c103063eef34db2f4396d57725c0a49e2f
+Observed checkout commit: 1d22f472fa33fb24995d842e483a98ac2b0e5c78
 Repository root: /home/envy/Documents/Codex/2026-08-20/ca/work/xodus
 
 Authoritative remote:
@@ -27,7 +27,7 @@ Observed local default-branch commit: 5b77e06eaa5e3cea78af122436d35a9b02992834
 Observed local remote-tracking ref: origin/main
 Observed local remote-tracking commit: 5b77e06eaa5e3cea78af122436d35a9b02992834
 Current remote default-branch head: 5b77e06eaa5e3cea78af122436d35a9b02992834
-Remote-head evidence: git ls-remote origin refs/heads/main observed on 2026-08-24 at 13:14:56Z, corroborated by gh repo view defaultBranchRef main
+Remote-head evidence: git ls-remote origin refs/heads/main observed on 2026-08-24 at 13:31:00Z, corroborated by gh repo view defaultBranchRef main
 Authoritative working baseline: established
 Applicable implementation branch: envy/target-metadata-evidence
 Applicable open pull request: none identified at checkpoint
@@ -40,11 +40,11 @@ Inspect, implement, test, audit, fix, verify, integrate when required, verify th
 Reuse evidence only while affected code, dependencies, configuration, environment, schemas, fixtures, and execution paths remain unchanged; otherwise mark it stale. Documentation changes do not substitute for implementation. Do not modify `plan.md` or status documents merely to restate a checkpoint, decision, blocker, or unchanged evidence.
 
 Guardrails and authority:
-DEC-001 through DEC-010 are locked. Preserve existing work, completed behavior, recovery paths, and unrelated files. The Forza reader failure is evidence, not a compatibility or Phase 2 claim. Four Clippy warnings remain work, not blockers.
+DEC-001 through DEC-010 are locked. Preserve existing work, completed behavior, recovery paths, and unrelated files.
 
 Never weaken, skip, disable, delete, or narrow a valid test or suppress a valid failure. Never ignore a required exit code, reduce a required threshold, or mark a check allowed to fail. Never introduce a production bypass solely for tests or substitute mocked behavior for required real integration, signing, publication, recovery, or runtime evidence. If a test contradicts the plan or contract, prove the contradiction and replace it with equal or stronger coverage.
 
-Do not commit directly to main. Keep the default branch safe: permit a safe fast-forward and require authorized pull-request integration. Keep secrets in approved stores; never print, log, commit, serialize, cache, or place them in fixtures, reports, command output, or continuity state. Reject secret-bearing files. Repository defects, failed tests, missing implementation, and architecture work are not external blockers.
+Do not commit directly to main. Keep the default branch safe: permit a safe fast-forward and require authorized pull-request integration. Keep secrets in approved stores; never print, log, commit, serialize, cache, or place them in fixtures, reports, command output, or continuity state. Repository defects, failed tests, missing implementation, and architecture work are not external blockers.
 
 This approved blocker-tolerant run covers only Verified target entitlements and current package metadata, Versioned xgameruntime artifact, Versioned Xodus compatible Wine or Proton artifact, Scoped public release publication approval, Tier 2 CachyOS Hyprland NVIDIA compatibility hardware, and Authorized Minecraft and Forza update revision pairs. It grants no publication approval and does not broaden DEC-004.
 
