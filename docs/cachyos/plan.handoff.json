@@ -974,7 +974,7 @@
       ],
       "mandatory_for_endpoint": true,
       "kind": "artifact",
-      "availability": "unknown",
+      "availability": "blocked",
       "authorization": "authorized",
       "blocked_plan_approved": true,
       "required_evidence": [

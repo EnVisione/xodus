@@ -314,7 +314,7 @@ All items below are excluded from this plan's completion endpoint. Promotion req
 | EXT-006 | Existing Greenlight application named Xbox with Xbox cloud entitlement | XODUS-REQ-018 | available | authorized | Verify desktop discovery and one entitled cloud fallback handoff. |
 | EXT-007 | Scoped public release publication approval | XODUS-REQ-021 | unknown | unknown | Approve the frozen runbook, artifacts, repository, operations, operator, time window, and rollback before publication. |
 | EXT-008 | Local network and storage capacity | XODUS-REQ-003, XODUS-REQ-004, XODUS-REQ-014, XODUS-REQ-015, XODUS-REQ-016, XODUS-REQ-017 | available | not_required | Recheck endpoint connectivity and capacity before title and release work. |
-| EXT-009 | Versioned MSIXVC2 and XSP fixture corpus | XODUS-REQ-002, XODUS-REQ-003, XODUS-REQ-004, XODUS-REQ-020 | unknown | authorized | Produce a provenance reviewed legal corpus of valid and adversarial fixtures. |
+| EXT-009 | Versioned MSIXVC2 and XSP fixture corpus | XODUS-REQ-002, XODUS-REQ-003, XODUS-REQ-004, XODUS-REQ-020 | blocked | authorized | Produce a provenance reviewed legal corpus of valid and adversarial fixtures. |
 | EXT-010 | Tier 2 CachyOS Hyprland NVIDIA compatibility hardware | XODUS-REQ-020, XODUS-REQ-021 | unknown | not_required | Provide at least two independent Tier 2 systems covering pre Blackwell and Blackwell NVIDIA hardware. |
 | EXT-011 | Authorized Minecraft and Forza update revision pairs | XODUS-REQ-015, XODUS-REQ-016 | unknown | authorized | Provide an entitled source and target package revision pair or an observed live update for each local target. |
 
@@ -338,6 +338,14 @@ All items below are excluded from this plan's completion endpoint. Promotion req
 The authorized account resolves current entitled package file lists for both targets. The sanitized discovery record is [target package discovery](./target-package-discovery.md). It proves the product identifiers, current content and package identifiers, MSIXVC format, x64 architecture, and current XSP update presence without downloading package bytes or retaining signed download URLs.
 
 The remaining EXT-002 evidence still requires an authorized, isolated package acquisition and inspection to freeze each target's dependency graph, manifest entrypoint, protected-file inventory, Game Runtime imports, online services, and anti-cheat classification. Therefore EXT-002 does not yet satisfy the XODUS-PHASE-002 entry criterion. EXT-009 remains independently blocked pending a reviewed legal fixture manifest.
+
+### EXT-009 Legal Fixture Status
+
+**Status:** EXTERNALLY BLOCKED
+
+The current official Microsoft GDK license requires licensee acceptance, limits use to development and testing of Microsoft Windows Titles, and prohibits sharing GDK components. It therefore cannot supply a fixture corpus that this public repository can distribute or maintain without separate rights. No GDK tool was executed and no GDK output entered the repository. The tracked investigation is [issue 8](https://github.com/EnVisione/xodus/issues/8).
+
+Unblocking requires either a provenance reviewed corpus whose license permits the planned repository use and redistribution, or explicit rights that cover the required fixture creation, retention, and publication. The existing MSIXVC and XSP package metadata cannot substitute for MSIXVC2 fixtures.
 
 ### Urgent Login Rendering Maintenance Exception
 
