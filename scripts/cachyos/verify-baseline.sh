@@ -31,6 +31,7 @@ validate_manifest() {
         (.source_revision.xodus_commit | test("^[0-9a-f]{40}$")) and
         (.source_revision.cargo_lock_sha256 | test("^[0-9a-f]{64}$")) and
         (.source_revision.cargo_metadata_sha256 | test("^[0-9a-f]{64}$")) and
+        (.source_revision.source_sensitive_paths | length > 0) and
         (.platform.packages | length > 0) and
         (.runtime_candidates | length > 0) and
         (.evidence_invalidation.invalidating_identity_fields | length > 0) and
@@ -51,6 +52,7 @@ verify_source() {
     local expected_origin_main
     local expected_upstream_main
     local metadata_digest
+    local -a source_sensitive_paths
 
     expected_commit="$(jq -r '.source_revision.xodus_commit' "$manifest_path")"
     expected_lock_digest="$(jq -r '.source_revision.cargo_lock_sha256' "$manifest_path")"
@@ -59,11 +61,14 @@ verify_source() {
     expected_upstream="$(jq -r '.remotes.upstream' "$manifest_path")"
     expected_origin_main="$(jq -r '.source_revision.origin_main_commit' "$manifest_path")"
     expected_upstream_main="$(jq -r '.source_revision.upstream_main_commit' "$manifest_path")"
+    mapfile -t source_sensitive_paths < <(jq -r '.source_revision.source_sensitive_paths[]' "$manifest_path")
 
-    assert_equals "checkout commit" "$expected_commit" "$(git -C "$repository_root" rev-parse HEAD)"
+    git -C "$repository_root" merge-base --is-ancestor "$expected_commit" HEAD || fail "frozen source commit is not an ancestor of the checkout"
+    git -C "$repository_root" diff --quiet "$expected_commit" -- "${source_sensitive_paths[@]}" || fail "source-sensitive paths differ from the frozen baseline"
     assert_equals "origin remote" "$expected_origin" "$(git -C "$repository_root" remote get-url origin)"
     assert_equals "upstream remote" "$expected_upstream" "$(git -C "$repository_root" remote get-url upstream)"
-    assert_equals "origin main commit" "$expected_origin_main" "$(git -C "$repository_root" rev-parse origin/main)"
+    git -C "$repository_root" merge-base --is-ancestor "$expected_origin_main" origin/main || fail "frozen origin main commit is not an ancestor of origin main"
+    git -C "$repository_root" diff --quiet "$expected_origin_main" origin/main -- "${source_sensitive_paths[@]}" || fail "origin main source-sensitive paths differ from the frozen baseline"
     assert_equals "upstream main commit" "$expected_upstream_main" "$(git -C "$repository_root" rev-parse upstream/main)"
     assert_equals "Cargo.lock digest" "$expected_lock_digest" "$(sha256sum "$repository_root/Cargo.lock" | awk '{print $1}')"
 

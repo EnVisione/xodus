@@ -9,4 +9,4 @@ This directory contains the CachyOS planning, baseline, and verification records
 - [Phase 001 verification](./phase-001-verification.md) records the reproduced baseline checks and their known boundaries.
 - [Baseline verifier](../../scripts/cachyos/verify-baseline.sh) validates the frozen source and environment, and can reproduce the audit workspace checks.
 
-The baseline verifier is read only. Run `scripts/cachyos/verify-baseline.sh --all` from a clean checkout at the frozen source revision. A mismatch marks affected evidence stale; it does not alter system configuration or account state.
+The baseline verifier is read only. Run `scripts/cachyos/verify-baseline.sh --all` from a clean descendant of the frozen source revision whose source-sensitive paths still match the baseline. A mismatch marks affected evidence stale; it does not alter system configuration or account state.
