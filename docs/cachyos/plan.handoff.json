@@ -808,10 +808,11 @@
       ],
       "mandatory_for_endpoint": true,
       "kind": "service",
-      "availability": "unknown",
+      "availability": "partial",
       "authorization": "authorized",
       "blocked_plan_approved": true,
       "required_evidence": [
+        "Sanitized authenticated discovery records current target product, content, package, format, architecture, and update metadata without retaining download URLs",
         "Authorized catalog and entitlement responses for both target product IDs",
         "Recorded package format, architecture, dependencies, entrypoint, protected files, Game Runtime imports, service requirements, and anti cheat classification"
       ]

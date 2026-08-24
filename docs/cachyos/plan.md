@@ -307,7 +307,7 @@ All items below are excluded from this plan's completion endpoint. Promotion req
 | ID | Prerequisite | Affected requirements | Availability | Authorization | Required external action |
 | --- | --- | --- | --- | --- | --- |
 | EXT-001 | Authorized active Game Pass Ultimate account | XODUS-REQ-005, XODUS-REQ-014, XODUS-REQ-015, XODUS-REQ-016, XODUS-REQ-019 | available | authorized | Use interactive sign in only under DEC-004 and retain redacted evidence. |
-| EXT-002 | Verified target entitlements and current package metadata | XODUS-REQ-004, XODUS-REQ-014, XODUS-REQ-015, XODUS-REQ-016, XODUS-REQ-019 | unknown | authorized | Query both target products and freeze entitlement, package, entrypoint, runtime, service, and anti cheat metadata. |
+| EXT-002 | Verified target entitlements and current package metadata | XODUS-REQ-004, XODUS-REQ-014, XODUS-REQ-015, XODUS-REQ-016, XODUS-REQ-019 | partial | authorized | Query both target products and freeze entitlement, package, entrypoint, runtime, service, and anti cheat metadata. |
 | EXT-003 | Versioned xgameruntime artifact | XODUS-REQ-006, XODUS-REQ-007, XODUS-REQ-014, XODUS-REQ-015, XODUS-REQ-016, XODUS-REQ-019 | unknown | authorized | Produce and review a pinned artifact manifest and compatible build. |
 | EXT-004 | Versioned Xodus compatible Wine or Proton artifact | XODUS-REQ-007, XODUS-REQ-008, XODUS-REQ-012, XODUS-REQ-013, XODUS-REQ-014, XODUS-REQ-015, XODUS-REQ-016, XODUS-REQ-019 | unknown | authorized | Produce and review a pinned artifact manifest, patch series, runtime, and build. |
 | EXT-005 | Audited Tier 1 CachyOS hardware and session | XODUS-REQ-010, XODUS-REQ-011, XODUS-REQ-012, XODUS-REQ-013, XODUS-REQ-015, XODUS-REQ-016, XODUS-REQ-017 | available | not_required | Capture a fresh runtime snapshot for each acceptance run. |
@@ -330,6 +330,14 @@ All items below are excluded from this plan's completion endpoint. Promotion req
 - EXT-009 is an artifact prerequisite. Its manifest records exact corpus version, authoritative source, SHA-256, SHA-512, compatibility, license provenance, and security review. It excludes secrets, content keys, decrypted protected executables, and content lacking redistribution authority.
 - EXT-010 is an environment prerequisite. Each system records a sanitized hardware and software manifest, scheduler, power state, scale, native Wayland and XWayland paths, NVIDIA explicit synchronization, runtime versions, and required compatibility results. Tier 1 cannot count as either independent Tier 2 system.
 - EXT-011 is a service prerequisite. Each target must expose an entitled source package revision and target package revision or a real live update to the authorized account. Evidence proves an actual local source to target transaction without redistributing content or retaining a decrypted protected executable; a no update response cannot satisfy DEC-001.
+
+### EXT-002 Discovery Status
+
+**Status:** PARTIAL
+
+The authorized account resolves current entitled package file lists for both targets. The sanitized discovery record is [target package discovery](./target-package-discovery.md). It proves the product identifiers, current content and package identifiers, MSIXVC format, x64 architecture, and current XSP update presence without downloading package bytes or retaining signed download URLs.
+
+The remaining EXT-002 evidence still requires an authorized, isolated package acquisition and inspection to freeze each target's dependency graph, manifest entrypoint, protected-file inventory, Game Runtime imports, online services, and anti-cheat classification. Therefore EXT-002 does not yet satisfy the XODUS-PHASE-002 entry criterion. EXT-009 remains independently blocked pending a reviewed legal fixture manifest.
 
 ### Urgent Login Rendering Maintenance Exception
 

@@ -10,5 +10,6 @@ This directory contains the CachyOS planning, baseline, and verification records
 - [Baseline verifier](../../scripts/cachyos/verify-baseline.sh) validates the frozen source and environment, and can reproduce the audit workspace checks.
 - [Login renderer recovery](../xodus/login.md#cachyos-hyprland-and-nvidia-renderer-recovery) documents the process local WebKitGTK workaround for the observed Tier 1 blank login surface.
 - [Login rendering verification](./login-rendering-verification.md) records the isolated runtime and workspace checks without retaining sign in data.
+- [Target package discovery](./target-package-discovery.md) records the sanitized authenticated package metadata available before package acquisition.
 
 The baseline verifier is read only. Run `scripts/cachyos/verify-baseline.sh --all` from a clean descendant of the frozen source revision whose source-sensitive paths still match the baseline. A mismatch marks affected evidence stale; it does not alter system configuration or account state.
