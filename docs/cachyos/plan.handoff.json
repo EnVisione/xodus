@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "planId": "PLAN-MASTER",
-  "planSetSha256": "1737b2cf691bf134cd4da1f63b705067050fefb9988a4fbf4acb467642745e95",
+  "planSetSha256": "0081a3c5b11ae85059f97aa68ba86a8742bf3884371c0ad1f572bced530715e1",
   "planningSubject": {
     "name": "Evolve the EnVisione Xodus fork into a CachyOS native, launcher neutral Game Pass PC launcher and runtime for Hyprland, Wayland, XWayland, and the NVIDIA RTX 5090 Laptop GPU",
     "requestedArtifact": "authoritative_plan",
@@ -1172,7 +1172,7 @@
     "optionalFutureDisposition": "excluded",
     "lockedOwnerDecisions": "DEC-001 through DEC-010 are resolved exactly as recorded in this plan.",
     "activePhase": "XODUS-PHASE-002",
-    "nextExecutableAction": "Close only the EXT-002 target-metadata and EXT-009 legal fixture-corpus entry evidence contracts, including their required review, without beginning XODUS-PHASE-002 implementation.",
+    "nextExecutableAction": "Close only EXT-002 target-metadata evidence and EXT-009 entry evidence, specifically XSP update rollback and recovery fixtures plus final complete-corpus provenance and security review, without beginning XODUS-PHASE-002 implementation.",
     "knownFailingChecks": "Phase 001 baseline verification passed, while Clippy still reports four warnings at the frozen revision. An OBSERVED bounded header-only Forza metadata inspection retained no content and panicked in XvdFile::parse at crates/msixvc/src/xvd.rs line 363 after a failed seek under the 128 MiB stream. No package install, service-runtime, target-game, performance, Tier 2, or release acceptance run has passed.",
     "knownExternalBlockers": "Current phase-entry blockers are EXT-002, Verified target entitlements and current package metadata, and EXT-009, Versioned MSIXVC2 and XSP fixture corpus. Later endpoint blockers remain EXT-003, Versioned xgameruntime artifact, EXT-004, Versioned Xodus compatible Wine or Proton artifact, EXT-007, Scoped public release publication approval, EXT-010, Tier 2 CachyOS Hyprland NVIDIA compatibility hardware, and EXT-011, Authorized Minecraft and Forza update revision pairs.",
     "requiredEvidenceGates": "Sequential phase exits, complete deterministic tests, authorized local title lifecycles, target runtime traces, Forza telemetry, Tier 2 results, package lifecycle, security review, documentation, signatures, checksums, SBOM, public release inspection, fresh install, and rollback must pass."
