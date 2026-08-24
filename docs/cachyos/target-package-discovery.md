@@ -51,7 +51,9 @@ After the owner freed Microsoft Store device capacity, one corrected disposable 
 
 For each target, the probe selected one bounded protected executable and decrypted it only into a Linux memory file. Exact authenticated HTTP range requests were no larger than 8 MiB and required `206 Partial Content`, matching `Content-Range`, and matching body lengths. No package, key, signed URL, decrypted executable, installation, update, launch, or package content was retained. The disposable probe directory was deleted after exit.
 
-The PE import parser deliberately read no more than the first 16 MiB of each memory-only executable. Neither import table was reachable within that safe cap. This proves the entitlement, protected-content license, and memfd-only decryption boundary for both targets, but it does not establish Game Runtime imports, runtime compatibility, online-service behavior, anti-cheat classification, a source-to-target update, installation, or launch behavior.
+The first PE import parser deliberately read no more than the first 16 MiB of each memory-only executable. Neither import table was reachable within that cap. A corrected header-directed probe then read only each PE header and the referenced import sections. Minecraft had no static Game Runtime, online-service, or known anti-cheat import signal. Forza had one static online-service import signal, with no static Game Runtime or known anti-cheat import signal.
+
+Static import absence does not exclude delay-loaded or dynamic behavior, and the Forza static online-service signal does not prove runtime behavior. The probes establish the entitlement, protected-content license, memfd-only decryption, and bounded static-import boundary for both targets. They do not establish Game Runtime compatibility, full online-service behavior, anti-cheat classification, a source-to-target update, installation, launch, save, or game execution.
 
 ### Isolated Minecraft Update Plan Inspection
 
@@ -81,7 +83,7 @@ Together, these probes establish a successful limited base-package metadata insp
 
 One separate authenticated metadata-only query checked only whether the current selected base-package records expose a nonempty `FileHash` or `HashOfHashes` field. Both fields were absent for both Minecraft for Windows and Forza Horizon 5. No hash value, package response, payload, key, signed URL, or decrypted executable was retained.
 
-This establishes that the current entitlement metadata cannot itself bind either complete base-package transfer to a source-supplied digest. It does not establish failed TLS transport or a package corruption. The separate Minecraft canary above now verifies a complete base transfer through the XVD integrity tree, but Forza still has no corresponding complete-transfer evidence, and the remaining EXT-002 requirements remain open.
+This establishes that the current entitlement metadata cannot itself bind either complete base-package transfer to a source-supplied digest. It does not establish failed TLS transport or a package corruption. Separate Minecraft and Forza canaries now verify complete base transfers through their XVD integrity trees, while the remaining EXT-002 requirements remain open.
 
 ### Bounded Forza User Metadata Directory
 
@@ -101,6 +103,6 @@ This flow is interactive because the current CLI asks which package files to enu
 
 ## Remaining EXT-002 Work
 
-This evidence is intentionally incomplete. Minecraft now has an isolated manifest, dependency, entrypoint, protocol, capability, protected-file inventory, current update-plan record, complete XVD-tree-verified base-transfer canary, and protected-content license plus memfd-only decryption evidence. Forza now has bounded current header-boundary, XVC metadata, user-directory, signal-scan, update-plan records, complete transport and XVD-tree integrity evidence, and protected-content license plus memfd-only decryption evidence. Neither target has direct Game Runtime import evidence, online-service behavior, anti-cheat classification, or a source-to-target update pair. Those remaining facts require subsequent authorized, isolated workflows. The only retained acquisition evidence is the sanitized metadata described above.
+This evidence is intentionally incomplete. Minecraft now has an isolated manifest, dependency, entrypoint, protocol, capability, protected-file inventory, current update-plan record, complete XVD-tree-verified base-transfer canary, protected-content license plus memfd-only decryption evidence, and a static-import result with no Game Runtime, online-service, or known anti-cheat signal. Forza now has bounded current header-boundary, XVC metadata, user-directory, signal-scan, update-plan records, complete transport and XVD-tree integrity evidence, protected-content license plus memfd-only decryption evidence, and a static online-service import signal with no static Game Runtime or known anti-cheat signal. Neither target has actual Game Runtime import evidence, full online-service behavior, anti-cheat classification beyond static signals, or a source-to-target update pair. Those remaining facts require subsequent authorized, isolated workflows. The only retained acquisition evidence is the sanitized metadata described above.
 
 Consequently, EXT-002 remains partial and does not open XODUS-PHASE-002. EXT-009 is independently available as synthetic entry evidence only; it does not replace any real target-package requirement.
