@@ -2,20 +2,20 @@ Objective:
 Complete every mandatory requirement XODUS-REQ-001 through XODUS-REQ-022 and every stable-release gate, with optional and future work excluded. Successful completion is permitted only when runtime verification passes, artifacts are bound to the commit, every evidence gate passes, and the final plan-wide audit finds no known mandatory repository-owned defect.
 
 Immediate checkpoint:
-Preserve all existing legitimate work. Refresh and inspect `origin` without altering the remote. Verify `origin` is the intended repository, fetch `origin` without altering the remote, and verify the fetched remote-tracking ref against the current remote default-branch head. Classify the local default branch as equal, behind, ahead, or diverged; fast-forward only when safe. Do not reset, force, discard, or overwrite unexpected history. Search local branches, remote branches, and repository-wide open pull requests; resume applicable work, otherwise branch from the verified authoritative baseline. Do not invent a branch while an applicable active branch exists. Create or resume an implementation branch before modifying tracked files.
+Preserve existing legitimate work. Refresh and inspect `origin` without altering the remote. Verify `origin` is the intended repository, fetch `origin` without altering the remote, and verify the fetched remote-tracking ref against the current remote default-branch head. Classify the local default branch as equal, behind, ahead, or diverged; fast-forward only when safe. Do not reset, force, discard, or overwrite unexpected history. Search local branches, remote branches, and repository-wide open pull requests; resume applicable work, otherwise branch from the verified authoritative baseline. Do not invent a branch while an applicable active branch exists. Create or resume an implementation branch before modifying tracked files.
 
-Forza XVC metadata begins at 943,964,160 bytes; a 536,870,912 byte prefix cap retained 7,772 bytes before a bounded seek panic. A direct authenticated HTTP range fetched exactly 4,096 bytes there with `206 Partial Content` and exact `Content-Range`; in memory, `XvcInfo` parsed version 2 with 1,964 regions, 1,990 region specifiers, and 21,490 update segments. It retained no response, payload, key, signed URL, or decrypted executable. This closes only limited Forza metadata inspection, not complete parsing, integrity, update, runtime, online, anti-cheat, apply, rollback, recovery, or Phase 2 authority. EXT-009 remains synthetic entry evidence only. Do not begin XODUS-PHASE-002 implementation while EXT-002 is unavailable. Make one bounded authorized attempt at the remaining EXT-002 contract, then complete independent mandatory work if it stays unavailable.
+Limited Forza XVC metadata inspection closed only that subtask and did not prove full-transfer integrity. An authenticated metadata-only query found both `FileHash` and `HashOfHashes` absent from Minecraft and Forza base-package records. It retained no hash value, response, payload, key, signed URL, or decrypted executable. This proves only that entitlement metadata cannot bind either complete base transfer to a source-supplied digest; it proves no TLS failure, corruption, or integrity pass. EXT-009 remains synthetic entry evidence only. Do not begin XODUS-PHASE-002 implementation while EXT-002 is unavailable. Make one bounded authorized attempt to establish a trustworthy full-transfer integrity path and evidence beyond that metadata, plus remaining Game Runtime imports, online-service, anti-cheat, and real source-to-target update evidence, then complete independent mandatory work if EXT-002 stays unavailable.
 
 Perform one bounded inspection that ends as soon as each mandatory criterion is classified as implemented with valid evidence, incomplete, stale evidence, or externally blocked. Immediately execute the first incomplete or stale-evidence criterion. The map is not a deliverable: do not stop after producing it, do not rebuild it while unchanged evidence remains valid, and do not produce a narrative audit before implementation.
 
 Authoritative plan:
 /home/envy/Documents/Codex/2026-08-20/ca/work/xodus/docs/cachyos/plan.md
-Plan SHA-256: a554eaf6066d5e88f4aa7fa8c5e962aca52d4de8d664c6644d805bff10477026
-Validated handoff plan-set SHA-256: 151d9ffa63fcfa9fe6790d5ea65abfdb85c730a1e215ba09f00282dcef8f3127
+Plan SHA-256: a6e85eae19c15dd76c9f4fc33aa774630e47d24faec75341f3ab644e9f96c4ac
+Validated handoff plan-set SHA-256: 03084900f6488c93ae343dda5c377b814c980408f52a2192b32f334987b7ab0d
 Completion endpoint: Xodus stable release is complete only when the signed public CachyOS release and repository local PKGBUILD install on the Tier 1 Lenovo Legion 9 18IAX10, Minecraft for Windows and Forza Horizon 5 each pass the authorized local login, entitlement, license, clean install, update, two consecutive launch, runtime, save, shutdown, repair, and uninstall workflows, Forza passes both absolute performance profiles, Tier 2 compatibility gates pass, MSIXVC2 and XSP update support pass, unsupported anti cheat titles hand off separately to Xbox cloud gaming, all mandatory security, recovery, documentation, and release evidence passes, and no cloud result substitutes for either local target.
 
 Observed checkout branch: envy/target-metadata-evidence
-Observed checkout commit: 1d22f472fa33fb24995d842e483a98ac2b0e5c78
+Observed checkout commit: c073512b920114c66ffff2c152901d972f4bc698
 Repository root: /home/envy/Documents/Codex/2026-08-20/ca/work/xodus
 
 Authoritative remote:
@@ -27,7 +27,7 @@ Observed local default-branch commit: 5b77e06eaa5e3cea78af122436d35a9b02992834
 Observed local remote-tracking ref: origin/main
 Observed local remote-tracking commit: 5b77e06eaa5e3cea78af122436d35a9b02992834
 Current remote default-branch head: 5b77e06eaa5e3cea78af122436d35a9b02992834
-Remote-head evidence: git ls-remote origin refs/heads/main observed on 2026-08-24 at 13:31:00Z, corroborated by gh repo view defaultBranchRef main
+Remote-head evidence: git ls-remote origin refs/heads/main observed on 2026-08-24 at 13:44:09Z, corroborated by gh repo view defaultBranchRef main
 Authoritative working baseline: established
 Applicable implementation branch: envy/target-metadata-evidence
 Applicable open pull request: none identified at checkpoint
