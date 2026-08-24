@@ -53,6 +53,12 @@ The plan declares an update from version `3.687.302.0` to `3.688.109.0`, 159,925
 
 This is current Forza update-plan metadata and parser evidence only. It does not inspect the 159,934,996,480 byte base package, prove a source-to-target update, establish transport integrity, apply a plan, perform rollback or recovery, demonstrate Game Runtime or online-service compatibility, classify anti-cheat behavior, or satisfy a lifecycle requirement.
 
+### Bounded Forza Base Header Boundary
+
+One separate authenticated probe read and parsed only the 4,096 byte XVD header from the current Forza base package. The header calculates the XVC metadata offset as 943,964,160 bytes. A 512 MiB `PrefixCacheFile` probe therefore cannot reach that offset. The current `XvdFile` path cached 7,772 bytes, then panicked when it attempted the bounded seek. The probe retained no package response, payload segment, key, signed URL, or decrypted executable.
+
+This is a reproducible reader-boundary result, not a successful base-package inspection. It establishes that a prefix-only reader cannot inspect this target's XVC metadata under a 512 MiB cap. The tracked parser-panic investigation remains the path for a later bounded random-access design. It does not reduce EXT-002 or authorize Phase 2 implementation.
+
 ## Reproduction Boundary
 
 Use the current `xodus-cli` release binary with the persisted account state, the neutral market, and the product ID:
@@ -65,6 +71,6 @@ This flow is interactive because the current CLI asks which package files to enu
 
 ## Remaining EXT-002 Work
 
-This evidence is intentionally incomplete. Minecraft now has an isolated manifest, dependency, entrypoint, protocol, capability, protected-file inventory, and current update-plan record. Forza now has a bounded current update-plan record, but still lacks an isolated base-package inspection. Neither target freezes Game Runtime imports, online-service behavior, anti-cheat classification, transport-integrity verification, or a source-to-target update pair. Those remaining facts require subsequent authorized, isolated workflows. The only retained acquisition evidence is the sanitized metadata described above.
+This evidence is intentionally incomplete. Minecraft now has an isolated manifest, dependency, entrypoint, protocol, capability, protected-file inventory, and current update-plan record. Forza now has a bounded current header-boundary result and update-plan record, but still lacks a successful isolated base-package inspection. Neither target freezes Game Runtime imports, online-service behavior, anti-cheat classification, transport-integrity verification, or a source-to-target update pair. Those remaining facts require subsequent authorized, isolated workflows. The only retained acquisition evidence is the sanitized metadata described above.
 
 Consequently, EXT-002 remains partial and does not open XODUS-PHASE-002. EXT-009 is independently available as synthetic entry evidence only; it does not replace any real target-package requirement.
