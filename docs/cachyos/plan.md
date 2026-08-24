@@ -333,10 +333,11 @@ All items below are excluded from this plan's completion endpoint. Promotion req
 
 ### Urgent Login Rendering Maintenance Exception
 
-**Status:** IN REVIEW
+**Status:** MERGED
 **Authority:** Direct owner request after an observed Tier 1 login rendering failure on August 24, 2026.
 **Related requirements:** XODUS-REQ-005, XODUS-REQ-010, XODUS-REQ-011.
 **Tracking:** `login rendering compatibility` milestone and issue `#5`.
+**Merge evidence:** Pull request `#6` merged at commit `c2cc4e458646cd353dc46ae9a0dcb4cc69ee763d`.
 
 The Tier 1 CachyOS, Hyprland, NVIDIA session opened the existing Xodus login window with an entirely blank WebKitGTK surface. The process emitted `Failed to create GBM buffer ... Invalid argument`. Re-running the same Xodus binary with the process local `WEBKIT_DISABLE_DMABUF_RENDERER=1` environment variable rendered the Microsoft sign in page without completing authorization. This is a WebKitGTK dmabuf renderer compatibility defect, not an entitlement, account, token, package, game, or global graphics configuration failure.
 
