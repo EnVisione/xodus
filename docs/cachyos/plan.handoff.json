@@ -974,9 +974,9 @@
       ],
       "mandatory_for_endpoint": true,
       "kind": "artifact",
-      "availability": "blocked",
+      "availability": "partial",
       "authorization": "authorized",
-      "blocked_plan_approved": true,
+      "blocked_plan_approved": false,
       "required_evidence": [
         "Corpus contains valid, malformed, truncated, adversarial path, integrity failure, update, rollback, and recovery fixtures",
         "Manifest records fixture provenance and excludes credentials, content keys, protected executable plaintext, and redistributable content without permission"
