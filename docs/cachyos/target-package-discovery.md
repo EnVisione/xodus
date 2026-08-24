@@ -67,6 +67,12 @@ One separate authenticated metadata-only query checked only whether the current 
 
 This establishes that the current entitlement metadata cannot itself bind either complete base-package transfer to a source-supplied digest. It does not establish failed TLS transport, a package corruption, or any full transport-integrity result. EXT-002 still requires a trustworthy full-transfer integrity path and verification evidence.
 
+### Bounded Forza User Metadata Directory
+
+One separate authenticated range probe read only unencrypted user-metadata records. Each exact range response was checked for `206 Partial Content`, matching `Content-Range`, and a fixed 8 MiB maximum. The package directory has six records and includes `MicrosoftGame.config`, `AppxManifest.xml`, and `SegmentMetadata.bin`. Neither configuration file contained the inspected `xgameruntime`, `Microsoft.Gaming.Services`, or `GamingServices` markers. The bounded segment-metadata path inventory contained an online-service filename signal, but no match for the inspected known anti-cheat filename patterns.
+
+All responses were used only in process memory and were not written to disk or retained. The signal scan does not prove or disprove PE imports, actual online-service behavior, Game Runtime compatibility, or anti-cheat presence. It does not authorize Phase 2 implementation.
+
 ## Reproduction Boundary
 
 Use the current `xodus-cli` release binary with the persisted account state, the neutral market, and the product ID:
@@ -79,6 +85,6 @@ This flow is interactive because the current CLI asks which package files to enu
 
 ## Remaining EXT-002 Work
 
-This evidence is intentionally incomplete. Minecraft now has an isolated manifest, dependency, entrypoint, protocol, capability, protected-file inventory, and current update-plan record. Forza now has bounded current header-boundary, XVC metadata, and update-plan records. Neither target has a source-supplied base-package digest in the current entitlement metadata, or freezes Game Runtime imports, online-service behavior, anti-cheat classification, a trustworthy transport-integrity path, or a source-to-target update pair. Those remaining facts require subsequent authorized, isolated workflows. The only retained acquisition evidence is the sanitized metadata described above.
+This evidence is intentionally incomplete. Minecraft now has an isolated manifest, dependency, entrypoint, protocol, capability, protected-file inventory, and current update-plan record. Forza now has bounded current header-boundary, XVC metadata, user-directory, signal-scan, and update-plan records. Neither target has a source-supplied base-package digest in the current entitlement metadata, or freezes Game Runtime imports, online-service behavior, anti-cheat classification, a trustworthy transport-integrity path, or a source-to-target update pair. Those remaining facts require subsequent authorized, isolated workflows. The only retained acquisition evidence is the sanitized metadata described above.
 
 Consequently, EXT-002 remains partial and does not open XODUS-PHASE-002. EXT-009 is independently available as synthetic entry evidence only; it does not replace any real target-package requirement.
