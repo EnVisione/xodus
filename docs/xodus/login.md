@@ -27,6 +27,14 @@ What that involves:
 
 The webview runtime itself is generic: a `SessionHandler` trait (`bootstrap` / `on_token` / `on_closed`) describes what to do at each step, and a `RuntimeCommands` action queue lets a handler open or close webview sessions without owning the event loop directly. `xodus-cli/src/commands/login.rs`'s `LoginHandler` is the only implementation today - its `on_token` calls `exchange_user_token` (see [RST2.srf](#rst2srf)), and if that comes back as a SOAP fault with an inline auth URL, it closes the current session and opens a second one at that URL instead of failing outright. Once that second session also produces a `DAProperty`, the exchange is retried with an extra `http://Passport.NET/tb` scope added, which is what actually finalizes the token.
 
+## CachyOS, Hyprland, and NVIDIA Renderer Recovery
+
+On the Tier 1 CachyOS Hyprland session, WebKitGTK can select its dmabuf renderer and fail to allocate an NVIDIA GBM buffer. The symptom is an otherwise normal Xodus login window with a blank surface and a `Failed to create GBM buffer ... Invalid argument` process error.
+
+Before creating a Linux WebKitGTK webview, Xodus detects a Wayland session and an installed NVIDIA driver. If the user has not already selected a WebKitGTK renderer, the CLI sets `WEBKIT_DISABLE_DMABUF_RENDERER=1` for its own process. This selects WebKitGTK shared memory buffers for the login surface. The renderer selection itself does not change Hyprland, shell profiles, system environment files, NVIDIA configuration, game presentation, account state, or token handling.
+
+An explicit `WEBKIT_DISABLE_DMABUF_RENDERER` value always wins. This permits an operator to retain the default dmabuf renderer or choose a different tested WebKitGTK renderer policy. The fallback is limited to the CLI process and must be re-evaluated with the native Wayland and XWayland login matrix in the planned CachyOS platform phase.
+
 ## RST2.srf
 
 If you know about Xbox services, this is similar to XSTS endpoint. It applies to both user and device STS tokens.
@@ -34,4 +42,3 @@ If you know about Xbox services, this is similar to XSTS endpoint. It applies to
 You can see a sample RST2.srf request when we used it in [device](./device.md) STS flow.
 
 Device token always revolves arround user token - its binary secret is used for signing XML payloads as well as decrypting responses.
-

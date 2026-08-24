@@ -7,6 +7,9 @@ use wry::http::{HeaderMap, HeaderValue};
 use wry::{PageLoadEvent, WebView, WebViewBuilder};
 use xodus::models::live::{DAProperty, HostBridgeMessage};
 
+#[cfg(target_os = "linux")]
+const WEBKIT_DISABLE_DMABUF_RENDERER: &str = "WEBKIT_DISABLE_DMABUF_RENDERER";
+
 type HandlerResult<T> = Result<T, Box<dyn std::error::Error>>;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -388,9 +391,57 @@ fn create_session<T: SessionHandler>(
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+pub fn configure_linux_webkit_renderer() {
+    let renderer_override = std::env::var_os(WEBKIT_DISABLE_DMABUF_RENDERER).is_some();
+    let wayland_session = std::env::var_os("WAYLAND_DISPLAY").is_some();
+    let nvidia_driver_present = std::path::Path::new("/proc/driver/nvidia/version").is_file();
+
+    if should_disable_dmabuf_renderer(renderer_override, wayland_session, nvidia_driver_present) {
+        // Safety. The CLI calls this before it starts the async runtime or WebKitGTK.
+        unsafe {
+            std::env::set_var(WEBKIT_DISABLE_DMABUF_RENDERER, "1");
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn should_disable_dmabuf_renderer(
+    renderer_override: bool,
+    wayland_session: bool,
+    nvidia_driver_present: bool,
+) -> bool {
+    !renderer_override && wayland_session && nvidia_driver_present
+}
+
 fn remove_session<T: SessionHandler>(state: &mut RuntimeState<T>, session_id: SessionId) {
     if state.active_session == Some(session_id) {
         state.active_session = None;
         state.active_webview = None;
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::should_disable_dmabuf_renderer;
+
+    #[test]
+    fn enables_the_workaround_for_wayland_nvidia_without_an_override() {
+        assert!(should_disable_dmabuf_renderer(false, true, true));
+    }
+
+    #[test]
+    fn preserves_an_explicit_renderer_override() {
+        assert!(!should_disable_dmabuf_renderer(true, true, true));
+    }
+
+    #[test]
+    fn leaves_non_wayland_sessions_unchanged() {
+        assert!(!should_disable_dmabuf_renderer(false, false, true));
+    }
+
+    #[test]
+    fn leaves_systems_without_nvidia_unchanged() {
+        assert!(!should_disable_dmabuf_renderer(false, true, false));
     }
 }

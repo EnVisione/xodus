@@ -110,15 +110,25 @@ struct CliArgs {
     command: SubCommand,
 }
 
+fn main() -> ExitCode {
+    let args = CliArgs::parse();
+
+    #[cfg(target_os = "linux")]
+    if matches!(&args.command, SubCommand::Login) {
+        webview::configure_linux_webkit_renderer();
+    }
+
+    run(args)
+}
+
 #[tokio::main]
-async fn main() -> ExitCode {
+async fn run(args: CliArgs) -> ExitCode {
     env_logger::init_from_env("XODUS_LOG");
     let client = reqwest::ClientBuilder::new()
         .user_agent(format!("xodus-cli/{}", env!("CARGO_PKG_VERSION")))
         .connection_verbose(true)
         .build()
         .unwrap();
-    let args = CliArgs::parse();
 
     xodus::secrets::init_secrets().expect("Unable to initialize credentials");
     let tokens = TokenManager::with_keychain_and_memory();
