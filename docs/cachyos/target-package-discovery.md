@@ -37,6 +37,14 @@ The recorded metadata proves the following current compatibility facts:
 
 This is a metadata and protected-file inventory exercise only. The current downloader does not validate the response hash before reporting success, so the exact byte count is acquisition evidence, not complete transport-integrity evidence.
 
+### Isolated Minecraft Update Plan Inspection
+
+One current Minecraft XSP update plan was selected from the entitled package listing and read in a disposable directory under a 1 MiB response limit. The response size matched its 4,304 byte package-listing entry. The current `XspFile` parser accepted it and reported 13 patch records, 10 new-data records, and 3 copy-data records.
+
+The plan declares an update from version `1.26.301.0` to `1.26.4403.0`, 2,489,819,136 update bytes, and 2,490,064,896 required disk bytes. No XSP, base package, payload segment, key, signed URL, or decrypted executable was retained after inspection.
+
+This proves a current Minecraft update-plan metadata shape and parser exercise. It is not a downloaded source package, applied update, integrity verification, rollback, recovery drill, or XODUS-REQ-015 lifecycle result. It therefore does not satisfy EXT-011 or reduce the remaining EXT-002 gate.
+
 ## Reproduction Boundary
 
 Use the current `xodus-cli` release binary with the persisted account state, the neutral market, and the product ID:
@@ -49,6 +57,6 @@ This flow is interactive because the current CLI asks which package files to enu
 
 ## Remaining EXT-002 Work
 
-This evidence is intentionally incomplete. Minecraft now has an isolated manifest, dependency, entrypoint, protocol, capability, and protected-file inventory. It does not yet freeze Minecraft Game Runtime imports, online-service behavior, anti-cheat classification, transport-integrity verification, or a source-to-target update pair. Forza still lacks an isolated package inspection. Those remaining facts require subsequent authorized, isolated workflows. The recorded content acquisition was limited to the disposable Minecraft package described above.
+This evidence is intentionally incomplete. Minecraft now has an isolated manifest, dependency, entrypoint, protocol, capability, protected-file inventory, and current update-plan record. It does not yet freeze Minecraft Game Runtime imports, online-service behavior, anti-cheat classification, transport-integrity verification, or a source-to-target update pair. Forza still lacks an isolated package inspection. Those remaining facts require subsequent authorized, isolated workflows. The recorded content acquisition was limited to the disposable Minecraft package and update plan described above.
 
 Consequently, EXT-002 remains partial and does not open XODUS-PHASE-002. The independent EXT-009 fixture prerequisite also remains partial.
