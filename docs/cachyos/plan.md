@@ -335,9 +335,9 @@ All items below are excluded from this plan's completion endpoint. Promotion req
 
 **Status:** PARTIAL
 
-The authorized account resolves current entitled package file lists for both targets. The sanitized discovery record is [target package discovery](./target-package-discovery.md). It proves the product identifiers, current content and package identifiers, MSIXVC format, x64 architecture, and current XSP update presence without downloading package bytes or retaining signed download URLs.
+The authorized account resolves current entitled package file lists for both targets. The sanitized discovery record is [target package discovery](./target-package-discovery.md). It proves the product identifiers, current content and package identifiers, MSIXVC format, x64 architecture, and current XSP update presence without retaining signed download URLs. An isolated Minecraft base package acquisition reached its authenticated size and produced manifest, dependency, entrypoint, protocol, capability, and protected-file inventory evidence without retaining decrypted executable or payload data outside the disposable package container.
 
-The remaining EXT-002 evidence still requires an authorized, isolated package acquisition and inspection to freeze each target's dependency graph, manifest entrypoint, protected-file inventory, Game Runtime imports, online services, and anti-cheat classification. Therefore EXT-002 does not yet satisfy the XODUS-PHASE-002 entry criterion. EXT-009 remains independently incomplete pending a reviewed legal fixture manifest.
+The remaining EXT-002 evidence requires complete transport-integrity evidence, Minecraft Game Runtime import and online-service inspection, anti-cheat classification, a real source-to-target update, and equivalent authorized Forza inspection. Therefore EXT-002 does not yet satisfy the XODUS-PHASE-002 entry criterion. EXT-009 remains independently incomplete pending a reviewed legal fixture manifest.
 
 ### EXT-009 Legal Fixture Status
 
