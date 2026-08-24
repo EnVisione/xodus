@@ -1,0 +1,122 @@
+{
+  "schema_version": 1,
+  "evidence_id": "xodus-upstream-overlap-2026-08-24",
+  "reviewed_at": "2026-08-24T04:16:10-05:00",
+  "baseline": {
+    "origin_main_commit": "b3d7fb210301aac66b8aaef16c0450dcfadd451c",
+    "upstream_main_commit": "b3d7fb210301aac66b8aaef16c0450dcfadd451c",
+    "origin_only_commits": 0,
+    "upstream_only_commits": 0
+  },
+  "decision_contract": {
+    "allowed_decisions": ["adopt", "supersede", "isolate", "defer"],
+    "rule": "Before a local edit touches an overlapping area, refresh the upstream item, compare its patch with the current phase requirement, record a new decision, and invalidate evidence affected by either patch."
+  },
+  "entries": [
+    {
+      "source": {
+        "kind": "pull-request",
+        "number": 156,
+        "url": "https://github.com/xodus-gaming/xodus/pull/156",
+        "title": "Resumable downloads, reclaimed install space, and the Xbox Live token chain",
+        "state": "open",
+        "merge_state": "blocked",
+        "updated_at": "2026-08-20T23:06:35Z"
+      },
+      "overlap": {
+        "areas": ["streaming", "package resolution", "run command", "service routing", "service XML", "Xbox authentication", "token management"],
+        "paths": [
+          "crates/msixvc/src/streaming.rs",
+          "crates/msixvc/src/xvd.rs",
+          "crates/xodus-cli/src/commands/run.rs",
+          "crates/xodus-cli/src/commands/streaming.rs",
+          "crates/xodus-service/src/connection/router.rs",
+          "crates/xodus-service/src/connection/xml.rs",
+          "crates/xodus/src/api/xbox/auth.rs",
+          "crates/xodus/src/tokens/manager.rs"
+        ]
+      },
+      "decision": "defer",
+      "reassessment_phase": "XODUS-PHASE-002",
+      "reason": "The pull request is blocked and Phase 1 changes only baseline evidence. Before any overlapping local implementation, compare the final upstream patch, adopt compatible changes or isolate the fork work behind stable interfaces."
+    },
+    {
+      "source": {
+        "kind": "pull-request",
+        "number": 147,
+        "url": "https://github.com/xodus-gaming/xodus/pull/147",
+        "title": "fix(hardware): report unreadable SMBIOS fields as errors instead of panicking",
+        "state": "open",
+        "merge_state": "blocked",
+        "updated_at": "2026-08-13T11:24:15Z"
+      },
+      "overlap": {
+        "areas": ["hardware identity", "SMBIOS error handling"],
+        "paths": ["crates/xodus/src/hardware.rs"]
+      },
+      "decision": "defer",
+      "reassessment_phase": "XODUS-PHASE-003",
+      "reason": "The pull request is blocked. Re-evaluate it when XODUS-REQ-005 hardens hardware identity and prefer adoption when its error behavior satisfies the phase contract."
+    },
+    {
+      "source": {
+        "kind": "pull-request",
+        "number": 136,
+        "url": "https://github.com/xodus-gaming/xodus/pull/136",
+        "title": "fix(msixvc): propagate 4 unwraps as errors instead of panicking",
+        "state": "open",
+        "merge_state": "dirty",
+        "updated_at": "2026-08-14T22:01:53Z"
+      },
+      "overlap": {
+        "areas": ["MSIXVC parser failures", "panic removal"],
+        "paths": ["crates/msixvc/src/xvd.rs"]
+      },
+      "decision": "defer",
+      "reassessment_phase": "XODUS-PHASE-002",
+      "reason": "The pull request is dirty. Re-evaluate its final patch before XODUS-REQ-002 and XODUS-REQ-004 implementation; do not copy an unmerged patch without the required malformed-input and recovery evidence."
+    },
+    {
+      "source": { "kind": "issue", "number": 73, "url": "https://github.com/xodus-gaming/xodus/issues/73", "title": "Gamepass compatibility", "state": "open", "updated_at": "2026-08-11T19:24:30Z" },
+      "decision": "defer",
+      "reassessment_phase": "XODUS-PHASE-008",
+      "reason": "Use as compatibility context only. Target evidence and the locked Xodus requirements remain authoritative."
+    },
+    {
+      "source": { "kind": "issue", "number": 106, "url": "https://github.com/xodus-gaming/xodus/issues/106", "title": "Undeterministic default executable in xodus-cli run", "state": "open", "updated_at": "2026-07-31T09:10:16Z" },
+      "decision": "defer",
+      "reassessment_phase": "XODUS-PHASE-005",
+      "reason": "The issue maps to deterministic entrypoint selection in XODUS-REQ-008. Re-evaluate before runtime orchestration changes."
+    },
+    {
+      "source": { "kind": "issue", "number": 120, "url": "https://github.com/xodus-gaming/xodus/issues/120", "title": "load_raw_smbios() hangs forever if no polkit auth agent is running", "state": "open", "updated_at": "2026-08-11T18:31:52Z" },
+      "decision": "defer",
+      "reassessment_phase": "XODUS-PHASE-003",
+      "reason": "The issue maps to bounded hardware probing in XODUS-REQ-005. Re-evaluate with the SMBIOS hardening work."
+    },
+    {
+      "source": { "kind": "issue", "number": 130, "url": "https://github.com/xodus-gaming/xodus/issues/130", "title": "streaming.rs panic behavior", "state": "open", "updated_at": "2026-08-12T03:53:31Z" },
+      "decision": "defer",
+      "reassessment_phase": "XODUS-PHASE-002",
+      "reason": "The issue maps to fallible package and transaction behavior in XODUS-REQ-002 and XODUS-REQ-003."
+    },
+    {
+      "source": { "kind": "issue", "number": 144, "url": "https://github.com/xodus-gaming/xodus/issues/144", "title": "parse_smbios panic behavior", "state": "open", "updated_at": "2026-08-13T10:43:42Z" },
+      "decision": "defer",
+      "reassessment_phase": "XODUS-PHASE-003",
+      "reason": "The issue maps to error-tolerant device identity probing in XODUS-REQ-005."
+    },
+    {
+      "source": { "kind": "issue", "number": 146, "url": "https://github.com/xodus-gaming/xodus/issues/146", "title": "SOAP decryption buffer panic", "state": "open", "updated_at": "2026-08-13T10:46:46Z" },
+      "decision": "defer",
+      "reassessment_phase": "XODUS-PHASE-003",
+      "reason": "The issue maps to typed authentication and licensing failure behavior in XODUS-REQ-005."
+    },
+    {
+      "source": { "kind": "issue", "number": 148, "url": "https://github.com/xodus-gaming/xodus/issues/148", "title": "Linux distribution packaging", "state": "open", "updated_at": "2026-08-16T10:20:40Z" },
+      "decision": "defer",
+      "reassessment_phase": "XODUS-PHASE-010",
+      "reason": "The issue maps to the repository local CachyOS PKGBUILD and release maintenance work in XODUS-REQ-021."
+    }
+  ]
+}

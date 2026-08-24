@@ -1,0 +1,1179 @@
+{
+  "schemaVersion": 2,
+  "planId": "PLAN-MASTER",
+  "planSetSha256": "45c480fb032b3937e4f4ae28d1b709aea652de9ef9b5ead413e2384ffbde5b41",
+  "planningSubject": {
+    "name": "Evolve the EnVisione Xodus fork into a CachyOS native, launcher neutral Game Pass PC launcher and runtime for Hyprland, Wayland, XWayland, and the NVIDIA RTX 5090 Laptop GPU",
+    "requestedArtifact": "authoritative_plan",
+    "planProfile": "software_product",
+    "sources": [
+      {
+        "id": "SRC-001",
+        "role": "owner_request",
+        "subject": "CachyOS Xodus product target and steps 6 through 10",
+        "source": "Current owner request and locked answers from August 24, 2026",
+        "use": "Establish mandatory scope, targets, performance gates, cloud boundary, release endpoint, and owner authority"
+      },
+      {
+        "id": "SRC-002",
+        "role": "audit_evidence",
+        "subject": "Current Xodus implementation and CachyOS compatibility state",
+        "source": "docs/cachyos/audit.md",
+        "use": "Primary evidence for current behavior, verified checks, platform state, defects, risks, and required work"
+      },
+      {
+        "id": "SRC-003",
+        "role": "requirements",
+        "subject": "Xodus project purpose, maturity, supported formats, and build contract",
+        "source": "README.md",
+        "use": "Preserve project identity, experimental status, encrypted executable behavior, GDK boundary, and custom Wine dependency"
+      },
+      {
+        "id": "SRC-004",
+        "role": "requirements",
+        "subject": "Xodus architecture, login, device, CLEP, and licensing contracts",
+        "source": "docs/xodus/README.md, docs/xodus/architecture.md, docs/xodus/login.md, docs/xodus/device.md, docs/xodus/clep.md, docs/xodus/licenses.md",
+        "use": "Preserve launcher neutrality, encrypted persistent content, reusable login, token, hardware, and license invariants"
+      },
+      {
+        "id": "SRC-005",
+        "role": "reference",
+        "subject": "Observed Microsoft, Xbox, Game Pass, and Game Runtime protocols",
+        "source": "docs/xbox/README.md, docs/xbox/MSAUserLogin.md, docs/xbox/gamepass.md, docs/xbox/gameruntime.md, docs/xbox/xboxlive.md, docs/xbox/xboxservices.md",
+        "use": "Constrain external protocol behavior and identify target required Game Runtime and service surfaces"
+      },
+      {
+        "id": "SRC-006",
+        "role": "repository_evidence",
+        "subject": "Current Rust workspace, implementation, tests, protocol schema, and continuous integration",
+        "source": "Cargo.toml, Cargo.lock, crates, scripts, rust-analyzer.toml, and .github/workflows/rust.yml at b3d7fb210301aac66b8aaef16c0450dcfadd451c",
+        "use": "Ground component ownership, dependency versions, data flow, test coverage, and release gaps"
+      },
+      {
+        "id": "SRC-007",
+        "role": "status",
+        "subject": "Fork, branch, commit, and remote identity",
+        "source": "Local Git state on envy/cachyos-audit with origin https://github.com/EnVisione/xodus.git and upstream https://github.com/xodus-gaming/xodus.git",
+        "use": "Pin planning baseline and distinguish fork work from active upstream work"
+      },
+      {
+        "id": "SRC-008",
+        "role": "reference",
+        "subject": "Exact model hardware specification and current RTX 5090 Laptop Forza Horizon 5 comparison context",
+        "source": "Lenovo Legion 9 18IAX10 PSREF, Notebookcheck exact model review, Windows Central ASUS ROG Strix SCAR 18 review, PurePC Forza Horizon 5 laptop measurements, and PC Watch Razer Blade 16 review, accessed August 24, 2026",
+        "use": "Qualify TGP, CPU, panel, power mode, cooling, driver, preset, resolution, and methodology while keeping local Linux gates authoritative"
+      },
+      {
+        "id": "SRC-009",
+        "role": "requirements",
+        "subject": "Repository documentation navigation and source of truth relationships",
+        "source": "docs/README.md",
+        "use": "Preserve index coverage, canonical links, and documentation topology during implementation and release"
+      }
+    ]
+  },
+  "profileContract": [
+    {
+      "area": "component architecture",
+      "status": "covered",
+      "source": "SRC-002",
+      "plan_section": "Architecture and Ownership Boundaries",
+      "rationale": "The audit and repository define crate ownership and the missing interfaces across Xodus, xgameruntime, Wine or Proton, desktop presentation, and external services"
+    },
+    {
+      "area": "determinism",
+      "status": "covered",
+      "source": "SRC-002",
+      "plan_section": "Determinism and Evidence Invalidation",
+      "rationale": "The audit requires deterministic entrypoints, runtime versions, prefix state, install promotion, per title policy, benchmark scenes, and normalized support evidence"
+    },
+    {
+      "area": "failure taxonomy",
+      "status": "covered",
+      "source": "SRC-002",
+      "plan_section": "Failure Taxonomy and Recovery",
+      "rationale": "The audit records invalid input, local, dependency, authorization, service, partial success, corruption, runtime, and performance failures requiring typed recovery behavior"
+    },
+    {
+      "area": "generalization",
+      "status": "covered",
+      "source": "DEC-009",
+      "plan_section": "Support Tiers and Generalization",
+      "rationale": "The locked support matrix distinguishes the exact Tier 1 machine, Tier 2 CachyOS Hyprland NVIDIA systems, and nonstable environments"
+    },
+    {
+      "area": "inputs and outputs",
+      "status": "covered",
+      "source": "SRC-001",
+      "plan_section": "Product Contract and Profile Coverage",
+      "rationale": "The owner request fixes interactive account input, package and title inputs, launcher workflows, graphical output, local execution, cloud handoff, telemetry, and release artifacts"
+    },
+    {
+      "area": "release lifecycle",
+      "status": "covered",
+      "source": "DEC-010",
+      "plan_section": "Documentation, Operations, and Release Gates",
+      "rationale": "The owner requires signed public GitHub artifacts and a repository local CachyOS PKGBUILD while excluding AUR publication"
+    },
+    {
+      "area": "security",
+      "status": "covered",
+      "source": "SRC-002",
+      "plan_section": "Security and Trust Boundaries",
+      "rationale": "The audit identifies path containment, secret handling, IPC authorization, package integrity, parser safety, entitlement, anti cheat, and logging boundaries"
+    },
+    {
+      "area": "state and persistence",
+      "status": "covered",
+      "source": "SRC-004",
+      "plan_section": "State, Persistence, and Schemas",
+      "rationale": "Existing documentation defines secret, device, license, and encrypted content state while the audit identifies required prefix, install, cache, profile, and benchmark state"
+    },
+    {
+      "area": "test system",
+      "status": "covered",
+      "source": "DEC-004",
+      "plan_section": "Verification Strategy",
+      "rationale": "The owner authorized bounded account backed tests and the audit supplies unit, fixture, integration, platform, performance, recovery, and real title evidence gaps"
+    },
+    {
+      "area": "versioning",
+      "status": "covered",
+      "source": "DEC-005",
+      "plan_section": "Versioning and Compatibility Contracts",
+      "rationale": "The locked coordinated repository choice requires product, schema, protocol, runtime artifact, prefix, title profile, and evidence versioning"
+    }
+  ],
+  "mandatoryRequirements": [
+    {
+      "id": "XODUS-REQ-001",
+      "summary": "Freeze a reproducible upstream, repository, CachyOS, hardware, driver, and runtime baseline before implementation",
+      "source": "SRC-001, SRC-002, SRC-007",
+      "owner": "release engineering",
+      "contributors": "workspace maintainers, runtime integration, performance harness",
+      "dependencies": [],
+      "lifecycleStage": "readiness",
+      "productionVerification": "none",
+      "releaseImpact": "stable release",
+      "canonicalPhase": "XODUS-PHASE-001"
+    },
+    {
+      "id": "XODUS-REQ-002",
+      "summary": "Make every package, parser, path, offset, string, license, network, and environment boundary safe and fallible",
+      "source": "SRC-002 findings A02 and A08",
+      "owner": "msixvc-common",
+      "contributors": "msixvc, xodus core, xodus-cli, xodus-service",
+      "dependencies": [
+        "EXT-009",
+        "XODUS-REQ-001"
+      ],
+      "lifecycleStage": "change",
+      "productionVerification": "none",
+      "releaseImpact": "stable release",
+      "canonicalPhase": "XODUS-PHASE-002"
+    },
+    {
+      "id": "XODUS-REQ-003",
+      "summary": "Provide truthful, resumable, integrity checked, atomic, recoverable download and install behavior",
+      "source": "SRC-002 findings A04 and A06",
+      "owner": "msixvc",
+      "contributors": "xodus-cli, native desktop application",
+      "dependencies": [
+        "EXT-008",
+        "EXT-009",
+        "XODUS-REQ-001",
+        "XODUS-REQ-002"
+      ],
+      "lifecycleStage": "change",
+      "productionVerification": "nondestructive",
+      "releaseImpact": "stable release",
+      "canonicalPhase": "XODUS-PHASE-002"
+    },
+    {
+      "id": "XODUS-REQ-004",
+      "summary": "Complete MSIXVC, MSIXVC2, and XSP install and update support within the GDK package boundary",
+      "source": "SRC-001, SRC-002 finding A09, DEC-006",
+      "owner": "msixvc",
+      "contributors": "msixvc-common, xodus core, xodus-cli",
+      "dependencies": [
+        "EXT-002",
+        "EXT-009",
+        "XODUS-REQ-002",
+        "XODUS-REQ-003"
+      ],
+      "lifecycleStage": "change",
+      "productionVerification": "nondestructive",
+      "releaseImpact": "stable release",
+      "canonicalPhase": "XODUS-PHASE-002"
+    },
+    {
+      "id": "XODUS-REQ-005",
+      "summary": "Harden device identity, login, entitlement, token, license, keyring, logout, and redaction lifecycles",
+      "source": "SRC-002 findings A07 and A10, SRC-004",
+      "owner": "xodus core",
+      "contributors": "xodus-cli, xodus-service, native desktop application",
+      "dependencies": [
+        "EXT-001",
+        "XODUS-REQ-001",
+        "XODUS-REQ-002"
+      ],
+      "lifecycleStage": "change",
+      "productionVerification": "nondestructive",
+      "releaseImpact": "stable release",
+      "canonicalPhase": "XODUS-PHASE-003"
+    },
+    {
+      "id": "XODUS-REQ-006",
+      "summary": "Secure and complete per user xodus service protocols for target required Game Runtime calls",
+      "source": "SRC-002 finding A03, SRC-005",
+      "owner": "xodus-service",
+      "contributors": "xodus core, xgameruntime integration",
+      "dependencies": [
+        "EXT-003",
+        "XODUS-REQ-002",
+        "XODUS-REQ-005",
+        "XODUS-REQ-007"
+      ],
+      "lifecycleStage": "change",
+      "productionVerification": "nondestructive",
+      "releaseImpact": "stable release",
+      "canonicalPhase": "XODUS-PHASE-004"
+    },
+    {
+      "id": "XODUS-REQ-007",
+      "summary": "Define reproducible versioned xgameruntime and Xodus compatible Wine or Proton artifact contracts",
+      "source": "SRC-001, SRC-002 finding A05, DEC-005",
+      "owner": "runtime integration",
+      "contributors": "xodus-service, release engineering",
+      "dependencies": [
+        "EXT-003",
+        "EXT-004",
+        "XODUS-REQ-001"
+      ],
+      "lifecycleStage": "change",
+      "productionVerification": "none",
+      "releaseImpact": "stable release",
+      "canonicalPhase": "XODUS-PHASE-004"
+    },
+    {
+      "id": "XODUS-REQ-008",
+      "summary": "Provide deterministic entrypoint, prefix, runtime deployment, process supervision, rollback, repair, and reset orchestration",
+      "source": "SRC-002 finding A05",
+      "owner": "runtime integration",
+      "contributors": "xodus-cli, xodus-service, native desktop application",
+      "dependencies": [
+        "EXT-004",
+        "XODUS-REQ-003",
+        "XODUS-REQ-004",
+        "XODUS-REQ-006",
+        "XODUS-REQ-007"
+      ],
+      "lifecycleStage": "change",
+      "productionVerification": "nondestructive",
+      "releaseImpact": "stable release",
+      "canonicalPhase": "XODUS-PHASE-005"
+    },
+    {
+      "id": "XODUS-REQ-009",
+      "summary": "Preserve launcher neutral CLI and service integration while adding a thin native graphical catalog and library application",
+      "source": "SRC-001, SRC-004, DEC-007",
+      "owner": "native desktop application",
+      "contributors": "xodus-cli, xodus-service, xodus core, runtime integration",
+      "dependencies": [
+        "XODUS-REQ-005",
+        "XODUS-REQ-008"
+      ],
+      "lifecycleStage": "change",
+      "productionVerification": "nondestructive",
+      "releaseImpact": "stable release",
+      "canonicalPhase": "XODUS-PHASE-005"
+    },
+    {
+      "id": "XODUS-REQ-010",
+      "summary": "Support native Wayland login, stable XWayland fallback, and correct 200 percent launcher scaling without game double scaling",
+      "source": "SRC-001, SRC-002 compatibility analysis",
+      "owner": "platform integration",
+      "contributors": "native desktop application, runtime integration",
+      "dependencies": [
+        "EXT-005",
+        "XODUS-REQ-008",
+        "XODUS-REQ-009"
+      ],
+      "lifecycleStage": "change",
+      "productionVerification": "nondestructive",
+      "releaseImpact": "stable release",
+      "canonicalPhase": "XODUS-PHASE-006"
+    },
+    {
+      "id": "XODUS-REQ-011",
+      "summary": "Apply measured Hyprland focus, fullscreen, cursor, scaling, VRR, direct scanout, and optional Gamescope policies",
+      "source": "SRC-001, SRC-002 finding A13",
+      "owner": "platform integration",
+      "contributors": "runtime integration, performance harness",
+      "dependencies": [
+        "EXT-005",
+        "XODUS-REQ-008",
+        "XODUS-REQ-010"
+      ],
+      "lifecycleStage": "change",
+      "productionVerification": "nondestructive",
+      "releaseImpact": "stable release",
+      "canonicalPhase": "XODUS-PHASE-006"
+    },
+    {
+      "id": "XODUS-REQ-012",
+      "summary": "Select and verify the RTX 5090 Laptop GPU and safe per launch power policy across 64 bit and 32 bit Vulkan paths",
+      "source": "SRC-001, SRC-002 NVIDIA analysis, SRC-008",
+      "owner": "platform integration",
+      "contributors": "runtime integration, performance harness",
+      "dependencies": [
+        "EXT-004",
+        "EXT-005",
+        "XODUS-REQ-007",
+        "XODUS-REQ-008"
+      ],
+      "lifecycleStage": "change",
+      "productionVerification": "nondestructive",
+      "releaseImpact": "stable release",
+      "canonicalPhase": "XODUS-PHASE-006"
+    },
+    {
+      "id": "XODUS-REQ-013",
+      "summary": "Select and prove per title DXVK or VKD3D Proton, shader cache, GameMode, MangoHud, Gamescope, frame cap, and presentation policy",
+      "source": "SRC-001, SRC-002 findings A12 and A13",
+      "owner": "runtime integration",
+      "contributors": "platform integration, performance harness",
+      "dependencies": [
+        "EXT-004",
+        "XODUS-REQ-007",
+        "XODUS-REQ-008",
+        "XODUS-REQ-011",
+        "XODUS-REQ-012"
+      ],
+      "lifecycleStage": "change",
+      "productionVerification": "nondestructive",
+      "releaseImpact": "stable release",
+      "canonicalPhase": "XODUS-PHASE-006"
+    },
+    {
+      "id": "XODUS-REQ-014",
+      "summary": "Complete authenticated catalog, entitlement, license, download, install, update, launch, shutdown, repair, and uninstall workflows",
+      "source": "SRC-001, SRC-002 finding A01",
+      "owner": "launcher domain",
+      "contributors": "xodus core, msixvc, runtime integration, native desktop application",
+      "dependencies": [
+        "EXT-001",
+        "EXT-002",
+        "EXT-003",
+        "EXT-004",
+        "EXT-008",
+        "XODUS-REQ-003",
+        "XODUS-REQ-004",
+        "XODUS-REQ-005",
+        "XODUS-REQ-006",
+        "XODUS-REQ-008",
+        "XODUS-REQ-009"
+      ],
+      "lifecycleStage": "change",
+      "productionVerification": "nondestructive",
+      "releaseImpact": "stable release",
+      "canonicalPhase": "XODUS-PHASE-007"
+    },
+    {
+      "id": "XODUS-REQ-015",
+      "summary": "Pass Minecraft for Windows as the local functional canary twice from a clean supported state",
+      "source": "SRC-001, SRC-002 target selection, DEC-001",
+      "owner": "compatibility validation",
+      "contributors": "launcher domain, runtime integration, xodus-service, performance harness",
+      "dependencies": [
+        "EXT-001",
+        "EXT-002",
+        "EXT-003",
+        "EXT-004",
+        "EXT-005",
+        "EXT-008",
+        "EXT-011",
+        "XODUS-REQ-014",
+        "XODUS-REQ-019"
+      ],
+      "lifecycleStage": "post_change",
+      "productionVerification": "nondestructive",
+      "releaseImpact": "stable release",
+      "canonicalPhase": "XODUS-PHASE-008"
+    },
+    {
+      "id": "XODUS-REQ-016",
+      "summary": "Pass Forza Horizon 5 locally under both locked absolute performance profiles",
+      "source": "SRC-001, SRC-002 target selection, DEC-001, DEC-002",
+      "owner": "compatibility validation",
+      "contributors": "launcher domain, runtime integration, platform integration, performance harness",
+      "dependencies": [
+        "EXT-001",
+        "EXT-002",
+        "EXT-003",
+        "EXT-004",
+        "EXT-005",
+        "EXT-008",
+        "EXT-011",
+        "XODUS-REQ-014",
+        "XODUS-REQ-017",
+        "XODUS-REQ-019"
+      ],
+      "lifecycleStage": "post_change",
+      "productionVerification": "nondestructive",
+      "releaseImpact": "stable release",
+      "canonicalPhase": "XODUS-PHASE-009"
+    },
+    {
+      "id": "XODUS-REQ-017",
+      "summary": "Capture repeatable performance, frame pacing, shader, GPU, VRAM, power, CPU, launch, and presentation evidence",
+      "source": "SRC-001, SRC-002 finding A12, SRC-008, DEC-003",
+      "owner": "performance harness",
+      "contributors": "platform integration, runtime integration",
+      "dependencies": [
+        "EXT-005",
+        "EXT-008",
+        "XODUS-REQ-012",
+        "XODUS-REQ-013"
+      ],
+      "lifecycleStage": "post_change",
+      "productionVerification": "nondestructive",
+      "releaseImpact": "stable release",
+      "canonicalPhase": "XODUS-PHASE-009"
+    },
+    {
+      "id": "XODUS-REQ-018",
+      "summary": "Classify unsupported anti cheat titles and hand them to the separate existing Xbox cloud application without bypass or native claims",
+      "source": "SRC-001, SRC-002 anti cheat boundary, DEC-008",
+      "owner": "compatibility catalog",
+      "contributors": "native desktop application, launcher domain",
+      "dependencies": [
+        "EXT-006",
+        "XODUS-REQ-009"
+      ],
+      "lifecycleStage": "change",
+      "productionVerification": "nondestructive",
+      "releaseImpact": "stable release",
+      "canonicalPhase": "XODUS-PHASE-007"
+    },
+    {
+      "id": "XODUS-REQ-019",
+      "summary": "Provide target required Game Runtime, identity, input, controller, audio, save, online, focus, suspend, resume, and shutdown behavior",
+      "source": "SRC-001, SRC-002 capability matrix, SRC-005, DEC-006",
+      "owner": "xgameruntime integration",
+      "contributors": "xodus-service, runtime integration, compatibility validation",
+      "dependencies": [
+        "EXT-002",
+        "EXT-003",
+        "EXT-004",
+        "XODUS-REQ-006",
+        "XODUS-REQ-007",
+        "XODUS-REQ-008"
+      ],
+      "lifecycleStage": "change",
+      "productionVerification": "nondestructive",
+      "releaseImpact": "stable release",
+      "canonicalPhase": "XODUS-PHASE-005"
+    },
+    {
+      "id": "XODUS-REQ-020",
+      "summary": "Maintain unit, fixture, integration, service, CLI, security, compatibility, account backed, performance, and end to end regression gates",
+      "source": "SRC-001, SRC-002 finding A11, DEC-004",
+      "owner": "verification engineering",
+      "contributors": "all component owners",
+      "dependencies": [
+        "XODUS-REQ-001"
+      ],
+      "lifecycleStage": "continuous",
+      "productionVerification": "none",
+      "releaseImpact": "stable release",
+      "canonicalPhase": "XODUS-PHASE-010"
+    },
+    {
+      "id": "XODUS-REQ-021",
+      "summary": "Produce signed public GitHub release artifacts, repository local CachyOS PKGBUILD, support matrix, documentation, checksums, SBOM, rollback, and maintenance policy",
+      "source": "SRC-001, SRC-002 repository baseline, DEC-010",
+      "owner": "release engineering",
+      "contributors": "documentation maintainers, verification engineering",
+      "dependencies": [
+        "EXT-007",
+        "EXT-010",
+        "XODUS-REQ-015",
+        "XODUS-REQ-016",
+        "XODUS-REQ-018",
+        "XODUS-REQ-020",
+        "XODUS-REQ-022"
+      ],
+      "lifecycleStage": "retention",
+      "productionVerification": "nondestructive",
+      "releaseImpact": "stable release",
+      "canonicalPhase": "XODUS-PHASE-010"
+    },
+    {
+      "id": "XODUS-REQ-022",
+      "summary": "Provide redacted diagnostics, support bundles, recovery evidence, and explicit evidence invalidation rules",
+      "source": "SRC-002 findings A03, A10, and A12",
+      "owner": "diagnostics",
+      "contributors": "all runtime component owners",
+      "dependencies": [
+        "XODUS-REQ-005",
+        "XODUS-REQ-006",
+        "XODUS-REQ-008",
+        "XODUS-REQ-017"
+      ],
+      "lifecycleStage": "continuous",
+      "productionVerification": "nondestructive",
+      "releaseImpact": "stable release",
+      "canonicalPhase": "XODUS-PHASE-010"
+    }
+  ],
+  "optionalFutureScope": [
+    {
+      "id": "FUT-001",
+      "summary": "Stable support for Linux distributions other than CachyOS",
+      "source": "DEC-009",
+      "disposition": "excluded"
+    },
+    {
+      "id": "FUT-002",
+      "summary": "Stable AMD and Intel GPU optimization profiles",
+      "source": "DEC-009",
+      "disposition": "excluded"
+    },
+    {
+      "id": "FUT-003",
+      "summary": "Completed macOS runtime and packaging support",
+      "source": "SRC-003",
+      "disposition": "excluded"
+    },
+    {
+      "id": "FUT-004",
+      "summary": "Non GDK, EAppx, and backward compatible package families",
+      "source": "DEC-006",
+      "disposition": "excluded"
+    },
+    {
+      "id": "FUT-005",
+      "summary": "Game Runtime APIs and Xbox features unused by supported titles",
+      "source": "DEC-006",
+      "disposition": "excluded"
+    },
+    {
+      "id": "FUT-006",
+      "summary": "A full visual clone of the Windows Xbox application beyond the thin native launcher",
+      "source": "DEC-007",
+      "disposition": "excluded"
+    },
+    {
+      "id": "FUT-007",
+      "summary": "HDR, external HDMI, multi monitor, and handheld specific presentation profiles beyond locked release displays",
+      "source": "SRC-002",
+      "disposition": "excluded"
+    },
+    {
+      "id": "FUT-008",
+      "summary": "Publication to the Arch User Repository",
+      "source": "DEC-010",
+      "disposition": "excluded"
+    },
+    {
+      "id": "FUT-009",
+      "summary": "Local execution of titles whose publisher intentionally rejects Wine or Linux",
+      "source": "DEC-008",
+      "disposition": "excluded"
+    }
+  ],
+  "nonGoals": [
+    {
+      "id": "NG-001",
+      "summary": "Bypass anti cheat or protected service controls",
+      "source": "SRC-001"
+    },
+    {
+      "id": "NG-002",
+      "summary": "Bypass ownership, entitlement, subscription, DRM, or licensing",
+      "source": "SRC-001, SRC-004"
+    },
+    {
+      "id": "NG-003",
+      "summary": "Persist protected executables decrypted on storage",
+      "source": "SRC-004"
+    },
+    {
+      "id": "NG-004",
+      "summary": "Treat cloud streaming as native compatibility evidence",
+      "source": "SRC-001"
+    },
+    {
+      "id": "NG-005",
+      "summary": "Force Gamescope, MangoHud, GameMode, VRR, tearing, or desktop wide tuning for every title",
+      "source": "SRC-002"
+    },
+    {
+      "id": "NG-006",
+      "summary": "Hardcode GPU power limits, clocks, firmware settings, kernel changes, or compositor wide settings",
+      "source": "SRC-002"
+    },
+    {
+      "id": "NG-007",
+      "summary": "Require Windows dual boot or a GPU passthrough virtual machine as the runtime",
+      "source": "DEC-003"
+    },
+    {
+      "id": "NG-008",
+      "summary": "Store credentials outside Secret Service or include secrets in logs, fixtures, telemetry, or support bundles",
+      "source": "SRC-002"
+    },
+    {
+      "id": "NG-009",
+      "summary": "Purchase content, change subscriptions, weaken account security, or destructively modify cloud saves",
+      "source": "DEC-004"
+    },
+    {
+      "id": "NG-010",
+      "summary": "Break existing portable core behavior solely to optimize the Tier 1 machine",
+      "source": "DEC-009"
+    }
+  ],
+  "ownerDecisions": [
+    {
+      "id": "DEC-001",
+      "question": "Must both selected target games run locally for stable completion",
+      "selectedChoice": "Minecraft for Windows and Forza Horizon 5 must both install, update, and run locally, and cloud does not substitute for either target.",
+      "rationale": "The targets prove both the functional Game Pass chain and a demanding graphics workload. A cloud result cannot validate the local runtime.",
+      "affectedRequirements": [
+        "XODUS-REQ-014",
+        "XODUS-REQ-015",
+        "XODUS-REQ-016",
+        "XODUS-REQ-019"
+      ],
+      "supersedes": []
+    },
+    {
+      "id": "DEC-002",
+      "question": "Which Forza Horizon 5 performance profiles are release authoritative",
+      "selectedChoice": "Use 3840 by 2400 High at stable 60 FPS and 2560 by 1600 High at stable 120 FPS on the internal panel, with locked frame time stability gates.",
+      "rationale": "The two profiles prove a high resolution quality path and a high refresh smoothness path on the Tier 1 panel.",
+      "affectedRequirements": [
+        "XODUS-REQ-013",
+        "XODUS-REQ-016",
+        "XODUS-REQ-017"
+      ],
+      "supersedes": []
+    },
+    {
+      "id": "DEC-003",
+      "question": "How is Windows performance context handled without Windows installation",
+      "selectedChoice": "Do not install or boot Windows. Use qualified current online RTX 5090 Laptop benchmarks only as context, keep absolute local Linux gates authoritative, and make no exact same hardware Windows parity claim.",
+      "rationale": "The owner rejects dual boot and temporary Windows media. Online measurements vary by TGP, CPU, cooling, driver, game revision, and method, so they cannot become the release threshold.",
+      "affectedRequirements": [
+        "XODUS-REQ-016",
+        "XODUS-REQ-017"
+      ],
+      "supersedes": []
+    },
+    {
+      "id": "DEC-004",
+      "question": "Which Game Pass account backed operations are authorized",
+      "selectedChoice": "Authorize bounded interactive login, device provisioning, entitlement, license, download, isolated install, update, launch, save, online, cloud fallback, logout, and local cleanup without purchases, credential extraction, subscription changes, or destructive cloud save operations.",
+      "rationale": "Real service and title evidence is required, but account authority remains narrow and secret values never enter repository content.",
+      "affectedRequirements": [
+        "XODUS-REQ-005",
+        "XODUS-REQ-014",
+        "XODUS-REQ-015",
+        "XODUS-REQ-016",
+        "XODUS-REQ-018",
+        "XODUS-REQ-019"
+      ],
+      "supersedes": []
+    },
+    {
+      "id": "DEC-005",
+      "question": "May completion coordinate xgameruntime and Wine or Proton work outside this repository",
+      "selectedChoice": "Authorize coordinated EnVisione forks or pinned patch artifacts for xgameruntime and Xodus compatible Wine or Proton with versioned interfaces and provenance.",
+      "rationale": "The audited repository cannot complete Game Runtime and protected executable execution by itself.",
+      "affectedRequirements": [
+        "XODUS-REQ-006",
+        "XODUS-REQ-007",
+        "XODUS-REQ-008",
+        "XODUS-REQ-014",
+        "XODUS-REQ-015",
+        "XODUS-REQ-016",
+        "XODUS-REQ-019"
+      ],
+      "supersedes": []
+    },
+    {
+      "id": "DEC-006",
+      "question": "Which package formats and Game Runtime API breadth are mandatory",
+      "selectedChoice": "Require MSIXVC2 and complete XSP update support for stable completion, exclude non GDK and EAppx, and defer broader Game Runtime APIs not required by supported targets.",
+      "rationale": "Stable package lifecycle coverage extends beyond the two targets, while runtime API work remains driven by supported title evidence.",
+      "affectedRequirements": [
+        "XODUS-REQ-002",
+        "XODUS-REQ-003",
+        "XODUS-REQ-004",
+        "XODUS-REQ-006",
+        "XODUS-REQ-019",
+        "XODUS-REQ-020"
+      ],
+      "supersedes": []
+    },
+    {
+      "id": "DEC-007",
+      "question": "Which user facing launcher surfaces are mandatory",
+      "selectedChoice": "Require launcher neutral CLI and service interfaces plus a thin native graphical catalog, library, install, update, and launch application.",
+      "rationale": "The graphical workflow must not duplicate domain logic or lock users into one launcher.",
+      "affectedRequirements": [
+        "XODUS-REQ-008",
+        "XODUS-REQ-009",
+        "XODUS-REQ-010",
+        "XODUS-REQ-014",
+        "XODUS-REQ-018"
+      ],
+      "supersedes": []
+    },
+    {
+      "id": "DEC-008",
+      "question": "How are unsupported anti cheat titles routed",
+      "selectedChoice": "Hand unsupported anti cheat titles to the existing Greenlight application named Xbox without credential sharing or cloud as native claims.",
+      "rationale": "Cloud is the allowed fallback for intentionally unsupported local execution, not a compatibility workaround or bypass.",
+      "affectedRequirements": [
+        "XODUS-REQ-018",
+        "XODUS-REQ-021",
+        "XODUS-REQ-022"
+      ],
+      "supersedes": []
+    },
+    {
+      "id": "DEC-009",
+      "question": "Which environments receive stable support claims",
+      "selectedChoice": "Tier 1 is the exact audited Lenovo Legion 9 18IAX10 RTX 5090 Laptop machine, Tier 2 is current CachyOS with Hyprland and supported NVIDIA drivers, and other distributions or GPUs receive no stable claim.",
+      "rationale": "The owner requires maximum Tier 1 performance without converting machine specific evidence into unsupported general claims.",
+      "affectedRequirements": [
+        "XODUS-REQ-001",
+        "XODUS-REQ-010",
+        "XODUS-REQ-011",
+        "XODUS-REQ-012",
+        "XODUS-REQ-013",
+        "XODUS-REQ-016",
+        "XODUS-REQ-017",
+        "XODUS-REQ-020",
+        "XODUS-REQ-021"
+      ],
+      "supersedes": []
+    },
+    {
+      "id": "DEC-010",
+      "question": "Which release and package endpoints are mandatory",
+      "selectedChoice": "Require signed public GitHub release artifacts and a validated repository local CachyOS PKGBUILD, and exclude AUR publication until separate authorization.",
+      "rationale": "Stable completion requires reproducible installable artifacts without silently authorizing a separate AUR publication endpoint.",
+      "affectedRequirements": [
+        "XODUS-REQ-020",
+        "XODUS-REQ-021",
+        "XODUS-REQ-022"
+      ],
+      "supersedes": []
+    }
+  ],
+  "externalPrerequisites": [
+    {
+      "id": "EXT-001",
+      "name": "Authorized active Game Pass Ultimate account",
+      "affected_requirements": [
+        "XODUS-REQ-005",
+        "XODUS-REQ-014",
+        "XODUS-REQ-015",
+        "XODUS-REQ-016",
+        "XODUS-REQ-019"
+      ],
+      "mandatory_for_endpoint": true,
+      "kind": "credential",
+      "availability": "available",
+      "authorization": "authorized",
+      "blocked_plan_approved": false,
+      "required_evidence": [
+        "Interactive sign in succeeds without exposing credentials",
+        "Account scope remains limited to the operations in DEC-004"
+      ]
+    },
+    {
+      "id": "EXT-002",
+      "name": "Verified target entitlements and current package metadata",
+      "affected_requirements": [
+        "XODUS-REQ-004",
+        "XODUS-REQ-014",
+        "XODUS-REQ-015",
+        "XODUS-REQ-016",
+        "XODUS-REQ-019"
+      ],
+      "mandatory_for_endpoint": true,
+      "kind": "service",
+      "availability": "unknown",
+      "authorization": "authorized",
+      "blocked_plan_approved": true,
+      "required_evidence": [
+        "Authorized catalog and entitlement responses for both target product IDs",
+        "Recorded package format, architecture, dependencies, entrypoint, protected files, Game Runtime imports, service requirements, and anti cheat classification"
+      ]
+    },
+    {
+      "id": "EXT-003",
+      "name": "Versioned xgameruntime artifact",
+      "affected_requirements": [
+        "XODUS-REQ-006",
+        "XODUS-REQ-007",
+        "XODUS-REQ-014",
+        "XODUS-REQ-015",
+        "XODUS-REQ-016",
+        "XODUS-REQ-019"
+      ],
+      "mandatory_for_endpoint": true,
+      "kind": "artifact",
+      "availability": "unknown",
+      "authorization": "authorized",
+      "blocked_plan_approved": true,
+      "required_evidence": [
+        "Artifact manifest binds the exact version and source revision",
+        "Reproducible build and compatibility tests pass against the selected service protocol"
+      ],
+      "artifact_evidence": [
+        "exact_version",
+        "authoritative_source",
+        "sha256",
+        "sha512",
+        "compatibility",
+        "license_provenance",
+        "security_review"
+      ]
+    },
+    {
+      "id": "EXT-004",
+      "name": "Versioned Xodus compatible Wine or Proton artifact",
+      "affected_requirements": [
+        "XODUS-REQ-007",
+        "XODUS-REQ-008",
+        "XODUS-REQ-012",
+        "XODUS-REQ-013",
+        "XODUS-REQ-014",
+        "XODUS-REQ-015",
+        "XODUS-REQ-016",
+        "XODUS-REQ-019"
+      ],
+      "mandatory_for_endpoint": true,
+      "kind": "artifact",
+      "availability": "unknown",
+      "authorization": "authorized",
+      "blocked_plan_approved": true,
+      "required_evidence": [
+        "Artifact manifest binds the exact source revision, patch series, build recipe, DXVK or VKD3D Proton versions, and runtime contents",
+        "Protected executable mapping and target compatibility tests pass"
+      ],
+      "artifact_evidence": [
+        "exact_version",
+        "authoritative_source",
+        "sha256",
+        "sha512",
+        "compatibility",
+        "license_provenance",
+        "security_review"
+      ]
+    },
+    {
+      "id": "EXT-005",
+      "name": "Audited Tier 1 CachyOS hardware and session",
+      "affected_requirements": [
+        "XODUS-REQ-010",
+        "XODUS-REQ-011",
+        "XODUS-REQ-012",
+        "XODUS-REQ-013",
+        "XODUS-REQ-015",
+        "XODUS-REQ-016",
+        "XODUS-REQ-017"
+      ],
+      "mandatory_for_endpoint": true,
+      "kind": "environment",
+      "availability": "available",
+      "authorization": "not_required",
+      "blocked_plan_approved": false,
+      "required_evidence": [
+        "Runtime snapshot records model 83EY, Core Ultra 9 275HX, RTX 5090 Laptop, 175 W design TGP, panel, CachyOS, kernel, Hyprland, XWayland, NVIDIA driver, Vulkan loader, and power profile",
+        "Benchmark runs use AC power and record cooling and thermal state"
+      ]
+    },
+    {
+      "id": "EXT-006",
+      "name": "Existing Greenlight application named Xbox with Xbox cloud entitlement",
+      "affected_requirements": [
+        "XODUS-REQ-018"
+      ],
+      "mandatory_for_endpoint": true,
+      "kind": "service",
+      "availability": "available",
+      "authorization": "authorized",
+      "blocked_plan_approved": false,
+      "required_evidence": [
+        "Desktop application discovery resolves the existing Xbox named Greenlight installation",
+        "An entitled cloud only compatibility fixture hands off without credential transfer"
+      ]
+    },
+    {
+      "id": "EXT-007",
+      "name": "Scoped public release publication approval",
+      "affected_requirements": [
+        "XODUS-REQ-021"
+      ],
+      "mandatory_for_endpoint": true,
+      "kind": "authorization",
+      "availability": "unknown",
+      "authorization": "unknown",
+      "blocked_plan_approved": true,
+      "required_evidence": [
+        "Owner approval binds the frozen release runbook digest and artifact manifest",
+        "Approval names the public fork, release tag, allowed publication operations, operator, time window, and rollback procedure"
+      ],
+      "scope_binding": [
+        "runbook_digest",
+        "artifact_identities",
+        "systems",
+        "operations",
+        "operators",
+        "time_window",
+        "rollback"
+      ]
+    },
+    {
+      "id": "EXT-008",
+      "name": "Local network and storage capacity",
+      "affected_requirements": [
+        "XODUS-REQ-003",
+        "XODUS-REQ-004",
+        "XODUS-REQ-014",
+        "XODUS-REQ-015",
+        "XODUS-REQ-016",
+        "XODUS-REQ-017"
+      ],
+      "mandatory_for_endpoint": true,
+      "kind": "capacity",
+      "availability": "available",
+      "authorization": "not_required",
+      "blocked_plan_approved": false,
+      "required_evidence": [
+        "Preflight records free space for both installs, retained recovery state, update workspace, telemetry, and 20 percent reserve",
+        "Connectivity preflight reaches required Microsoft and Xbox endpoints without recording credentials"
+      ]
+    },
+    {
+      "id": "EXT-009",
+      "name": "Versioned MSIXVC2 and XSP fixture corpus",
+      "affected_requirements": [
+        "XODUS-REQ-002",
+        "XODUS-REQ-003",
+        "XODUS-REQ-004",
+        "XODUS-REQ-020"
+      ],
+      "mandatory_for_endpoint": true,
+      "kind": "artifact",
+      "availability": "unknown",
+      "authorization": "authorized",
+      "blocked_plan_approved": true,
+      "required_evidence": [
+        "Corpus contains valid, malformed, truncated, adversarial path, integrity failure, update, rollback, and recovery fixtures",
+        "Manifest records fixture provenance and excludes credentials, content keys, protected executable plaintext, and redistributable content without permission"
+      ],
+      "artifact_evidence": [
+        "exact_version",
+        "authoritative_source",
+        "sha256",
+        "sha512",
+        "compatibility",
+        "license_provenance",
+        "security_review"
+      ]
+    },
+    {
+      "id": "EXT-010",
+      "name": "Tier 2 CachyOS Hyprland NVIDIA compatibility hardware",
+      "affected_requirements": [
+        "XODUS-REQ-020",
+        "XODUS-REQ-021"
+      ],
+      "mandatory_for_endpoint": true,
+      "kind": "environment",
+      "availability": "unknown",
+      "authorization": "not_required",
+      "blocked_plan_approved": true,
+      "required_evidence": [
+        "At least two independent Tier 2 systems cover one pre Blackwell NVIDIA GPU and one Blackwell NVIDIA GPU with current supported drivers",
+        "Each system records CachyOS snapshot, kernel, scheduler, Hyprland, native Wayland, XWayland, NVIDIA explicit synchronization, driver, Vulkan, display scale, runtime artifact, and compatibility results"
+      ]
+    },
+    {
+      "id": "EXT-011",
+      "name": "Authorized Minecraft and Forza update revision pairs",
+      "affected_requirements": [
+        "XODUS-REQ-015",
+        "XODUS-REQ-016"
+      ],
+      "mandatory_for_endpoint": true,
+      "kind": "service",
+      "availability": "unknown",
+      "authorization": "authorized",
+      "blocked_plan_approved": true,
+      "required_evidence": [
+        "Each target has an entitled source package revision and target package revision or an observed live update available to the authorized account",
+        "The update evidence permits a real local source to target transaction without redistributing package content or preserving decrypted protected executables"
+      ]
+    }
+  ],
+  "phases": [
+    {
+      "id": "XODUS-PHASE-001",
+      "owner": "release engineering",
+      "dependencies": [],
+      "canonicalRequirements": [
+        "XODUS-REQ-001"
+      ]
+    },
+    {
+      "id": "XODUS-PHASE-002",
+      "owner": "msixvc",
+      "dependencies": [
+        "EXT-002",
+        "EXT-008",
+        "EXT-009",
+        "XODUS-PHASE-001"
+      ],
+      "canonicalRequirements": [
+        "XODUS-REQ-002",
+        "XODUS-REQ-003",
+        "XODUS-REQ-004"
+      ]
+    },
+    {
+      "id": "XODUS-PHASE-003",
+      "owner": "xodus core",
+      "dependencies": [
+        "EXT-001",
+        "XODUS-PHASE-002"
+      ],
+      "canonicalRequirements": [
+        "XODUS-REQ-005"
+      ]
+    },
+    {
+      "id": "XODUS-PHASE-004",
+      "owner": "runtime integration",
+      "dependencies": [
+        "EXT-003",
+        "EXT-004",
+        "XODUS-PHASE-003"
+      ],
+      "canonicalRequirements": [
+        "XODUS-REQ-006",
+        "XODUS-REQ-007"
+      ]
+    },
+    {
+      "id": "XODUS-PHASE-005",
+      "owner": "launcher domain",
+      "dependencies": [
+        "EXT-002",
+        "XODUS-PHASE-004"
+      ],
+      "canonicalRequirements": [
+        "XODUS-REQ-008",
+        "XODUS-REQ-009",
+        "XODUS-REQ-019"
+      ]
+    },
+    {
+      "id": "XODUS-PHASE-006",
+      "owner": "platform integration",
+      "dependencies": [
+        "EXT-005",
+        "XODUS-PHASE-005"
+      ],
+      "canonicalRequirements": [
+        "XODUS-REQ-010",
+        "XODUS-REQ-011",
+        "XODUS-REQ-012",
+        "XODUS-REQ-013"
+      ]
+    },
+    {
+      "id": "XODUS-PHASE-007",
+      "owner": "launcher domain",
+      "dependencies": [
+        "EXT-001",
+        "EXT-002",
+        "EXT-006",
+        "EXT-008",
+        "XODUS-PHASE-006"
+      ],
+      "canonicalRequirements": [
+        "XODUS-REQ-014",
+        "XODUS-REQ-018"
+      ]
+    },
+    {
+      "id": "XODUS-PHASE-008",
+      "owner": "compatibility validation",
+      "dependencies": [
+        "EXT-001",
+        "EXT-002",
+        "EXT-003",
+        "EXT-004",
+        "EXT-005",
+        "EXT-008",
+        "EXT-011",
+        "XODUS-PHASE-007"
+      ],
+      "canonicalRequirements": [
+        "XODUS-REQ-015"
+      ]
+    },
+    {
+      "id": "XODUS-PHASE-009",
+      "owner": "performance harness",
+      "dependencies": [
+        "EXT-001",
+        "EXT-002",
+        "EXT-003",
+        "EXT-004",
+        "EXT-005",
+        "EXT-008",
+        "EXT-011",
+        "XODUS-PHASE-008"
+      ],
+      "canonicalRequirements": [
+        "XODUS-REQ-016",
+        "XODUS-REQ-017"
+      ]
+    },
+    {
+      "id": "XODUS-PHASE-010",
+      "owner": "release engineering",
+      "dependencies": [
+        "EXT-007",
+        "EXT-010",
+        "XODUS-PHASE-009"
+      ],
+      "canonicalRequirements": [
+        "XODUS-REQ-020",
+        "XODUS-REQ-021",
+        "XODUS-REQ-022"
+      ]
+    }
+  ],
+  "completionEndpoint": "Xodus stable release is complete only when the signed public CachyOS release and repository local PKGBUILD install on the Tier 1 Lenovo Legion 9 18IAX10, Minecraft for Windows and Forza Horizon 5 each pass the authorized local login, entitlement, license, clean install, update, two consecutive launch, runtime, save, shutdown, repair, and uninstall workflows, Forza passes both absolute performance profiles, Tier 2 compatibility gates pass, MSIXVC2 and XSP update support pass, unsupported anti cheat titles hand off separately to Xbox cloud gaming, all mandatory security, recovery, documentation, and release evidence passes, and no cloud result substitutes for either local target.",
+  "goalCreator": {
+    "mandatoryBoundary": "XODUS-REQ-001 through XODUS-REQ-022, including both local targets, both Forza profiles, Tier 2 compatibility, MSIXVC2, XSP updates, separate cloud fallback, and signed release packaging.",
+    "optionalFutureDisposition": "excluded",
+    "lockedOwnerDecisions": "DEC-001 through DEC-010 are resolved exactly as recorded in this plan.",
+    "activePhase": "XODUS-PHASE-001",
+    "nextExecutableAction": "Freeze the XODUS-REQ-001 baseline and upstream overlap manifest on a phase branch without starting later phases.",
+    "knownFailingChecks": "Clippy reports four warnings at the audited revision, and no account backed, service runtime, real package, target game, performance, Tier 2, or release acceptance run has passed.",
+    "knownExternalBlockers": "Verified target entitlements and current package metadata, Versioned xgameruntime artifact, Versioned Xodus compatible Wine or Proton artifact, Scoped public release publication approval, Versioned MSIXVC2 and XSP fixture corpus, Tier 2 CachyOS Hyprland NVIDIA compatibility hardware, Authorized Minecraft and Forza update revision pairs.",
+    "requiredEvidenceGates": "Sequential phase exits, complete deterministic tests, authorized local title lifecycles, target runtime traces, Forza telemetry, Tier 2 results, package lifecycle, security review, documentation, signatures, checksums, SBOM, public release inspection, fresh install, and rollback must pass."
+  }
+}
