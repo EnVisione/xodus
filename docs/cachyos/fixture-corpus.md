@@ -51,6 +51,14 @@ Both packages are ZIP based MSIXVC2 package containers. Their visible package me
 - `unzip -Z1` was used to inventory package members, and byte scans found no prohibited title, credential, key, or GDK component strings.
 - An isolated clean Cargo harness invoked the current `XspFile::parse_file` implementation. It accepted the valid XSP fixture with the expected two records and rejected the bad magic, bad record, and truncated variants.
 
+## Security Review
+
+The August 24, 2026 containment review covered all six tracked fixture files without reading or retaining any Secret Service value, package key, or title package. Both MSIXVC2 archives passed `unzip -tqq`. Their member names contain no absolute path, parent traversal, drive prefix, backslash path, or `.ekb` entry. Their uncompressed payloads are small generated metadata and fixture boxes, not an archive expansion hazard.
+
+Static scans found no bearer authorization value, XBL authorization form, password, client secret, access token, refresh token, content key, or `.ekb` marker. The only URL-like strings are fixed OpenXML, W3C XML signature, and `xbox.com/MSIXVC2` namespace identifiers. They are package format schema identifiers, not endpoints or signed download URLs.
+
+This review confirms containment of the tracked corpus. It does not certify the current package parsers or transaction paths. A bounded remote XVD inspection also confirmed that the current parser can panic on a failed seek; that independent Phase 2 defect is tracked in [issue 9](https://github.com/EnVisione/xodus/issues/9). The corpus has no repository test consumers yet, so Phase 2 must add them before format or transaction safety can be claimed.
+
 ## Remaining Work
 
-EXT-009 remains partial. Before it can become available, the corpus still needs deterministic malformed and truncated MSIXVC2 variants, adversarial path and integrity variants, XSP update rollback and recovery cases, repository test coverage that consumes each artifact, and a final security review. A real authorized package exercise remains mandatory evidence for XODUS-REQ-004 and cannot be replaced by these synthetic fixtures.
+EXT-009 remains partial. The containment security review is complete. Before it can become available, the corpus still needs deterministic malformed and truncated MSIXVC2 variants, adversarial path and integrity variants, XSP update rollback and recovery cases, and repository test coverage that consumes each artifact. A real authorized package exercise remains mandatory evidence for XODUS-REQ-004 and cannot be replaced by these synthetic fixtures.
