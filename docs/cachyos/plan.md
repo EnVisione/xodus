@@ -12,13 +12,15 @@
 Project: Xodus
 Requested artifact: authoritative_plan
 Repository root: /home/envy/Documents/Codex/2026-08-20/ca/work/xodus
-Starting branch: envy/cachyos-audit
-Starting commit: b3d7fb210301aac66b8aaef16c0450dcfadd451c
+Original planning baseline branch: envy/cachyos-audit
+Original planning baseline commit: b3d7fb210301aac66b8aaef16c0450dcfadd451c
+Starting branch: envy/target-metadata-evidence
+Starting commit: e0f99d95ee33308daf751c0a7187d45dd239dc17
 Authoritative remote:
 origin
 https://github.com/EnVisione/xodus.git
-Remote ref: untracked
-Remote commit: unavailable
+Remote ref: origin/envy/target-metadata-evidence
+Remote commit: e0f99d95ee33308daf751c0a7187d45dd239dc17
 ```
 
 Xodus is an experimental Rust workspace that authenticates with Microsoft and Xbox services, resolves entitled PC packages, obtains content licenses, streams and extracts protected package content, retains protected executables encrypted on storage, and hands executable mappings to a compatible Wine build. This plan governs the EnVisione fork and the coordinated, versioned compatibility artifacts required to complete the selected Game Pass workflows.
@@ -61,15 +63,16 @@ The intended outcome is not an Xbox branding clone. It is a launcher neutral Lin
 
 | Area | Evidence class | Finding | Evidence |
 | --- | --- | --- | --- |
-| Repository baseline | OBSERVED | The public EnVisione fork matched upstream `main` at the audited commit before the audit branch. The audit and this plan are not committed or pushed. | SRC-002, SRC-007 |
+| Repository and phase state | VERIFIED | XODUS-PHASE-001 merged into `main` at `7461e0763907869531b1eb27d444094801a367b4`, and signed tag `phase-001-baseline` verifies. The current evidence branch descends from that merge; `d0f99a8` records target and fixture evidence, and `e0f99d9` adds its containment review. | Commands `git merge-base --is-ancestor 7461e07 HEAD` and `git verify-tag phase-001-baseline` exited 0 at commit `e0f99d95ee33308daf751c0a7187d45dd239dc17`; [phase 001 verification](./phase-001-verification.md); [target package discovery](./target-package-discovery.md); [fixture corpus](./fixture-corpus.md) |
 | Rust workspace | VERIFIED | Formatting, metadata, debug checks, test compilation, offline tests, and release build passed on the audited CachyOS machine at `b3d7fb210301aac66b8aaef16c0450dcfadd451c`. Seventeen offline tests passed. | Commands and results executed at commit `b3d7fb210301aac66b8aaef16c0450dcfadd451c` in SRC-002 |
 | Static quality | VERIFIED | Clippy exited successfully with four warnings. CLI and service have no unit tests, and account backed tests were skipped. | `cargo clippy --workspace --all-targets --all-features` passed at commit `b3d7fb210301aac66b8aaef16c0450dcfadd451c`; SRC-002 |
 | Account and package foundations | OBSERVED | Login, token exchange, keyring storage, catalog lookup, licensing, MSIXVC parsing, encrypted executable retention, HTTP range streaming, and Wine handoff have implementations. | SRC-002, SRC-003, SRC-004, SRC-006 |
-| End to end game flow | UNKNOWN | No authorized entitlement, package install, `xgameruntime` exchange, protected executable launch, save, update, or real game execution has been run on this machine. | SRC-002 |
+| End to end game flow | OBSERVED | Authorized login and entitlement-backed discovery completed for both targets, followed by an isolated Minecraft metadata and protected-file inventory. No install, `xgameruntime` exchange, protected executable launch, save workflow, source-to-target update, or real game execution has passed. | [target package discovery](./target-package-discovery.md); SRC-002 |
 | Safety and reliability | OBSERVED | Package containment, complete integrity validation, CDN fallback, atomic promotion, truthful streaming exit status, malformed input handling, and crash recovery are incomplete. | SRC-002 findings A02, A04, A06, A08 |
 | Service | OBSERVED | The per user Unix socket exists in code, but same user enforcement, protocol completion, stale socket recovery, bounds, timeouts, and redaction are incomplete. | SRC-002 finding A03 |
 | Runtime orchestration | OBSERVED | Launch uses caller supplied Wine plus `WINE_DLL_FILE_MAP`; deterministic entrypoint selection, prefix lifecycle, runtime deployment, graphics selection, service supervision, and process recovery are absent. | SRC-002 finding A05 |
 | Package formats | OBSERVED | MSIXVC foundations exist, MSIXVC2 is unsupported, and XSP parsing does not provide a complete verified update workflow. | SRC-002 finding A09 |
+| Phase 002 entry evidence | OBSERVED | EXT-002 and EXT-009 are partial and unavailable. A bounded header-only Forza inspection retained no content and triggered the existing `XvdFile::parse` seek panic at `crates/msixvc/src/xvd.rs` line 363 under a 128 MiB stream. This is parser-failure evidence, not target compatibility. | [target package discovery](./target-package-discovery.md); [fixture corpus](./fixture-corpus.md); `crates/msixvc/src/xvd.rs`; `docs/cachyos/upstream-overlap.json` PR 136 entry |
 | Platform | OBSERVED | CachyOS, Hyprland, native Wayland, XWayland, NVIDIA 64 bit and 32 bit libraries, Vulkan, Gamescope, and MangoHud are present. The installed compositor, XWayland, kernel, and NVIDIA versions meet the audited explicit synchronization version requirements, but no integrated Xodus policy selects or verifies that path per title. | SRC-002 compatibility analysis |
 | Tier 1 hardware | OBSERVED | The local model identifies as Lenovo Legion 9 18IAX10 product `83EY`. Lenovo specifies a 175 W TGP RTX 5090 option. The exact model review records the same CPU, GPU class, 3840 by 2400 240 Hz panel, 175 W design, and Performance plus GPU overclock test mode. | SRC-002, SRC-008 |
 | Performance | UNKNOWN | Xodus has no frame time schema, stable benchmark scene, shader event capture, hardware snapshot, regression budget, or target game result. | SRC-002 finding A12 |
@@ -307,14 +310,14 @@ All items below are excluded from this plan's completion endpoint. Promotion req
 | ID | Prerequisite | Affected requirements | Availability | Authorization | Required external action |
 | --- | --- | --- | --- | --- | --- |
 | EXT-001 | Authorized active Game Pass Ultimate account | XODUS-REQ-005, XODUS-REQ-014, XODUS-REQ-015, XODUS-REQ-016, XODUS-REQ-019 | available | authorized | Use interactive sign in only under DEC-004 and retain redacted evidence. |
-| EXT-002 | Verified target entitlements and current package metadata | XODUS-REQ-004, XODUS-REQ-014, XODUS-REQ-015, XODUS-REQ-016, XODUS-REQ-019 | partial | authorized | Query both target products and freeze entitlement, package, entrypoint, runtime, service, and anti cheat metadata. |
+| EXT-002 | Verified target entitlements and current package metadata | XODUS-REQ-004, XODUS-REQ-014, XODUS-REQ-015, XODUS-REQ-016, XODUS-REQ-019 | unavailable | authorized | Query both target products and freeze entitlement, package, entrypoint, runtime, service, and anti cheat metadata. |
 | EXT-003 | Versioned xgameruntime artifact | XODUS-REQ-006, XODUS-REQ-007, XODUS-REQ-014, XODUS-REQ-015, XODUS-REQ-016, XODUS-REQ-019 | unknown | authorized | Produce and review a pinned artifact manifest and compatible build. |
 | EXT-004 | Versioned Xodus compatible Wine or Proton artifact | XODUS-REQ-007, XODUS-REQ-008, XODUS-REQ-012, XODUS-REQ-013, XODUS-REQ-014, XODUS-REQ-015, XODUS-REQ-016, XODUS-REQ-019 | unknown | authorized | Produce and review a pinned artifact manifest, patch series, runtime, and build. |
 | EXT-005 | Audited Tier 1 CachyOS hardware and session | XODUS-REQ-010, XODUS-REQ-011, XODUS-REQ-012, XODUS-REQ-013, XODUS-REQ-015, XODUS-REQ-016, XODUS-REQ-017 | available | not_required | Capture a fresh runtime snapshot for each acceptance run. |
 | EXT-006 | Existing Greenlight application named Xbox with Xbox cloud entitlement | XODUS-REQ-018 | available | authorized | Verify desktop discovery and one entitled cloud fallback handoff. |
 | EXT-007 | Scoped public release publication approval | XODUS-REQ-021 | unknown | unknown | Approve the frozen runbook, artifacts, repository, operations, operator, time window, and rollback before publication. |
 | EXT-008 | Local network and storage capacity | XODUS-REQ-003, XODUS-REQ-004, XODUS-REQ-014, XODUS-REQ-015, XODUS-REQ-016, XODUS-REQ-017 | available | not_required | Recheck endpoint connectivity and capacity before title and release work. |
-| EXT-009 | Versioned MSIXVC2 and XSP fixture corpus | XODUS-REQ-002, XODUS-REQ-003, XODUS-REQ-004, XODUS-REQ-020 | partial | authorized | Produce a provenance reviewed legal corpus of valid and adversarial fixtures. |
+| EXT-009 | Versioned MSIXVC2 and XSP fixture corpus | XODUS-REQ-002, XODUS-REQ-003, XODUS-REQ-004, XODUS-REQ-020 | unavailable | authorized | Produce a provenance reviewed legal corpus of valid and adversarial fixtures. |
 | EXT-010 | Tier 2 CachyOS Hyprland NVIDIA compatibility hardware | XODUS-REQ-020, XODUS-REQ-021 | unknown | not_required | Provide at least two independent Tier 2 systems covering pre Blackwell and Blackwell NVIDIA hardware. |
 | EXT-011 | Authorized Minecraft and Forza update revision pairs | XODUS-REQ-015, XODUS-REQ-016 | unknown | authorized | Provide an entitled source and target package revision pair or an observed live update for each local target. |
 
@@ -337,7 +340,9 @@ All items below are excluded from this plan's completion endpoint. Promotion req
 
 The authorized account resolves current entitled package file lists for both targets. The sanitized discovery record is [target package discovery](./target-package-discovery.md). It proves the product identifiers, current content and package identifiers, MSIXVC format, x64 architecture, and current XSP update presence without retaining signed download URLs. An isolated Minecraft base package acquisition reached its authenticated size and produced manifest, dependency, entrypoint, protocol, capability, and protected-file inventory evidence without retaining decrypted executable or payload data outside the disposable package container.
 
-The remaining EXT-002 evidence requires complete transport-integrity evidence, Minecraft Game Runtime import and online-service inspection, anti-cheat classification, a real source-to-target update, and equivalent authorized Forza inspection. Therefore EXT-002 does not yet satisfy the XODUS-PHASE-002 entry criterion. EXT-009 remains independently incomplete pending a reviewed legal fixture manifest.
+**Observed bounded-inspection result:** A header-only Forza inspection used a 128 MiB stream, retained no package content, and ended when `XvdFile::parse` panicked at `crates/msixvc/src/xvd.rs` line 363 after a failed seek. This is XODUS-REQ-002 fallibility evidence, not a target compatibility result. Upstream PR [136](https://github.com/xodus-gaming/xodus/pull/136) proposes error propagation, and the overlap matrix already defers reassessment to XODUS-PHASE-002. The observation starts no implementation and changes no overlap decision.
+
+The remaining EXT-002 evidence requires complete transport-integrity evidence, Minecraft Game Runtime import and online-service inspection, anti-cheat classification, a real source-to-target update, and a successful equivalent authorized Forza inspection. Therefore EXT-002 remains PARTIAL in progress reporting and unavailable for the XODUS-PHASE-002 entry gate. EXT-009 remains independently incomplete.
 
 ### EXT-009 Legal Fixture Status
 
@@ -345,9 +350,9 @@ The remaining EXT-002 evidence requires complete transport-integrity evidence, M
 
 The owner has explicitly asserted rights for the required fixture creation, retention, and publication. That authorization permits the isolated GDK based fixture workflow to proceed. The official Microsoft GDK terms still prohibit placing GDK components in this repository, so the corpus workflow must record source, exact rights scope, generated artifact digests, compatibility, and the security review before any fixture is tracked. The tracked investigation is [issue 8](https://github.com/EnVisione/xodus/issues/8).
 
-EXT-009 becomes available only after a provenance reviewed legal manifest records the generated corpus and validation evidence. The existing MSIXVC and XSP package metadata cannot substitute for MSIXVC2 fixtures.
+EXT-009 becomes available for entry only after its valid, malformed, truncated, adversarial-path, integrity-failure, update, rollback, and recovery set plus versioned manifest pass provenance, redistribution-rights, digest, compatibility, license, and security review. Repository tests that consume the corpus are XODUS-PHASE-002 implementation and exit evidence; making them an entry prerequisite would create a circular gate.
 
-The current partial corpus and its containment review are recorded in [MSIXVC2 fixture corpus](./fixture-corpus.md). It contains two project owned MSIXVC2 packages and four project owned XSP parser fixtures. It does not yet satisfy the full EXT-009 evidence contract.
+The [current corpus](./fixture-corpus.md) has two project-owned MSIXVC2 packages and four XSP parser fixtures. Its August 24, 2026 review rechecked hashes and archive integrity, rejected unsafe paths and `.ekb` entries, and found no target content, secret, key, or GDK component; URL-like strings were fixed schema identifiers. This closes containment review for those six files only. EXT-009 remains PARTIAL and unavailable because required fixtures and final review of the completed entry set remain. Target metadata cannot substitute for the corpus.
 
 ### Urgent Login Rendering Maintenance Exception
 
@@ -955,8 +960,11 @@ Dependency direction remains toward shared domain libraries. Platform profile an
 
 Phases are sequential. A later phase cannot begin until the previous phase is merged through the repository workflow and its exit evidence remains valid.
 
+Current roadmap state is XODUS-PHASE-002 at its entry gate, not in implementation. XODUS-PHASE-001 is completed and merged. EXT-008 is available, while EXT-002 and EXT-009 remain PARTIAL in evidence progress and unavailable for entry; those two prerequisites block XODUS-PHASE-002 from starting.
+
 ### XODUS-PHASE-001 - Freeze Baseline and Upstream Strategy
 
+**Status:** COMPLETED
 **Owner:** release engineering
 **Dependencies:** none
 **Canonical requirements:** XODUS-REQ-001
@@ -980,15 +988,21 @@ Phases are sequential. A later phase cannot begin until the previous phase is me
 - Every later phase has a stable baseline and evidence invalidation contract.
 - No known mandatory phase owned defect remains.
 
+**Completion record:** VERIFIED. XODUS-PHASE-001 merged into `main` at `7461e0763907869531b1eb27d444094801a367b4`. Signed tag `phase-001-baseline` verifies and is an ancestor of the evidence branch. Its evidence remains subject to the recorded invalidation contract.
+
 ### XODUS-PHASE-002 - Secure Package Formats and Content Transactions
 
+**Status:** ENTRY BLOCKED
 **Owner:** msixvc
 **Dependencies:** XODUS-PHASE-001, EXT-002, EXT-008, EXT-009
 **Canonical requirements:** XODUS-REQ-002, XODUS-REQ-003, XODUS-REQ-004
 
 **Entry criteria**
 
-- XODUS-PHASE-001 is merged, EXT-002 provides current authorized target package metadata, EXT-008 passes capacity preflight, and EXT-009 has a reviewed legal fixture manifest.
+- XODUS-PHASE-001 is merged, EXT-002 provides the complete current authorized target package metadata contract, EXT-008 passes capacity preflight, and EXT-009's preimplementation fixture set and manifest pass the provenance, redistribution-rights, digest, compatibility, license, and security evidence contract.
+- Repository tests that consume EXT-009 fixtures are phase implementation and exit evidence, not a phase-entry dependency.
+
+**Current entry gate:** BLOCKED on EXT-002 and EXT-009. Phase 001 is merged and EXT-008 is available, but the two partial evidence records do not satisfy their entry contracts. No XODUS-PHASE-002 implementation has started.
 
 **Implementation scope**
 
@@ -1299,10 +1313,10 @@ Xodus stable release is complete only when the signed public CachyOS release and
 Mandatory boundary: XODUS-REQ-001 through XODUS-REQ-022, including both local targets, both Forza profiles, Tier 2 compatibility, MSIXVC2, XSP updates, separate cloud fallback, and signed release packaging.
 Optional/future disposition: excluded
 Locked owner decisions: DEC-001 through DEC-010 are resolved exactly as recorded in this plan.
-Active phase: XODUS-PHASE-001
-Next executable action: Freeze the XODUS-REQ-001 baseline and upstream overlap manifest on a phase branch without starting later phases.
-Known failing checks: Clippy reports four warnings at the audited revision, and no account backed, service runtime, real package, target game, performance, Tier 2, or release acceptance run has passed.
-Known external blockers: Verified target entitlements and current package metadata, Versioned xgameruntime artifact, Versioned Xodus compatible Wine or Proton artifact, Scoped public release publication approval, Versioned MSIXVC2 and XSP fixture corpus, Tier 2 CachyOS Hyprland NVIDIA compatibility hardware, Authorized Minecraft and Forza update revision pairs.
+Active phase: XODUS-PHASE-002
+Next executable action: Close only the EXT-002 target-metadata and EXT-009 legal fixture-corpus entry evidence contracts, including their required review, without beginning XODUS-PHASE-002 implementation.
+Known failing checks: Phase 001 baseline verification passed, while Clippy still reports four warnings at the frozen revision. An OBSERVED bounded header-only Forza metadata inspection retained no content and panicked in XvdFile::parse at crates/msixvc/src/xvd.rs line 363 after a failed seek under the 128 MiB stream. No package install, service-runtime, target-game, performance, Tier 2, or release acceptance run has passed.
+Known external blockers: Current phase-entry blockers are EXT-002, Verified target entitlements and current package metadata, and EXT-009, Versioned MSIXVC2 and XSP fixture corpus. Later endpoint blockers remain EXT-003, Versioned xgameruntime artifact, EXT-004, Versioned Xodus compatible Wine or Proton artifact, EXT-007, Scoped public release publication approval, EXT-010, Tier 2 CachyOS Hyprland NVIDIA compatibility hardware, and EXT-011, Authorized Minecraft and Forza update revision pairs.
 Completion endpoint: Xodus stable release is complete only when the signed public CachyOS release and repository local PKGBUILD install on the Tier 1 Lenovo Legion 9 18IAX10, Minecraft for Windows and Forza Horizon 5 each pass the authorized local login, entitlement, license, clean install, update, two consecutive launch, runtime, save, shutdown, repair, and uninstall workflows, Forza passes both absolute performance profiles, Tier 2 compatibility gates pass, MSIXVC2 and XSP update support pass, unsupported anti cheat titles hand off separately to Xbox cloud gaming, all mandatory security, recovery, documentation, and release evidence passes, and no cloud result substitutes for either local target.
 Required evidence gates: Sequential phase exits, complete deterministic tests, authorized local title lifecycles, target runtime traces, Forza telemetry, Tier 2 results, package lifecycle, security review, documentation, signatures, checksums, SBOM, public release inspection, fresh install, and rollback must pass.
 ```
