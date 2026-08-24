@@ -17,7 +17,7 @@ No credential, token, account identifier, signed download URL, package byte, pro
 | Target | Product ID | Content ID | Package ID | Current base artifact | Format and architecture | Entitled dry-run result |
 | --- | --- | --- | --- | --- | --- | --- |
 | Minecraft for Windows | `9NBLGGH2JHXJ` | `7792d9ce-355a-493c-afbd-768f4a77c3b0` | `f3d5f025-2d08-471d-9851-390f1c702dd3` | `Microsoft.MinecraftUWP_1.26.4403.0_x64__8wekyb3d8bbwe.msixvc`, 2,490,064,896 bytes | MSIXVC, x64 | Success. 12 XSP update objects, totaling 143,904 bytes, were listed. |
-| Forza Horizon 5 | `9NNX1VVR3KNQ` | `3d263e92-93cd-4f9b-90c7-5438150cecbf` | `b41e5a9c-6ed9-47e7-8afd-7c6d356fb7aa` | `Microsoft.624F8B84B80_3.688.109.0_x64__8wekyb3d8bbwe.msixvc`, 159,934,996,480 bytes | MSIXVC, x64 | Success. 14 XSP update objects, totaling 516,112 bytes, were listed. |
+| Forza Horizon 5 | `9NNX1VVR3KNQ` | `3d263e92-93cd-4f9b-90c7-5438150cecbf` | `b41e5a9c-6ed9-47e7-8afd-7c6d356fb7aa` | `Microsoft.624F8B84B80_3.688.109.0_x64__8wekyb3d8bbwe.msixvc`, 159,934,996,480 bytes | MSIXVC, x64 | Success. 14 XSP update objects, totaling 516,112 bytes, were listed. The smallest XSP was also inspected under the bounded metadata workflow below. |
 
 The public DisplayCatalog result and the authenticated `GetBasePackage` result agree on the product, content, package format, and x64 architecture for both targets. The authenticated dry-run completed successfully for every selected file without a package download.
 
@@ -45,6 +45,14 @@ The plan declares an update from version `1.26.301.0` to `1.26.4403.0`, 2,489,81
 
 This proves a current Minecraft update-plan metadata shape and parser exercise. It is not a downloaded source package, applied update, integrity verification, rollback, recovery drill, or XODUS-REQ-015 lifecycle result. It therefore does not satisfy EXT-011 or reduce the remaining EXT-002 gate.
 
+### Isolated Forza Update Plan Inspection
+
+One current Forza XSP update plan was selected from the entitled package listing and read under the same 1 MiB response limit. The response size matched its 35,920 byte package-listing entry. The current `XspFile` parser accepted it and reported 1,989 patch records, 1,986 new-data records, and 3 copy-data records.
+
+The plan declares an update from version `3.687.302.0` to `3.688.109.0`, 159,925,977,088 update bytes, and 159,934,996,480 required disk bytes. The matching package-listing `FileHash` field was empty. The inspection therefore confirms exact response-size consistency but had no source-supplied file hash to verify. No XSP, base package, payload segment, key, signed URL, or decrypted executable was retained after parsing.
+
+This is current Forza update-plan metadata and parser evidence only. It does not inspect the 159,934,996,480 byte base package, prove a source-to-target update, establish transport integrity, apply a plan, perform rollback or recovery, demonstrate Game Runtime or online-service compatibility, classify anti-cheat behavior, or satisfy a lifecycle requirement.
+
 ## Reproduction Boundary
 
 Use the current `xodus-cli` release binary with the persisted account state, the neutral market, and the product ID:
@@ -57,6 +65,6 @@ This flow is interactive because the current CLI asks which package files to enu
 
 ## Remaining EXT-002 Work
 
-This evidence is intentionally incomplete. Minecraft now has an isolated manifest, dependency, entrypoint, protocol, capability, protected-file inventory, and current update-plan record. It does not yet freeze Minecraft Game Runtime imports, online-service behavior, anti-cheat classification, transport-integrity verification, or a source-to-target update pair. Forza still lacks an isolated package inspection. Those remaining facts require subsequent authorized, isolated workflows. The recorded content acquisition was limited to the disposable Minecraft package and update plan described above.
+This evidence is intentionally incomplete. Minecraft now has an isolated manifest, dependency, entrypoint, protocol, capability, protected-file inventory, and current update-plan record. Forza now has a bounded current update-plan record, but still lacks an isolated base-package inspection. Neither target freezes Game Runtime imports, online-service behavior, anti-cheat classification, transport-integrity verification, or a source-to-target update pair. Those remaining facts require subsequent authorized, isolated workflows. The only retained acquisition evidence is the sanitized metadata described above.
 
-Consequently, EXT-002 remains partial and does not open XODUS-PHASE-002. The independent EXT-009 fixture prerequisite also remains partial.
+Consequently, EXT-002 remains partial and does not open XODUS-PHASE-002. EXT-009 is independently available as synthetic entry evidence only; it does not replace any real target-package requirement.

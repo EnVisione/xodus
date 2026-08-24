@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "planId": "PLAN-MASTER",
-  "planSetSha256": "0291725475ef4d1b9b86364c750bc7e454165096df15488148d6e9fd0c8cc235",
+  "planSetSha256": "944113198f4ff5511bc10f76cf47f55aff82e1bdbd5086f7357dc736b2de886b",
   "planningSubject": {
     "name": "Evolve the EnVisione Xodus fork into a CachyOS native, launcher neutral Game Pass PC launcher and runtime for Hyprland, Wayland, XWayland, and the NVIDIA RTX 5090 Laptop GPU",
     "requestedArtifact": "authoritative_plan",
@@ -74,7 +74,7 @@
         "id": "SRC-010",
         "role": "audit_evidence",
         "subject": "Completed EXT-009 entry corpus provenance, digest, rights-boundary, compatibility, and security review",
-        "source": "docs/cachyos/fixture-corpus.md based on 85b725beecaad3c088b64b5e7eaa3c7cb0528ad2",
+        "source": "docs/cachyos/fixture-corpus.md at 0dca62b2d05b0e2dccd0174ee7b0ceba7a534d86",
         "use": "Classify EXT-009 entry availability while preserving the limits on synthetic fixtures, real package behavior, and Phase 2 test consumers"
       },
       {
@@ -83,6 +83,13 @@
         "subject": "Synthetic XSP rollback descriptor and interrupted-update recovery input",
         "source": "crates/msixvc/testdata/xsp/xodus-fixture-rollback.xsp and crates/msixvc/testdata/xsp/xodus-fixture-recovery-interrupted.xsp",
         "use": "Treat both binaries as Phase 2 acceptance fixtures for future parser, rollback-policy, and no-mutation recovery tests, never as real package apply, rollback, or recovery evidence"
+      },
+      {
+        "id": "SRC-012",
+        "role": "audit_evidence",
+        "subject": "Bounded authorized Forza XSP descriptor fetch and parse evidence",
+        "source": "docs/cachyos/target-package-discovery.md recorded against implementation revision 0dca62b2d05b0e2dccd0174ee7b0ceba7a534d86",
+        "use": "Update EXT-002 discovery status with exact response-size and update-plan metadata while preserving the empty FileHash, no transport-integrity claim, retained-data limits, and Phase 2 entry block"
       }
     ]
   },
@@ -1186,8 +1193,8 @@
     "optionalFutureDisposition": "excluded",
     "lockedOwnerDecisions": "DEC-001 through DEC-010 are resolved exactly as recorded in this plan.",
     "activePhase": "XODUS-PHASE-002",
-    "nextExecutableAction": "Close only EXT-002 target-metadata evidence, including its remaining transport-integrity, Minecraft Game Runtime, online-service, anti-cheat, real source-to-target update, and successful equivalent Forza inspection evidence, without beginning XODUS-PHASE-002 implementation.",
-    "knownFailingChecks": "Phase 001 baseline verification passed, while Clippy still reports four warnings at the frozen revision. At pre-change implementation branch HEAD 85b725beecaad3c088b64b5e7eaa3c7cb0528ad2, EXT-009 entry artifact evidence is complete but no XODUS-PHASE-002 parser or transaction consumer tests have run. An OBSERVED bounded header-only Forza metadata inspection retained no content and panicked in XvdFile::parse at crates/msixvc/src/xvd.rs line 363 after a failed seek under the 128 MiB stream. No real package apply or recovery, package install, service-runtime, target-game, performance, Tier 2, or release acceptance run has passed.",
+    "nextExecutableAction": "Close only EXT-002 target-metadata evidence, including its remaining transport-integrity verification, Minecraft and Forza Game Runtime imports, online-service and anti-cheat evidence, real source-to-target update evidence, and isolated Forza base-package inspection, without beginning XODUS-PHASE-002 implementation.",
+    "knownFailingChecks": "Phase 001 baseline verification passed, while Clippy still reports four warnings at the frozen revision. At pre-change implementation branch HEAD 0dca62b2d05b0e2dccd0174ee7b0ceba7a534d86, EXT-009 synthetic entry artifact evidence is complete but no XODUS-PHASE-002 parser or transaction consumer tests have run. A prior OBSERVED bounded header-only Forza base-package inspection retained no content and panicked in XvdFile::parse at crates/msixvc/src/xvd.rs line 363 after a failed seek under the 128 MiB stream. A separate OBSERVED bounded 35,920 byte Forza XSP descriptor fetch matched the response size and parsed 1,989 records for update 3.687.302.0 to 3.688.109.0, but its empty package-listing FileHash permits no transport-integrity claim. No payload or URL was retained. No real package apply or recovery, package install, service-runtime, target-game, performance, Tier 2, or release acceptance run has passed.",
     "knownExternalBlockers": "The current phase-entry blocker is EXT-002, Verified target entitlements and current package metadata. Later endpoint blockers remain EXT-003, Versioned xgameruntime artifact, EXT-004, Versioned Xodus compatible Wine or Proton artifact, EXT-007, Scoped public release publication approval, EXT-010, Tier 2 CachyOS Hyprland NVIDIA compatibility hardware, and EXT-011, Authorized Minecraft and Forza update revision pairs.",
     "requiredEvidenceGates": "Sequential phase exits, complete deterministic tests including XODUS-PHASE-002 corpus consumers, authorized real-package apply and recovery exercises, authorized local title lifecycles, target runtime traces, Forza telemetry, Tier 2 results, package lifecycle, security review, documentation, signatures, checksums, SBOM, public release inspection, fresh install, and rollback must pass."
   }
