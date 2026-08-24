@@ -331,6 +331,36 @@ All items below are excluded from this plan's completion endpoint. Promotion req
 - EXT-010 is an environment prerequisite. Each system records a sanitized hardware and software manifest, scheduler, power state, scale, native Wayland and XWayland paths, NVIDIA explicit synchronization, runtime versions, and required compatibility results. Tier 1 cannot count as either independent Tier 2 system.
 - EXT-011 is a service prerequisite. Each target must expose an entitled source package revision and target package revision or a real live update to the authorized account. Evidence proves an actual local source to target transaction without redistributing content or retaining a decrypted protected executable; a no update response cannot satisfy DEC-001.
 
+### Urgent Login Rendering Maintenance Exception
+
+**Status:** IN REVIEW
+**Authority:** Direct owner request after an observed Tier 1 login rendering failure on August 24, 2026.
+**Related requirements:** XODUS-REQ-005, XODUS-REQ-010, XODUS-REQ-011.
+**Tracking:** `login rendering compatibility` milestone and issue `#5`.
+
+The Tier 1 CachyOS, Hyprland, NVIDIA session opened the existing Xodus login window with an entirely blank WebKitGTK surface. The process emitted `Failed to create GBM buffer ... Invalid argument`. Re-running the same Xodus binary with the process local `WEBKIT_DISABLE_DMABUF_RENDERER=1` environment variable rendered the Microsoft sign in page without completing authorization. This is a WebKitGTK dmabuf renderer compatibility defect, not an entitlement, account, token, package, game, or global graphics configuration failure.
+
+This owner directed maintenance item is intentionally narrow. It is authorized before XODUS-PHASE-002 because a working interactive surface is required to obtain the external evidence that gates later work. It does not mark any later phase complete, relax an entry criterion, create an account session, acquire an entitlement, install a package, or alter the Xodus account lifecycle design.
+
+**Required change and constraints**
+
+1. Before a Linux WebKitGTK webview starts, select the shared memory renderer only when the session exposes Wayland, the NVIDIA driver is present, and the user has not explicitly set `WEBKIT_DISABLE_DMABUF_RENDERER`.
+2. Keep the change in the Xodus CLI process. Do not write Hyprland configuration, shell profiles, system environment files, NVIDIA settings, or desktop wide graphics configuration.
+3. Preserve an explicit user renderer choice, retain all non Linux behavior, and keep renderer selection separate from automatic sign in, token writes, account changes, and logging of account data.
+4. Add unit coverage for the renderer selection predicate, including override, non Wayland, and no NVIDIA cases. Build and test the workspace on CachyOS.
+5. Reproduce the original blank surface and verify the fixed surface reaches the sign in page without submitting a credential. Treat screenshots and terminal output as sensitive runtime evidence and do not commit them.
+
+**Acceptance criteria**
+
+- The Tier 1 login page is visible and accepts normal input at 200 percent desktop scale with no GBM allocation failure.
+- The original renderer behavior remains available when the user explicitly sets the WebKitGTK environment variable.
+- The renderer fallback is process local, leaves no persistent desktop mutation, and does not add account or token behavior beyond the preexisting login command lifecycle.
+- No account identifier, credential, token, cookie, license, package content, or screenshot enters tracked content.
+
+**Recovery and follow up**
+
+If the shared memory path regresses, the user can set `WEBKIT_DISABLE_DMABUF_RENDERER` explicitly before launch to restore their selected renderer behavior. The later XODUS-PHASE-006 backend matrix must retain this observed defect and compare native Wayland and XWayland login paths under the final runtime profile.
+
 ## 12. Architecture and Ownership Boundaries
 
 ```mermaid
