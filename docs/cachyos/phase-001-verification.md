@@ -38,6 +38,8 @@ cargo build --release --workspace
 
 Formatting, metadata, compilation, test compilation, 17 offline tests, and the release build passed. The account-backed tests remain excluded because they require the bounded authorization and prerequisites specified by DEC-004 and EXT-001.
 
+A disposable local change to `Cargo.toml` caused `scripts/cachyos/verify-baseline.sh --source` to fail with `source-sensitive paths differ from the frozen baseline`. The change was reverted before the final passing verification run.
+
 ## Known Result Boundaries
 
 Clippy completed with exit status zero and four warnings at the frozen source revision. They remain unfinished work under XODUS-REQ-020 and do not establish warning-free release quality. This phase records the result without weakening the later continuous verification requirement.
@@ -48,7 +50,7 @@ No account login, entitlement, package, Game Runtime, game launch, performance, 
 
 - The machine-readable baseline binds source, dependency, CachyOS, hardware, display, graphics, and runtime candidate identities.
 - The upstream matrix records a permitted decision for every active upstream item named by the audit and requires reassessment before overlapping local work.
-- The verifier fails on source, package, graphics, or display drift and defines the required evidence invalidation recovery.
+- The verifier accepts a descendant of the frozen source commit only while the recorded source-sensitive paths, package, graphics, and display identities still match. Any mismatch fails and defines the required evidence invalidation recovery.
 - The audit build and test commands reproduce on the frozen baseline.
 
 The phase remains open until the implementation branch, tracking issue, documentation changes, and required review workflow are complete. Later phases cannot start until this phase is merged and its evidence is still valid.

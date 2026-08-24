@@ -8,7 +8,15 @@
     "origin_main_commit": "b3d7fb210301aac66b8aaef16c0450dcfadd451c",
     "upstream_main_commit": "b3d7fb210301aac66b8aaef16c0450dcfadd451c",
     "cargo_lock_sha256": "a8241102f8c4d3b1e6c1800840072108709e1c41ee0104a5d0bd98cb31b57911",
-    "cargo_metadata_sha256": "562041efbbfe0c143717065e883d430108f010d6fdaf27b8a3167dcca3545427"
+    "cargo_metadata_sha256": "562041efbbfe0c143717065e883d430108f010d6fdaf27b8a3167dcca3545427",
+    "source_sensitive_paths": [
+      "Cargo.lock",
+      "Cargo.toml",
+      "crates",
+      ".github",
+      "scripts/cargo-annotate.py",
+      "scripts/send_msa_token_request.py"
+    ]
   },
   "remotes": {
     "origin": "https://github.com/EnVisione/xodus.git",
@@ -120,6 +128,7 @@
       "source_revision.xodus_commit",
       "source_revision.cargo_lock_sha256",
       "source_revision.cargo_metadata_sha256",
+      "source_revision.source_sensitive_paths",
       "platform.distribution.package_database_sha256",
       "platform.kernel",
       "platform.packages",
@@ -129,7 +138,7 @@
       "graphics.vulkan",
       "runtime_candidates"
     ],
-    "rule": "Any mismatch makes dependent build, compatibility, performance, package, or release evidence historical until the affected verification is repeated against a new manifest.",
+    "rule": "The frozen source commit must be an ancestor of the checkout and the source-sensitive paths must remain unchanged. Any mismatch makes dependent build, compatibility, performance, package, or release evidence historical until the affected verification is repeated against a new manifest.",
     "recovery": "Create a new sanitized baseline manifest, preserve the prior manifest as historical evidence, rerun the affected verifier mode and required higher fidelity checks, then update the release evidence chain."
   },
   "capture_contract": {
