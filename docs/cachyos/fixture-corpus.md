@@ -1,6 +1,6 @@
 # MSIXVC2 Fixture Corpus
 
-**Status:** PARTIAL
+**Status:** EXT-009 ENTRY EVIDENCE COMPLETE
 
 This record freezes the first owned MSIXVC2 fixtures for XODUS-REQ-002 through XODUS-REQ-004. It is evidence of controlled package generation, not a claim that the fixtures are Microsoft Store ready, installable on a retail system, or a substitute for a real title lifecycle.
 
@@ -27,7 +27,7 @@ Each fixture uses only project owned synthetic inputs:
 
 `makepkg2 pack /msixvc2` created the base package. The update package used the base package through `/priorpackage`, producing the producer's update comparison report. The source content did not contain Microsoft title content or any GDK binary.
 
-The XSP fixtures are separately authored byte layouts for the current Xodus `XspHeader` and `XspPatchRecord` parser. They use fixed synthetic identifiers, one new data record, and one copy data record. They do not claim to be a captured title update or replace an authorized real XSP exercise.
+The XSP fixtures are separately authored byte layouts for the current Xodus `XspHeader` and `XspPatchRecord` parser. The baseline synthetic update descriptor uses fixed synthetic identifiers, one new data record, one copy data record, and the version transition `1.0.0.0` to `1.0.0.1`. The rollback descriptor is a byte-for-byte controlled derivation with only those two version fields reversed. The interrupted-update recovery input retains the complete 860-byte header and first 16-byte record but intentionally omits the declared second record. They do not claim to be captured title updates, a package-applied rollback, or a substitute for an authorized real XSP exercise.
 
 ## Tracked Fixtures
 
@@ -42,6 +42,8 @@ The XSP fixtures are separately authored byte layouts for the current Xodus `Xsp
 | `crates/msixvc/testdata/xsp/xodus-fixture-invalid-magic.xsp` | Header magic rejection | `694b7d4fb8208955e843d619c69a14e3fcc57352d76c49dc62bb4f573514da45` | `cf008715b63e9980dd1f4976b710d44a4789876faa8596e0b33924fd1619cba60d81f975a716bbe08f5baa32ecbae0e9b66841a7f66a30747af24010d4c73c87` |
 | `crates/msixvc/testdata/xsp/xodus-fixture-invalid-record.xsp` | Unknown patch record flag rejection | `62873b898a3d3e375430a39fe6a54a645ae59abfb824e414ebf58cb8b2163fb9` | `71d83f4ec7ecc6558e57b35b21341dd39ca53c565a0be908b38b9b3b1a231a881be74d2915b2448b57e2daef63157e08d08dbd4d5b2e17c49498781af7c4ac66` |
 | `crates/msixvc/testdata/xsp/xodus-fixture-truncated.xsp` | Header truncation rejection | `04f9eaecdff0b76a65002f829dfc8caa0a200ad1fd946f8a2be374378f4bddc1` | `4ad80b32862b0d84378671bde8b0b0a42f90317cbb03f7c4d748ab92710032d63b58cdf28a41feaa228660e4f863284d99efc0b2ab147df2b6d468f633a37656` |
+| `crates/msixvc/testdata/xsp/xodus-fixture-rollback.xsp` | Structurally valid synthetic reverse-version descriptor, `1.0.0.1` to `1.0.0.0`, for future rollback-policy coverage | `da1c4b5f17943289833276a17f2181e7a3055d21b13a009382d6289aca7e8459` | `24a528647d22447e8b9e71fa1a45a2b410902aa5de7dc269019bfa7c29f563f187723655470a7037de05df26f76a5d754a91bf578ebb8fea26ef3affbcc8a08b` |
+| `crates/msixvc/testdata/xsp/xodus-fixture-recovery-interrupted.xsp` | Synthetic interrupted-update input with a complete header that declares two records but retains only the first, for future no-mutation recovery coverage | `ce6957f91dc00d935f458876eced035921ad73a467d2488cfe47b8f355dfd6d5` | `549e619d17478d4a468aadd97e79863400e9d04c8b2ef536561cdf82c796ca629f12264418aac552c36692c4b4ab4c401a3403b929a295dad8962ef47d12dfc7` |
 
 Both packages are ZIP based MSIXVC2 package containers. Their visible package members are only generated metadata, signatures, chunk maps, and encrypted fixture boxes. Review found no title identity, Microsoft title content, GDK component, credential, content key, or decrypted executable. The generated `.ekb` files are local content key material and are intentionally excluded.
 
@@ -54,15 +56,18 @@ Both packages are ZIP based MSIXVC2 package containers. Their visible package me
 - The truncated fixture fails ZIP validation because its end-of-central-directory record is absent. The integrity fixture fails ZIP validation with a CRC mismatch. The adversarial-path carrier passes structural ZIP validation and inventories exactly one intentionally unsafe member path, `../escape.txt`.
 - `unzip -Z1` was used to inventory package members, and byte scans found no prohibited title, credential, key, or GDK component strings.
 - An isolated clean Cargo harness invoked the current `XspFile::parse_file` implementation. It accepted the valid XSP fixture with the expected two records and rejected the bad magic, bad record, and truncated variants.
+- The baseline and rollback descriptors are both 892 bytes: their `MS-XPFM` header reports `page_size` 860 and two records. Their version fields are respectively `1.0.0.0` to `1.0.0.1` and `1.0.0.1` to `1.0.0.0`. The interrupted-update recovery input is 876 bytes: it retains that same complete header and exactly one of the two declared 16-byte records. Byte-for-byte prefix checks confirm the controlled derivations. The current parser has no version-policy or transaction path, and no repository test consumes these two new inputs before Phase 2.
 
 ## Security Review
 
-The August 24, 2026 containment review covered all nine tracked fixture files without reading or retaining any Secret Service value, package key, or title package. The two valid MSIXVC2 archives passed `unzip -tqq`; the deliberately truncated and integrity-mismatch archives were rejected as expected. Their member names contain no absolute path, parent traversal, drive prefix, backslash path, or `.ekb` entry, except for the dedicated adversarial-path fixture whose sole `../escape.txt` member is documented above and must never be extracted. Their uncompressed payloads are small generated metadata and fixture boxes, not an archive expansion hazard.
+The August 24, 2026 containment review covered all eleven tracked fixture files without reading or retaining any Secret Service value, package key, or title package. The two valid MSIXVC2 archives passed `unzip -tqq`; the deliberately truncated and integrity-mismatch archives were rejected as expected. Their member names contain no absolute path, parent traversal, drive prefix, backslash path, or `.ekb` entry, except for the dedicated adversarial-path fixture whose sole `../escape.txt` member is documented above and must never be extracted. Their uncompressed payloads are small generated metadata and fixture boxes, not an archive expansion hazard.
 
 Static scans found no bearer authorization value, XBL authorization form, password, client secret, access token, refresh token, content key, or `.ekb` marker. The only URL-like strings are fixed OpenXML, W3C XML signature, and `xbox.com/MSIXVC2` namespace identifiers. They are package format schema identifiers, not endpoints or signed download URLs.
 
-This review confirms containment of the tracked corpus. It does not certify the current package parsers or transaction paths. A bounded remote XVD inspection also confirmed that the current parser can panic on a failed seek; that independent Phase 2 defect is tracked in [issue 9](https://github.com/EnVisione/xodus/issues/9). The corpus has no repository test consumers yet, so Phase 2 must add them before format or transaction safety can be claimed.
+The two new XSP files originate exclusively from the tracked owned valid fixture. The rollback descriptor swaps only the two eight-byte version fields. The interrupted-update recovery input is its first 876 bytes. A fresh binary scan of all eleven files found no bearer authorization value, XBL authorization form, password, client secret, access token, refresh token, content key, `.ekb` marker, or signed download URL.
+
+This review confirms containment and provenance of the completed entry fixture set. It does not certify the current package parsers or transaction paths. A bounded remote XVD inspection also confirmed that the current parser can panic on a failed seek; that independent Phase 2 defect is tracked in [issue 9](https://github.com/EnVisione/xodus/issues/9). The corpus has no repository test consumers yet, so Phase 2 must add them before format or transaction safety can be claimed.
 
 ## Remaining Work
 
-EXT-009 remains partial. The containment security review is complete, and the corpus now has deterministic malformed, truncated, adversarial-path, and integrity MSIXVC2 variants. Before it can become available, it still needs XSP update rollback and recovery cases plus a final provenance and security review of the completed entry set. Repository test coverage that consumes each artifact is XODUS-PHASE-002 implementation and exit evidence. A real authorized package exercise remains mandatory evidence for XODUS-REQ-004 and cannot be replaced by these synthetic fixtures.
+The required EXT-009 entry artifacts now exist: deterministic malformed, truncated, adversarial-path, integrity, synthetic update, rollback, and interrupted-update recovery inputs, with complete provenance and security review. The authoritative plan classifies EXT-009 as available entry evidence only. Repository test coverage that consumes each artifact is XODUS-PHASE-002 implementation and exit evidence. A real authorized package exercise remains mandatory evidence for XODUS-REQ-004 and cannot be replaced by these synthetic fixtures.
