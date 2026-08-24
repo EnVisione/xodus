@@ -45,6 +45,14 @@ The canary parsed the XVD header and read the XVD hash tree in memory. It verifi
 
 After the transfer verified, the canary requested the title license only to decrypt a protected PE image into a Linux memory file for import inspection. Microsoft rejected that request with `Device group is full, please remove a device and try again.` No device membership, account setting, installation, update, launch, key, signed URL, decrypted executable, or game payload was retained. The complete temporary package was deleted after the failed license request. Therefore this canary does not provide Minecraft Game Runtime import, runtime, online-service, anti-cheat, or launch evidence.
 
+### Corrected Protected Content License and Memfd Probe
+
+After the owner freed Microsoft Store device capacity, one corrected disposable probe reused the normal persisted Xodus account state without listing or retaining credentials. It independently resolved current entitled package metadata and completed one protected-content license request for Minecraft and Forza.
+
+For each target, the probe selected one bounded protected executable and decrypted it only into a Linux memory file. Exact authenticated HTTP range requests were no larger than 8 MiB and required `206 Partial Content`, matching `Content-Range`, and matching body lengths. No package, key, signed URL, decrypted executable, installation, update, launch, or package content was retained. The disposable probe directory was deleted after exit.
+
+The PE import parser deliberately read no more than the first 16 MiB of each memory-only executable. Neither import table was reachable within that safe cap. This proves the entitlement, protected-content license, and memfd-only decryption boundary for both targets, but it does not establish Game Runtime imports, runtime compatibility, online-service behavior, anti-cheat classification, a source-to-target update, installation, or launch behavior.
+
 ### Isolated Minecraft Update Plan Inspection
 
 One current Minecraft XSP update plan was selected from the entitled package listing and read in a disposable directory under a 1 MiB response limit. The response size matched its 4,304 byte package-listing entry. The current `XspFile` parser accepted it and reported 13 patch records, 10 new-data records, and 3 copy-data records.
@@ -93,6 +101,6 @@ This flow is interactive because the current CLI asks which package files to enu
 
 ## Remaining EXT-002 Work
 
-This evidence is intentionally incomplete. Minecraft now has an isolated manifest, dependency, entrypoint, protocol, capability, protected-file inventory, current update-plan record, and a complete XVD-tree-verified base-transfer canary. Its direct PE import inspection is blocked until an authorized Microsoft device-group seat is available. Forza now has bounded current header-boundary, XVC metadata, user-directory, signal-scan, and update-plan records. Neither target has direct Game Runtime import evidence, online-service behavior, anti-cheat classification, or a source-to-target update pair. Forza also lacks a complete-transfer integrity result. Those remaining facts require subsequent authorized, isolated workflows. The only retained acquisition evidence is the sanitized metadata described above.
+This evidence is intentionally incomplete. Minecraft now has an isolated manifest, dependency, entrypoint, protocol, capability, protected-file inventory, current update-plan record, complete XVD-tree-verified base-transfer canary, and protected-content license plus memfd-only decryption evidence. Forza now has bounded current header-boundary, XVC metadata, user-directory, signal-scan, update-plan records, complete transport and XVD-tree integrity evidence, and protected-content license plus memfd-only decryption evidence. Neither target has direct Game Runtime import evidence, online-service behavior, anti-cheat classification, or a source-to-target update pair. Those remaining facts require subsequent authorized, isolated workflows. The only retained acquisition evidence is the sanitized metadata described above.
 
 Consequently, EXT-002 remains partial and does not open XODUS-PHASE-002. EXT-009 is independently available as synthetic entry evidence only; it does not replace any real target-package requirement.
