@@ -35,7 +35,15 @@ The recorded metadata proves the following current compatibility facts:
 - The title exposes the `minecraft`, `ms-xbl-35760c07`, and `ms-xbl-multiplayer` protocols, declares multiplayer support, and requests `internetClient`, `runFullTrust`, `appLicensing`, and `unvirtualizedResources` capabilities.
 - `SegmentMetadata.bin` describes 37,630 files. Exactly one segment is marked to remain encrypted on disk, and its executable path is `Minecraft.Windows.exe`.
 
-This is a metadata and protected-file inventory exercise only. The current downloader does not validate the response hash before reporting success, so the exact byte count is acquisition evidence, not complete transport-integrity evidence.
+This initial inventory exercise did not validate each response hash before reporting success. Its exact byte count is acquisition evidence only. The separate full-transfer integrity canary below establishes the current Minecraft base-package integrity result without changing the downloader's present behavior.
+
+### Full Minecraft Transfer Integrity Canary
+
+One separate authorized canary fetched the complete current Minecraft base package into a disposable `/tmp` file. Every request was an exact HTTP range of at most 8 MiB. The canary required `206 Partial Content`, an exact matching `Content-Range`, a matching body length, and one stable remote total equal to the authenticated package metadata size. The complete 2,490,064,896-byte transfer completed under those checks.
+
+The canary parsed the XVD header and read the XVD hash tree in memory. It verified the header's `TopHashBlockHash`, every parent hash-tree relationship, and the truncated SHA-256 leaf hash for every 4 KiB data page downloaded from the package. All checks passed. This is verified whole-transfer evidence for the current Minecraft base artifact against the package's internal XVD integrity tree, with the current HTTPS response as the source of the header. It does not independently validate the header signature or publisher trust chain, and it does not establish an equivalent result for Forza.
+
+After the transfer verified, the canary requested the title license only to decrypt a protected PE image into a Linux memory file for import inspection. Microsoft rejected that request with `Device group is full, please remove a device and try again.` No device membership, account setting, installation, update, launch, key, signed URL, decrypted executable, or game payload was retained. The complete temporary package was deleted after the failed license request. Therefore this canary does not provide Minecraft Game Runtime import, runtime, online-service, anti-cheat, or launch evidence.
 
 ### Isolated Minecraft Update Plan Inspection
 
@@ -65,7 +73,7 @@ Together, these probes establish a successful limited base-package metadata insp
 
 One separate authenticated metadata-only query checked only whether the current selected base-package records expose a nonempty `FileHash` or `HashOfHashes` field. Both fields were absent for both Minecraft for Windows and Forza Horizon 5. No hash value, package response, payload, key, signed URL, or decrypted executable was retained.
 
-This establishes that the current entitlement metadata cannot itself bind either complete base-package transfer to a source-supplied digest. It does not establish failed TLS transport, a package corruption, or any full transport-integrity result. EXT-002 still requires a trustworthy full-transfer integrity path and verification evidence.
+This establishes that the current entitlement metadata cannot itself bind either complete base-package transfer to a source-supplied digest. It does not establish failed TLS transport or a package corruption. The separate Minecraft canary above now verifies a complete base transfer through the XVD integrity tree, but Forza still has no corresponding complete-transfer evidence, and the remaining EXT-002 requirements remain open.
 
 ### Bounded Forza User Metadata Directory
 
@@ -85,6 +93,6 @@ This flow is interactive because the current CLI asks which package files to enu
 
 ## Remaining EXT-002 Work
 
-This evidence is intentionally incomplete. Minecraft now has an isolated manifest, dependency, entrypoint, protocol, capability, protected-file inventory, and current update-plan record. Forza now has bounded current header-boundary, XVC metadata, user-directory, signal-scan, and update-plan records. Neither target has a source-supplied base-package digest in the current entitlement metadata, or freezes Game Runtime imports, online-service behavior, anti-cheat classification, a trustworthy transport-integrity path, or a source-to-target update pair. Those remaining facts require subsequent authorized, isolated workflows. The only retained acquisition evidence is the sanitized metadata described above.
+This evidence is intentionally incomplete. Minecraft now has an isolated manifest, dependency, entrypoint, protocol, capability, protected-file inventory, current update-plan record, and a complete XVD-tree-verified base-transfer canary. Its direct PE import inspection is blocked until an authorized Microsoft device-group seat is available. Forza now has bounded current header-boundary, XVC metadata, user-directory, signal-scan, and update-plan records. Neither target has direct Game Runtime import evidence, online-service behavior, anti-cheat classification, or a source-to-target update pair. Forza also lacks a complete-transfer integrity result. Those remaining facts require subsequent authorized, isolated workflows. The only retained acquisition evidence is the sanitized metadata described above.
 
 Consequently, EXT-002 remains partial and does not open XODUS-PHASE-002. EXT-009 is independently available as synthetic entry evidence only; it does not replace any real target-package requirement.
