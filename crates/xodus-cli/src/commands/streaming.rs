@@ -1888,6 +1888,80 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn transaction_recovery_restores_after_process_crash_injection() {
+        for checkpoint in 0..6 {
+            let temporary = tempfile::tempdir().unwrap();
+            let output = temporary.path().join("output");
+            std::fs::create_dir(&output).unwrap();
+
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "commands::streaming::tests::transaction_promotion_crash_helper",
+                    "--nocapture",
+                ])
+                .env("XODUS_CRASH_OUTPUT", &output)
+                .env("XODUS_CRASH_CHECKPOINT", checkpoint.to_string())
+                .current_dir(temporary.path())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap();
+
+            assert!(
+                !status.success(),
+                "crash helper must terminate before promotion completes at checkpoint {checkpoint}"
+            );
+            recover_transactions(&output).unwrap();
+            assert_eq!(std::fs::read(output.join("game.bin")).unwrap(), b"verified");
+            assert_eq!(
+                std::fs::read_dir(&output).unwrap().count(),
+                1,
+                "only the transaction lock-free output root should remain"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transaction_promotion_crash_helper() {
+        let Some(output) = std::env::var_os("XODUS_CRASH_OUTPUT") else {
+            return;
+        };
+        let checkpoint = std::env::var("XODUS_CRASH_CHECKPOINT")
+            .unwrap()
+            .parse::<usize>()
+            .unwrap();
+        let output = std::path::PathBuf::from(output);
+        let final_path = output.join("game.bin");
+        std::fs::write(&final_path, b"verified").unwrap();
+        let (transaction, payload) = new_transaction(&output).unwrap();
+        std::fs::write(payload.join("game.bin"), b"unverified").unwrap();
+        let transaction_root = transaction.path().to_path_buf();
+        std::mem::forget(transaction);
+        let mut remaining = checkpoint;
+        let mut abort_at_checkpoint = || {
+            if remaining == 0 {
+                nix::sys::signal::kill(nix::unistd::getpid(), nix::sys::signal::Signal::SIGKILL)
+                    .unwrap();
+                unreachable!("SIGKILL must terminate the crash helper");
+            }
+            remaining -= 1;
+            false
+        };
+        let mut entries =
+            promotion_entries(&[("game.bin".to_owned(), "game.bin".to_owned())]).unwrap();
+        let _ = super::promote_transaction_inner(
+            &transaction_root,
+            &output,
+            &mut entries,
+            &mut abort_at_checkpoint,
+        );
+        panic!("crash helper completed without reaching checkpoint {checkpoint}");
+    }
+
     #[test]
     fn transaction_journal_reads_legacy_entries_without_removal_flag() {
         let temporary = tempfile::tempdir().unwrap();
