@@ -919,7 +919,11 @@ async fn open_http_stream(
 }
 
 fn http_err(err: reqwest::Error) -> std::io::Error {
-    Error::other(err)
+    if err.is_status() {
+        Error::new(ErrorKind::InvalidData, err)
+    } else {
+        Error::other(err)
+    }
 }
 
 #[cfg(test)]
