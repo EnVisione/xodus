@@ -16,6 +16,7 @@ use tokio::fs::{File, OpenOptions};
 use tokio::process::Command;
 use xodus::tokens::TokenManager;
 
+use crate::commands::streaming::open_package_input;
 use crate::license::get_license;
 
 #[cfg(target_os = "linux")]
@@ -280,12 +281,10 @@ pub async fn run(
         };
         let mut game_exe = File::from_std(game_exe_file);
 
-        let source_path = out.join(file.0.replace("\\", "/"));
-
-        let mut i = match File::open(&source_path).await {
-            Ok(file) => file,
+        let mut i = match open_package_input(&out_absolute, file.0) {
+            Ok(file) => File::from_std(file),
             Err(err) => {
-                eprintln!("failed to open {}: {err}", source_path.display());
+                eprintln!("refusing unsafe package input {}: {err}", file.0);
                 cleanup().await;
                 return ExitCode::FAILURE;
             }
@@ -295,7 +294,7 @@ pub async fn run(
             .mount_mem_fd(&mut i, &mut game_exe, file.1, *full_key, |_, _| {})
             .await
         {
-            eprintln!("failed to mount {}: {err}", source_path.display());
+            eprintln!("failed to mount {}: {err}", file.0);
             cleanup().await;
             return ExitCode::FAILURE;
         }

@@ -163,6 +163,44 @@ pub(crate) fn open_package_output(root: &Path, package_path: &str) -> io::Result
     ))
 }
 
+pub(crate) fn open_package_input(root: &Path, package_path: &str) -> io::Result<std::fs::File> {
+    let components = package_path_components(package_path)?;
+    let mut directory = std::fs::File::open(root)?;
+    if !directory.metadata()?.is_dir() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "package root is not a directory",
+        ));
+    }
+
+    for component in &components[..components.len() - 1] {
+        directory = std::fs::File::from(
+            openat2(
+                &directory,
+                *component,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+                Mode::empty(),
+                OUTPUT_RESOLVE_FLAGS,
+            )
+            .map_err(io::Error::from)?,
+        );
+    }
+
+    let Some(filename) = components.last() else {
+        return Err(invalid_package_path("package path has no filename"));
+    };
+    Ok(std::fs::File::from(
+        openat2(
+            &directory,
+            *filename,
+            OFlags::RDONLY | OFlags::CLOEXEC,
+            Mode::empty(),
+            OUTPUT_RESOLVE_FLAGS,
+        )
+        .map_err(io::Error::from)?,
+    ))
+}
+
 fn package_relative_path(package_path: &str) -> io::Result<PathBuf> {
     let mut relative = PathBuf::new();
     for component in package_path_components(package_path)? {
@@ -1100,9 +1138,9 @@ mod tests {
     use std::io::Write;
 
     use super::{
-        PromotionState, SegmentFile, changed_jobs, new_transaction, open_package_output,
-        package_path_components, promote_transaction, promotion_entries, recover_transaction_dir,
-        write_transaction_journal,
+        PromotionState, SegmentFile, changed_jobs, new_transaction, open_package_input,
+        open_package_output, package_path_components, promote_transaction, promotion_entries,
+        recover_transaction_dir, write_transaction_journal,
     };
 
     #[test]
@@ -1184,6 +1222,7 @@ mod tests {
         symlink(&outside, root.join("escape")).unwrap();
 
         assert!(open_package_output(&root, r"escape\payload.bin").is_err());
+        assert!(open_package_input(&root, r"escape\payload.bin").is_err());
         assert!(!outside.join("payload.bin").exists());
     }
 
