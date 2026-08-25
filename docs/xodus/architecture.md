@@ -55,6 +55,8 @@ Content license responses now require a successful HTTP status, a nonempty key l
 
 SP license key derivation now rejects unsupported key versions and device-key mismatches through `SpLicenseKeyError`. CLEP signing and HMAC state extraction propagate the same typed version failure through device reauthentication and live token exchange, while the CLI reports derivation failures as nonzero results. Unsupported key material is never accepted through an assertion or unchecked slice conversion.
 
+The service IPC boundary now enforces a 60 KiB payload limit before allocation, rejects unknown message types instead of defaulting them, emits stable machine-readable error codes for malformed or unsupported requests, and returns `PONG` or `MSA_TOKEN_RESPONSE` only for recognized operations. The protobuf handler supports bounded ping responses and explicit unsupported-operation responses instead of reaching an unimplemented branch. Raw XML request buffers and verbose HTTP connection logging are not emitted, and failed device or user token exchanges no longer become empty successful responses.
+
 Packed content key unwrapping now maps authentication, invalid wrapped-key states, and unexpected output lengths to explicit typed errors. Key-wrap library variants are no longer treated as unreachable process paths.
 
 The legacy package download command now rejects missing CDN roots and invalid sizes, checks HTTP status, and returns failure for output creation, stream, and write errors instead of reporting success after a partial operation or panicking on service data.

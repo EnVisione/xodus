@@ -5,7 +5,7 @@ use xodus::models::soap;
 use xodus::models::xgameruntime::xuser::{MSATokenRequest, MSATokenResponse};
 use xodus::proto::xodus::XodusMessageType;
 
-use crate::XML_MAGIC;
+use crate::connection::{MAX_MESSAGE_SIZE, ProtocolError, encode_error_message, encode_message};
 use crate::simple_context::SimpleContext;
 
 pub async fn handle(
@@ -13,24 +13,69 @@ pub async fn handle(
     context: &mut SimpleContext,
 ) -> tokio::io::Result<()> {
     log::debug!("Parsing XML");
-    let message_type = socket.read_u16_le().await?;
+    let raw_message_type = socket.read_u16_le().await?;
     let message_size = socket.read_u16_le().await?;
+    if message_size as usize > MAX_MESSAGE_SIZE {
+        let data = encode_error_message(
+            crate::XML_MAGIC,
+            XodusMessageType::Unknown as u16,
+            "payload_too_large",
+        )
+        .map_err(std::io::Error::other)?;
+        socket.write_all(&data).await?;
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            ProtocolError::PayloadTooLarge {
+                size: message_size as usize,
+                max: MAX_MESSAGE_SIZE,
+            },
+        ));
+    }
     let mut buffer = vec![0; message_size as usize];
     log::debug!("Reading buffer {message_size}");
     socket.read_exact(&mut buffer).await?;
     log::debug!("Read buffer");
-    let message_type = XodusMessageType::try_from(message_type as i32).unwrap_or_default();
-
-    let out_buf = match parse_message(context, message_type, buffer).await {
-        Ok(buf) => buf,
-        Err(err) => {
-            log::error!("Failed parsing message: {err}");
-            vec![]
+    let message_type = match XodusMessageType::try_from(raw_message_type as i32) {
+        Ok(message_type) => message_type,
+        Err(_) => {
+            let data = encode_error_message(
+                crate::XML_MAGIC,
+                XodusMessageType::Unknown as u16,
+                "unsupported_message_type",
+            )
+            .map_err(std::io::Error::other)?;
+            socket.write_all(&data).await?;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                ProtocolError::UnsupportedMessageType {
+                    value: raw_message_type as i32,
+                },
+            ));
         }
     };
 
-    let data = super::encode_message(XML_MAGIC, message_type as u16 + 1, out_buf);
+    let data = match parse_message(context, message_type, buffer).await {
+        Ok(buf) => encode_message(crate::XML_MAGIC, response_message_type(message_type), buf)
+            .map_err(std::io::Error::other)?,
+        Err(err) => {
+            log::error!("Failed parsing message: {err}");
+            encode_error_message(
+                crate::XML_MAGIC,
+                response_message_type(message_type),
+                "request_failed",
+            )
+            .map_err(std::io::Error::other)?
+        }
+    };
     socket.write_all(&data).await
+}
+
+fn response_message_type(message_type: XodusMessageType) -> u16 {
+    match message_type {
+        XodusMessageType::Ping => XodusMessageType::Pong as u16,
+        XodusMessageType::MsaTokenRequest => XodusMessageType::MsaTokenResponse as u16,
+        _ => XodusMessageType::Unknown as u16,
+    }
 }
 
 pub async fn parse_message(
@@ -41,12 +86,11 @@ pub async fn parse_message(
     match message_type {
         XodusMessageType::Ping => Ok(buffer),
         XodusMessageType::MsaTokenRequest => {
-            log::debug!("Raw buffer: {buffer:?}");
             let string_buf = std::str::from_utf8(&buffer)?;
-            log::debug!("String buffer: {string_buf:?}");
             let req = quick_xml::de::from_str::<MSATokenRequest>(string_buf)?;
-            let Token::Legacy(token) = context.tokens().get_user_sts_token()? else {
-                return Ok(vec![]);
+            let user_sts_token = context.tokens().get_user_sts_token()?;
+            let Token::Legacy(token) = user_sts_token else {
+                return Err("stored user STS token is not a legacy token".into());
             };
             let scope = if req.msa_full_trust {
                 "service::user.auth.xboxlive.com::MBI_SSL"
@@ -63,15 +107,13 @@ pub async fn parse_message(
                 "scope=service::user.auth.xboxlive.com::MBI_SSL".to_owned(),
                 Some(soap::PolicyReference::token_broker()),
             )
-            .await;
-
-            let ms_device_rps_token = device_token_resp.ok().and_then(|t| {
-                let lifetime = chrono::DateTime::parse_from_rfc3339(&t.lifetime.expires).ok()?;
-                let Token::Compact(ms_device_token) = Token::try_from(t).ok()? else {
-                    return None;
-                };
-                Some((ms_device_token, lifetime.timestamp()))
-            });
+            .await?;
+            let device_expiry =
+                chrono::DateTime::parse_from_rfc3339(&device_token_resp.lifetime.expires)?
+                    .timestamp();
+            let Token::Compact(ms_device_token) = Token::try_from(device_token_resp)? else {
+                return Err("device token exchange returned a non compact token".into());
+            };
 
             let user_token = xodus::api::live::exchange_user_token(
                 &context.client,
@@ -104,9 +146,7 @@ pub async fn parse_message(
                         } else {
                             address
                         };
-                        if let Err(err) = context.tokens().save_user_token(address, sts) {
-                            log::warn!("Failed to persist refreshed STS token: {err}");
-                        }
+                        context.tokens().save_user_token(address, sts)?;
                     }
                     let token = security_tokens
                         .into_iter()
@@ -115,15 +155,13 @@ pub async fn parse_message(
                     let expiry = chrono::DateTime::parse_from_rfc3339(&token.lifetime.expires)?;
                     let token: Token = Token::try_from(token)?;
                     let Token::Compact(user_token) = token else {
-                        return Ok(vec![]);
+                        return Err("user token exchange returned a non compact token".into());
                     };
                     let payload = MSATokenResponse {
                         token: user_token,
                         expiry: expiry.timestamp(),
-                        device_expiry: ms_device_rps_token.as_ref().map(|(_, r)| *r).unwrap_or(0),
-                        device_rps: ms_device_rps_token
-                            .map(|(t, _)| t)
-                            .unwrap_or_else(String::new),
+                        device_expiry,
+                        device_rps: ms_device_token,
                     };
                     let payload = quick_xml::se::to_string(&payload)?;
                     Ok(payload.as_bytes().to_vec())
@@ -131,6 +169,6 @@ pub async fn parse_message(
                 _ => Err("user token exchange returned an unsupported response".into()),
             }
         }
-        _ => Err("Unimplemented".into()),
+        _ => Err("unsupported XML message type".into()),
     }
 }

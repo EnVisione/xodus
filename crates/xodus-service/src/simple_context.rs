@@ -18,7 +18,6 @@ impl SimpleContext {
     ) -> Result<Self, reqwest::Error> {
         let client = reqwest::ClientBuilder::new()
             .user_agent(format!("xodus-service/{}", env!("CARGO_PKG_VERSION")))
-            .connection_verbose(true)
             .build()?;
 
         Ok(Self {
