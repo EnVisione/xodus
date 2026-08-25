@@ -414,6 +414,7 @@ pub async fn run(
         Ok(status) => status,
         Err(err) => {
             eprintln!("failed to wait for wine process: {err}");
+            let _ = wn.kill().await;
             cleanup().await;
             return ExitCode::FAILURE;
         }
