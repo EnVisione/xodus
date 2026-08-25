@@ -1230,6 +1230,22 @@ mod tests {
     }
 
     #[test]
+    fn http_read_rejects_reopened_start_drift() {
+        let error = super::validate_reopened_http_stream(2, 10, 3, 10)
+            .expect_err("reopened start drift must fail");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn http_read_rejects_reopened_start_beyond_total() {
+        let error = super::validate_reopened_http_stream(11, 10, 11, 10)
+            .expect_err("reopened start beyond total must fail");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
     fn http_read_rejects_overlong_response_extent() {
         let error = super::validate_partial_http_response_extent(0, 4, 4, 5)
             .expect_err("response extent beyond total must fail");
