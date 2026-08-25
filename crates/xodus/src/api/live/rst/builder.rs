@@ -92,6 +92,9 @@ impl<'a> RSTRequestBuilder<'a> {
 
     pub fn build(mut self) -> Result<RSTRequest<'a>, RSTBuilderError> {
         let mut security_tokens = self.build_request_security_tokens();
+        if security_tokens.is_empty() {
+            return Err(RSTBuilderError::MissingScopePolicy);
+        }
 
         match (self.device_token.take(), self.user_token.take()) {
             (Some(dev_token), Some(Token::Legacy(user_token))) => {
@@ -214,5 +217,17 @@ impl<'a> RSTRequestBuilder<'a> {
             key_info,
             signature_value: String::default(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RSTBuilderError, RSTRequestBuilder};
+
+    #[test]
+    fn build_rejects_missing_scope_policy_without_panicking() {
+        let result = RSTRequestBuilder::new().build();
+
+        assert!(matches!(result, Err(RSTBuilderError::MissingScopePolicy)));
     }
 }

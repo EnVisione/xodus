@@ -53,4 +53,6 @@ pub enum RSTBuilderError {
     InvalidUtf8(#[from] std::str::Utf8Error),
     #[error("Builder was provided with invalid set of tokens")]
     UnsupportedTokenCombination,
+    #[error("Builder requires at least one scope policy")]
+    MissingScopePolicy,
 }
