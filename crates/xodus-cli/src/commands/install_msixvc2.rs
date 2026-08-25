@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{self, Write};
 use std::path::Path;
@@ -7,10 +8,69 @@ use msixvc::msixvc2::{inspect, visit_entries};
 
 use crate::commands::streaming::{
     acquire_transaction_lock, new_transaction, open_package_output, promote_transaction,
-    promotion_entries, recover_transactions,
+    promotion_entries_with_removals, recover_transactions,
 };
 
 const MAX_INSTALL_UNCOMPRESSED_BYTES: u64 = 1_u64 << 40;
+
+fn normalized_package_path(path: &str) -> String {
+    path.replace('\\', "/")
+}
+
+fn package_top_level(path: &str) -> Option<String> {
+    path.split('/').next().map(str::to_owned)
+}
+
+fn collect_stale_package_files(root: &Path, specs: &[(String, String)]) -> io::Result<Vec<String>> {
+    let current = specs
+        .iter()
+        .map(|(_, path)| normalized_package_path(path))
+        .collect::<HashSet<_>>();
+    let owned_top_levels = current
+        .iter()
+        .filter_map(|path| package_top_level(path))
+        .collect::<HashSet<_>>();
+    let mut stale = Vec::new();
+    collect_stale_package_files_in(root, Path::new(""), &current, &owned_top_levels, &mut stale)?;
+    stale.sort();
+    Ok(stale)
+}
+
+fn collect_stale_package_files_in(
+    directory: &Path,
+    relative_directory: &Path,
+    current: &HashSet<String>,
+    owned_top_levels: &HashSet<String>,
+    stale: &mut Vec<String>,
+) -> io::Result<()> {
+    for entry in std::fs::read_dir(directory)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name_text) = name.to_str() else {
+            continue;
+        };
+        let relative = relative_directory.join(&name);
+        let relative_text = relative.to_string_lossy().replace('\\', "/");
+        if relative_directory.as_os_str().is_empty() && !owned_top_levels.contains(name_text) {
+            continue;
+        }
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            collect_stale_package_files_in(
+                &entry.path(),
+                &relative,
+                current,
+                owned_top_levels,
+                stale,
+            )?;
+        } else if (file_type.is_file() || file_type.is_symlink())
+            && !current.contains(&relative_text)
+        {
+            stale.push(relative_text);
+        }
+    }
+    Ok(())
+}
 
 pub fn run(path: String, destination: String) -> ExitCode {
     let archive_path = Path::new(&path);
@@ -41,14 +101,6 @@ pub fn run(path: String, destination: String) -> ExitCode {
         .iter()
         .map(|entry| (entry.name.clone(), entry.name.clone()))
         .collect::<Vec<_>>();
-    let mut entries = match promotion_entries(&specs) {
-        Ok(entries) => entries,
-        Err(error) => {
-            eprintln!("MSIXVC2 install rejected archive paths: {error}");
-            return ExitCode::FAILURE;
-        }
-    };
-
     let output_root = Path::new(&destination);
     if let Err(error) = std::fs::create_dir_all(output_root) {
         eprintln!("MSIXVC2 install could not create destination: {error}");
@@ -65,6 +117,20 @@ pub fn run(path: String, destination: String) -> ExitCode {
         eprintln!("MSIXVC2 install could not recover a prior transaction: {error}");
         return ExitCode::FAILURE;
     }
+    let removals = match collect_stale_package_files(output_root, &specs) {
+        Ok(removals) => removals,
+        Err(error) => {
+            eprintln!("MSIXVC2 install could not inspect prior package state: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut entries = match promotion_entries_with_removals(&specs, &removals) {
+        Ok(entries) => entries,
+        Err(error) => {
+            eprintln!("MSIXVC2 install rejected archive paths: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
     let (transaction, payload_root) = match new_transaction(output_root) {
         Ok(transaction) => transaction,
         Err(error) => {
@@ -145,6 +211,44 @@ mod tests {
                     .file_name()
                     .to_string_lossy()
                     .starts_with(".xodus-streaming-txn-"))
+        );
+    }
+
+    #[test]
+    fn installs_update_fixture_replacing_prior_package_state() {
+        let temporary = tempfile::tempdir().expect("temporary destination must exist");
+        let destination = temporary.path().join("install");
+        let base_box = destination.join("Boxes/7a342636-4ffe-4966-91d1-207da876ba09.box");
+        let update_box = destination.join("Boxes/204a0f88-704c-4bcb-8a1a-3823119302ce.box");
+        let unrelated_file = destination.join("keep.txt");
+
+        assert_eq!(
+            run(
+                fixture("xodus-fixture-base.msixvc")
+                    .to_string_lossy()
+                    .into_owned(),
+                destination.to_string_lossy().into_owned(),
+            ),
+            std::process::ExitCode::SUCCESS
+        );
+        assert!(base_box.is_file(), "base package must be promoted");
+        std::fs::write(&unrelated_file, b"preserve").expect("unrelated state must be writable");
+
+        assert_eq!(
+            run(
+                fixture("xodus-fixture-update.msixvc")
+                    .to_string_lossy()
+                    .into_owned(),
+                destination.to_string_lossy().into_owned(),
+            ),
+            std::process::ExitCode::SUCCESS
+        );
+        assert!(!base_box.exists(), "stale base package must be removed");
+        assert!(update_box.is_file(), "updated package must be promoted");
+        assert!(destination.join("XboxPackage.cbor").is_file());
+        assert_eq!(
+            std::fs::read(unrelated_file).expect("unrelated state must remain"),
+            b"preserve"
         );
     }
 
