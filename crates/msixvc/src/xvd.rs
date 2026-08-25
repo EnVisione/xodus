@@ -279,6 +279,8 @@ pub struct XvdFile {
     user_data_offset: u64,
 }
 
+const MAX_XVC_REGION_HEADERS: u32 = 4_096;
+
 #[derive(thiserror::Error, Debug)]
 pub enum XvdFileParseError {
     #[error(transparent)]
@@ -287,6 +289,11 @@ pub enum XvdFileParseError {
     RegionHeader(#[from] XvcRegionHeaderParseError),
     #[error(transparent)]
     Io(#[from] io::Error),
+    #[error("XVC region count {region_count} exceeds the supported maximum of {max_region_count}")]
+    RegionCountTooLarge {
+        region_count: u32,
+        max_region_count: u32,
+    },
 }
 
 #[derive(Debug)]
@@ -378,6 +385,12 @@ impl XvdFile {
             };
 
             let region_count = xvc_info.region_count;
+            if region_count > MAX_XVC_REGION_HEADERS {
+                return Err(XvdFileParseError::RegionCountTooLarge {
+                    region_count,
+                    max_region_count: MAX_XVC_REGION_HEADERS,
+                });
+            }
 
             if xvc_info.version >= 1 {
                 let mut buf = XvcRegionHeader::buffer();
@@ -1076,24 +1089,31 @@ impl XvdFile {
 #[cfg(test)]
 mod tests {
     use std::{
-        io::{Cursor, Error, ErrorKind},
+        io::{Cursor, Error, ErrorKind, Seek},
         pin::Pin,
         task::{Context, Poll},
     };
 
     use tokio::io::{AsyncRead, AsyncSeek, ReadBuf};
 
-    use super::{XvdFile, XvdFileParseError};
+    use super::{MAX_XVC_REGION_HEADERS, XvdFile, XvdFileParseError};
 
     const XVD_HEADER_SIZE: usize = 4096;
+    const XVC_INFO_OFFSET: usize = 0x4000;
+    const XVC_INFO_SIZE: usize = 0xda8;
+    const XVC_INFO_REGION_COUNT_OFFSET: usize = 0xd14;
+    const XVC_INFO_FILETIME_OFFSET: usize = 0xd30;
     const FILETIME_OFFSET: usize = 0x210;
     const XVC_DATA_LENGTH_OFFSET: usize = 0x290;
     const WINDOWS_TO_UNIX_FILETIME: i64 = 116_444_736_000_000_000;
 
-    struct SeekFailureReader(Cursor<Vec<u8>>);
+    struct SyntheticXvdReader {
+        inner: Cursor<Vec<u8>>,
+        fail_seeks: bool,
+    }
 
-    impl SeekFailureReader {
-        fn synthetic_xvd_header() -> Self {
+    impl SyntheticXvdReader {
+        fn synthetic_xvd_header(fail_seeks: bool) -> Self {
             let mut header = vec![0; XVD_HEADER_SIZE];
             header[0x200..0x208].copy_from_slice(b"msft-xvd");
             header[FILETIME_OFFSET..FILETIME_OFFSET + 8]
@@ -1101,41 +1121,66 @@ mod tests {
             header[XVC_DATA_LENGTH_OFFSET..XVC_DATA_LENGTH_OFFSET + 4]
                 .copy_from_slice(&1_u32.to_le_bytes());
 
-            Self(Cursor::new(header))
+            Self {
+                inner: Cursor::new(header),
+                fail_seeks,
+            }
+        }
+
+        fn synthetic_xvd_with_region_count(region_count: u32) -> Self {
+            let mut reader = Self::synthetic_xvd_header(false);
+            reader
+                .inner
+                .get_mut()
+                .resize(XVC_INFO_OFFSET + XVC_INFO_SIZE, 0);
+            let start = XVC_INFO_OFFSET + XVC_INFO_REGION_COUNT_OFFSET;
+            reader.inner.get_mut()[start..start + 4].copy_from_slice(&region_count.to_le_bytes());
+            let filetime_start = XVC_INFO_OFFSET + XVC_INFO_FILETIME_OFFSET;
+            reader.inner.get_mut()[filetime_start..filetime_start + 8]
+                .copy_from_slice(&WINDOWS_TO_UNIX_FILETIME.to_le_bytes());
+            reader
         }
     }
 
-    impl AsyncRead for SeekFailureReader {
+    impl AsyncRead for SyntheticXvdReader {
         fn poll_read(
             mut self: Pin<&mut Self>,
             _cx: &mut Context<'_>,
             buf: &mut ReadBuf<'_>,
         ) -> Poll<std::io::Result<()>> {
-            let position = self.0.position() as usize;
-            let bytes = &self.0.get_ref()[position..];
+            let position = self.inner.position() as usize;
+            let bytes = &self.inner.get_ref()[position..];
             let read_len = bytes.len().min(buf.remaining());
             buf.put_slice(&bytes[..read_len]);
-            self.0.set_position((position + read_len) as u64);
+            self.inner.set_position((position + read_len) as u64);
             Poll::Ready(Ok(()))
         }
     }
 
-    impl AsyncSeek for SeekFailureReader {
-        fn start_seek(self: Pin<&mut Self>, _position: std::io::SeekFrom) -> std::io::Result<()> {
-            Err(Error::other("synthetic XVD seek failure"))
+    impl AsyncSeek for SyntheticXvdReader {
+        fn start_seek(
+            mut self: Pin<&mut Self>,
+            position: std::io::SeekFrom,
+        ) -> std::io::Result<()> {
+            if self.fail_seeks {
+                return Err(Error::other("synthetic XVD seek failure"));
+            }
+
+            self.inner.seek(position)?;
+            Ok(())
         }
 
         fn poll_complete(
             self: Pin<&mut Self>,
             _cx: &mut Context<'_>,
         ) -> Poll<std::io::Result<u64>> {
-            Poll::Ready(Ok(self.0.position()))
+            Poll::Ready(Ok(self.inner.position()))
         }
     }
 
     #[tokio::test]
     async fn parse_returns_xvc_info_seek_failure() {
-        let result = XvdFile::parse(SeekFailureReader::synthetic_xvd_header()).await;
+        let result = XvdFile::parse(SyntheticXvdReader::synthetic_xvd_header(true)).await;
         let error = match result {
             Ok(_) => panic!("synthetic seek failure must not parse an XVD"),
             Err(error) => error,
@@ -1144,6 +1189,27 @@ mod tests {
         assert!(matches!(
             error,
             XvdFileParseError::Io(error) if error.kind() == ErrorKind::Other
+        ));
+    }
+
+    #[tokio::test]
+    async fn parse_rejects_oversized_xvc_region_count_before_allocation() {
+        let region_count = MAX_XVC_REGION_HEADERS + 1;
+        let result = XvdFile::parse(SyntheticXvdReader::synthetic_xvd_with_region_count(
+            region_count,
+        ))
+        .await;
+        let error = match result {
+            Ok(_) => panic!("oversized synthetic XVC region count must not parse an XVD"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            XvdFileParseError::RegionCountTooLarge {
+                region_count: actual_region_count,
+                max_region_count: MAX_XVC_REGION_HEADERS,
+            } if actual_region_count == region_count
         ));
     }
 }
