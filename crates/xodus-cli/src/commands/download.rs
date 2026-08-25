@@ -19,6 +19,44 @@ use crate::commands::streaming::{
 use crate::package::{get_content_id, get_packages, package_download_urls};
 
 const MAX_FILE_HASH_BASE64_CHARS: usize = 64;
+const DOWNLOAD_RETRY_LIMIT: usize = 3;
+
+#[derive(Debug)]
+struct DownloadAttemptError {
+    error: io::Error,
+    retryable: bool,
+    try_next_url: bool,
+}
+
+fn fatal_download_error(error: io::Error) -> DownloadAttemptError {
+    DownloadAttemptError {
+        error,
+        retryable: false,
+        try_next_url: false,
+    }
+}
+
+fn request_download_error(error: reqwest::Error) -> DownloadAttemptError {
+    let retryable = match error.status() {
+        Some(status) => {
+            status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        }
+        None => true,
+    };
+    DownloadAttemptError {
+        error: io::Error::other(error),
+        retryable,
+        try_next_url: true,
+    }
+}
+
+fn consume_download_retry(remaining: &mut usize) -> io::Result<()> {
+    if *remaining == 0 {
+        return Err(io::Error::other("package download retry budget exhausted"));
+    }
+    *remaining -= 1;
+    Ok(())
+}
 
 fn validate_declared_download_length(expected: u64, declared: Option<u64>) -> io::Result<()> {
     if let Some(declared) = declared
@@ -89,6 +127,61 @@ fn validate_file_hash(expected: Option<[u8; 32]>, actual: [u8; 32]) -> io::Resul
             "downloaded package file hash does not match metadata",
         ));
     }
+    Ok(())
+}
+
+async fn download_file_attempt(
+    client: &reqwest::Client,
+    url: &str,
+    file_name: &str,
+    file_size: u64,
+    expected_hash: Option<[u8; 32]>,
+    output_root: &Path,
+    progress_bar: &ProgressBar,
+) -> Result<(), DownloadAttemptError> {
+    progress_bar.set_position(0);
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(request_download_error)?
+        .error_for_status()
+        .map_err(request_download_error)?;
+    validate_declared_download_length(file_size, response.content_length())
+        .map_err(fatal_download_error)?;
+
+    let (transaction, payload_root) = new_transaction(output_root).map_err(fatal_download_error)?;
+    let mut promotion = promotion_entries(&[(file_name.to_owned(), file_name.to_owned())])
+        .map_err(fatal_download_error)?;
+    let output = open_package_output(&payload_root, file_name).map_err(fatal_download_error)?;
+    let mut output = tokio::fs::File::from_std(output);
+    let mut stream = response.bytes_stream();
+    let mut downloaded = 0_u64;
+    let mut hasher = Sha256::new();
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(request_download_error)?;
+        downloaded = checked_download_total(downloaded, chunk.len(), file_size)
+            .map_err(fatal_download_error)?;
+        hasher.update(&chunk);
+        output
+            .write_all(&chunk)
+            .await
+            .map_err(fatal_download_error)?;
+        progress_bar.set_position(downloaded);
+    }
+
+    if downloaded != file_size {
+        return Err(fatal_download_error(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            format!("received {downloaded} bytes, expected {file_size}"),
+        )));
+    }
+    validate_file_hash(expected_hash, hasher.finalize().into()).map_err(fatal_download_error)?;
+    output.sync_all().await.map_err(fatal_download_error)?;
+    drop(output);
+    promote_transaction(transaction.path(), output_root, &mut promotion)
+        .map_err(fatal_download_error)?;
     Ok(())
 }
 
@@ -187,105 +280,47 @@ pub async fn run(
         .progress_chars("#>-");
         let progress_bar = ProgressBar::new(file_size).with_style(progress_style);
 
-        let mut response = None;
+        let output_root = Path::new(".");
+        let mut retry_budget = DOWNLOAD_RETRY_LIMIT;
+        let mut completed = false;
         let mut last_error = None;
-        for url in &urls {
-            match client
-                .get(url)
-                .send()
+        'urls: for url in &urls {
+            loop {
+                match download_file_attempt(
+                    client,
+                    url,
+                    &file.file_name,
+                    file_size,
+                    expected_hash,
+                    output_root,
+                    &progress_bar,
+                )
                 .await
-                .and_then(reqwest::Response::error_for_status)
-            {
-                Ok(candidate) => {
-                    response = Some(candidate);
-                    break;
+                {
+                    Ok(()) => {
+                        completed = true;
+                        break 'urls;
+                    }
+                    Err(attempt) => {
+                        let try_next_url = attempt.try_next_url;
+                        last_error = Some(attempt.error);
+                        if attempt.retryable && consume_download_retry(&mut retry_budget).is_ok() {
+                            continue;
+                        }
+                        if !try_next_url {
+                            break 'urls;
+                        }
+                        break;
+                    }
                 }
-                Err(error) => last_error = Some(error),
             }
         }
-        let Some(res) = response else {
+        if !completed {
             let error = last_error.map_or_else(
                 || "no CDN URL succeeded".to_owned(),
                 |error| error.to_string(),
             );
-            eprintln!("failed to request {}: {error}", file.file_name);
-            return ExitCode::FAILURE;
-        };
-        if let Err(error) = validate_declared_download_length(file_size, res.content_length()) {
-            eprintln!("refusing {}: {error}", file.file_name);
-            return ExitCode::FAILURE;
-        }
-        let (transaction, payload_root) = match new_transaction(Path::new(".")) {
-            Ok(transaction) => transaction,
-            Err(error) => {
-                eprintln!("could not create download transaction: {error}");
-                return ExitCode::FAILURE;
-            }
-        };
-        let mut promotion =
-            match promotion_entries(&[(file.file_name.clone(), file.file_name.clone())]) {
-                Ok(entries) => entries,
-                Err(error) => {
-                    eprintln!("refusing unsafe download path {}: {error}", file.file_name);
-                    return ExitCode::FAILURE;
-                }
-            };
-        let output = match open_package_output(&payload_root, &file.file_name) {
-            Ok(file) => file,
-            Err(error) => {
-                eprintln!("refusing unsafe download path {}: {error}", file.file_name);
-                return ExitCode::FAILURE;
-            }
-        };
-        let mut output = tokio::fs::File::from_std(output);
-        let mut stream = res.bytes_stream();
-        let mut downloaded = 0_u64;
-        let mut hasher = Sha256::new();
-
-        while let Some(chunk) = stream.next().await {
-            let chk = match chunk {
-                Ok(chunk) => chunk,
-                Err(error) => {
-                    eprintln!("failed to stream {}: {error}", file.file_name);
-                    return ExitCode::FAILURE;
-                }
-            };
-            downloaded = match checked_download_total(downloaded, chk.len(), file_size) {
-                Ok(total) => total,
-                Err(error) => {
-                    eprintln!("refusing {}: {error}", file.file_name);
-                    return ExitCode::FAILURE;
-                }
-            };
-            hasher.update(&chk);
-            if let Err(error) = output.write_all(&chk).await {
-                eprintln!("failed to write {}: {error}", file.file_name);
-                return ExitCode::FAILURE;
-            }
-            progress_bar.inc(chk.len() as u64);
-        }
-
-        if downloaded != file_size {
-            eprintln!(
-                "refusing {}: received {downloaded} bytes, expected {file_size}",
-                file.file_name
-            );
-            return ExitCode::FAILURE;
-        }
-
-        if let Err(error) = validate_file_hash(expected_hash, hasher.finalize().into()) {
-            eprintln!("refusing {}: {error}", file.file_name);
-            return ExitCode::FAILURE;
-        }
-
-        if let Err(error) = output.sync_all().await {
-            eprintln!("failed to sync {}: {error}", file.file_name);
-            return ExitCode::FAILURE;
-        }
-        drop(output);
-        if let Err(error) = promote_transaction(transaction.path(), Path::new("."), &mut promotion)
-        {
-            eprintln!("failed to promote {}: {error}", file.file_name);
+            eprintln!("failed to download {}: {error}", file.file_name);
             return ExitCode::FAILURE;
         }
 
@@ -302,8 +337,9 @@ mod tests {
     use base64::Engine;
 
     use super::{
-        MAX_FILE_HASH_BASE64_CHARS, checked_download_total, decode_file_hash,
-        validate_declared_download_length, validate_file_hash,
+        DOWNLOAD_RETRY_LIMIT, MAX_FILE_HASH_BASE64_CHARS, checked_download_total,
+        consume_download_retry, decode_file_hash, validate_declared_download_length,
+        validate_file_hash,
     };
     use crate::package::package_download_urls;
 
@@ -369,6 +405,15 @@ mod tests {
         assert_eq!(checked_download_total(4, 6, 10).unwrap(), 10);
         assert!(checked_download_total(4, 7, 10).is_err());
         assert!(checked_download_total(u64::MAX, 1, u64::MAX).is_err());
+    }
+
+    #[test]
+    fn download_retry_budget_is_bounded() {
+        let mut remaining = DOWNLOAD_RETRY_LIMIT;
+        for _ in 0..DOWNLOAD_RETRY_LIMIT {
+            consume_download_retry(&mut remaining).expect("retry must consume budget");
+        }
+        assert!(consume_download_retry(&mut remaining).is_err());
     }
 
     #[test]
