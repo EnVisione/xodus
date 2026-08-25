@@ -570,6 +570,8 @@ pub enum SegmentMetadataParseError {
     FileMapAllocationFailed,
     #[error("unable to reserve {hash_count} segment hashes")]
     HashAllocationFailed { hash_count: usize },
+    #[error("segment metadata contains duplicate file path {name:?}")]
+    DuplicateFileName { name: String },
     #[error(
         "segment path end overflows for paths offset {paths_offset}, path offset {path_offset}, and path length {path_length}"
     )]
@@ -2535,6 +2537,9 @@ impl XvdFile {
                         hash_count: hash_slice.len(),
                     })?;
                 data_hashs.extend_from_slice(&section.data_hashs[hash_slice]);
+                if files.contains_key(&file_name) {
+                    return Err(SegmentMetadataParseError::DuplicateFileName { name: file_name });
+                }
                 files
                     .try_reserve(1)
                     .map_err(|_| SegmentMetadataParseError::FileMapAllocationFailed)?;
@@ -3055,6 +3060,7 @@ mod tests {
         task::{Context, Poll},
     };
 
+    use msixvc_common::parse::BinaryParse;
     use sha2::{Digest, Sha256};
     use tokio::{
         io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf},
@@ -3069,16 +3075,17 @@ mod tests {
         OUTPUT_WRITE_RETRY_LIMIT, PAGE_SIZE, PageHashFailure, PopulateSegmentHashesError,
         SEGMENT_METADATA_READER_CAPACITY, SegmentFile, SegmentMetadataParseError, SyncSubstream,
         UserPackageFile, UserPackageFilesParseError, XvcRegionId, XvdFile, XvdFileParseError,
-        XvdStream, collect_ntfs_segment_files, consume_download_retry_budget,
-        download_encrypted_section, download_file_end, download_page_plan, download_request_range,
-        extract_data_unit_index, extract_encrypted_section, extract_file_end,
-        extract_page_loop_end, extract_page_plan, extract_progress_bytes, extract_write_length,
-        hash_entry_read_offset, hash_page_index, is_retryable_download_error,
-        is_retryable_output_error, next_download_page, next_download_received_byte_count,
-        next_package_files_table_offset, next_segment_page_offset, non_encrypted_prefix_len,
-        ntfs_drive_extents, ntfs_partition_extents, package_file_name,
-        required_gpt_partition_length, required_gpt_partition_start, reserve_xvc_region_entries,
-        segment_file_name, segment_metadata_reader_capacity, sync_substream_absolute_target,
+        XvdSegmentMetadataSegment, XvdStream, collect_ntfs_segment_files,
+        consume_download_retry_budget, download_encrypted_section, download_file_end,
+        download_page_plan, download_request_range, extract_data_unit_index,
+        extract_encrypted_section, extract_file_end, extract_page_loop_end, extract_page_plan,
+        extract_progress_bytes, extract_write_length, hash_entry_read_offset, hash_page_index,
+        is_retryable_download_error, is_retryable_output_error, next_download_page,
+        next_download_received_byte_count, next_package_files_table_offset,
+        next_segment_page_offset, non_encrypted_prefix_len, ntfs_drive_extents,
+        ntfs_partition_extents, package_file_name, required_gpt_partition_length,
+        required_gpt_partition_start, reserve_xvc_region_entries, segment_file_name,
+        segment_metadata_reader_capacity, sync_substream_absolute_target,
         validate_download_response_extent, validate_segment_metadata_table_extent,
         validate_xvc_region_hash_entry_addresses, verify_page_hash, write_all_with_retry,
         xvd_stream_absolute_seek_target,
@@ -3539,6 +3546,42 @@ mod tests {
                     [paths_offset + path_offset as usize..paths_offset + path_offset as usize + 2]
                     .copy_from_slice(&('a' as u16).to_le_bytes());
             }
+            let read_bytes = Arc::new(AtomicUsize::new(0));
+
+            (
+                Self {
+                    inner: Cursor::new(metadata),
+                    fail_seeks: false,
+                    read_bytes: Arc::clone(&read_bytes),
+                },
+                read_bytes,
+            )
+        }
+
+        fn synthetic_segment_metadata_with_duplicate_paths() -> (Self, Arc<AtomicUsize>) {
+            let segment_count = 2_u32;
+            let paths_offset = SEGMENT_METADATA_HEADER_SIZE
+                + XvdSegmentMetadataSegment::SIZE * segment_count as usize;
+            let mut metadata = vec![0; paths_offset + 2];
+            metadata[..4].copy_from_slice(b" PFX");
+            metadata
+                [SEGMENT_METADATA_HEADER_LENGTH_OFFSET..SEGMENT_METADATA_HEADER_LENGTH_OFFSET + 4]
+                .copy_from_slice(&(SEGMENT_METADATA_HEADER_SIZE as u32).to_le_bytes());
+            metadata
+                [SEGMENT_METADATA_SEGMENT_COUNT_OFFSET..SEGMENT_METADATA_SEGMENT_COUNT_OFFSET + 4]
+                .copy_from_slice(&segment_count.to_le_bytes());
+
+            for segment_index in 0..segment_count as usize {
+                let segment_offset =
+                    SEGMENT_METADATA_HEADER_SIZE + segment_index * XvdSegmentMetadataSegment::SIZE;
+                metadata[segment_offset + 2..segment_offset + 4]
+                    .copy_from_slice(&1_u16.to_le_bytes());
+                metadata[segment_offset + 4..segment_offset + 8]
+                    .copy_from_slice(&0_u32.to_le_bytes());
+                metadata[segment_offset + 8..segment_offset + 16]
+                    .copy_from_slice(&0_u64.to_le_bytes());
+            }
+            metadata[paths_offset..paths_offset + 2].copy_from_slice(&('a' as u16).to_le_bytes());
             let read_bytes = Arc::new(AtomicUsize::new(0));
 
             (
@@ -4150,6 +4193,43 @@ mod tests {
             .get("a")
             .expect("declared segment path must be retained");
         assert_eq!(file.data_hashs, vec![[0; 20]]);
+    }
+
+    #[tokio::test]
+    async fn parse_segment_metadata_rejects_duplicate_paths() {
+        let mut xvd = XvdFile::parse(SyntheticXvdReader::synthetic_xvd_with_region_count(0))
+            .await
+            .expect("synthetic XVD must parse");
+        xvd.encrypted_section_infos.push(EncryptedSectionInfo {
+            section_offset: 0,
+            section_length: (PAGE_SIZE * 2) as u64,
+            header_id: XvcRegionId::Unknown,
+            vduid: [0; 8],
+            data_units: None,
+            first_segment_index: 0,
+            data_hashs: vec![[0; 20], [0; 20]],
+        });
+        let metadata_length =
+            (SEGMENT_METADATA_HEADER_SIZE + XvdSegmentMetadataSegment::SIZE * 2 + 2) as u64;
+        let (reader, _) = SyntheticXvdReader::synthetic_segment_metadata_with_duplicate_paths();
+        let error = match xvd
+            .parse_segment_metadata(
+                reader,
+                &UserPackageFile {
+                    offset: 0,
+                    length: metadata_length,
+                },
+            )
+            .await
+        {
+            Ok(_) => panic!("duplicate segment paths must not parse"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            SegmentMetadataParseError::DuplicateFileName { name } if name == "a"
+        ));
     }
 
     #[tokio::test]
