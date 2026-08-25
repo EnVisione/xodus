@@ -576,7 +576,7 @@ fn recover_transaction_dir(transaction_root: &Path, output_root: &Path) -> io::R
     std::fs::remove_dir_all(transaction_root).and_then(|()| sync_parent_directory(transaction_root))
 }
 
-fn recover_transactions(output_root: &Path) -> io::Result<()> {
+pub(crate) fn recover_transactions(output_root: &Path) -> io::Result<()> {
     let mut transactions = Vec::new();
     for entry in std::fs::read_dir(output_root)? {
         let entry = entry?;

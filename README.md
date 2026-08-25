@@ -14,6 +14,8 @@
 
 The project can now login, download packages and obtain licenses for games.
 
+The CLI can also install an owned, validated local MSIXVC2 fixture archive through a journaled transaction. Retail encrypted package execution and game lifecycle support remain incomplete.
+
 These parts are still quite scattered arround.
 
 - [x] Device login
@@ -101,6 +103,7 @@ Commands:
   license     Dump CIKs for use with XvdTool
   extract     Extract locally stored msixvc file
   inspect     Inspect a local MSIXVC2 archive without extracting it
+  install-msixvc2  Install a validated local MSIXVC2 archive transactionally
   login       
   streaming   Download and extract the game through streaming algorithm
   clep        Generate or decrypt base64-encoded CLEP challenge data

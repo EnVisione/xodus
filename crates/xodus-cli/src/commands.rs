@@ -2,6 +2,7 @@ pub mod clep;
 pub mod download;
 pub mod extract;
 pub mod inspect;
+pub mod install_msixvc2;
 pub mod license;
 pub mod login;
 pub mod logout;

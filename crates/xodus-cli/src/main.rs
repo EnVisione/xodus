@@ -42,6 +42,11 @@ enum SubCommand {
     Inspect {
         path: String,
     },
+    #[command(about = "Install a validated local MSIXVC2 archive transactionally")]
+    InstallMsixvc2 {
+        path: String,
+        destination: String,
+    },
     Login,
     Logout {
         #[arg(long, default_value_t = false, help = "Remove device license")]
@@ -157,6 +162,7 @@ async fn run(args: CliArgs) -> ExitCode {
             | SubCommand::SpLicense { .. }
             | SubCommand::Logout { .. }
             | SubCommand::Inspect { .. }
+            | SubCommand::InstallMsixvc2 { .. }
     );
     if needs_device_credentials {
         xodus::tokens::device::ensure_device_credentials(&client, &tokens).await;
@@ -199,6 +205,9 @@ async fn run(args: CliArgs) -> ExitCode {
             .await
         }
         SubCommand::Inspect { path } => commands::inspect::run(path),
+        SubCommand::InstallMsixvc2 { path, destination } => {
+            commands::install_msixvc2::run(path, destination)
+        }
         SubCommand::Streaming {
             source,
             destination,
