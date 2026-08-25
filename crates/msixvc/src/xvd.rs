@@ -766,6 +766,8 @@ pub enum DownloadFileHttpError {
     },
     #[error("download decryption state requires an encrypted section")]
     MissingEncryptedSection,
+    #[error("download decryption state is missing an initialized cipher")]
+    MissingCipher,
     #[error("download aligned page length overflows for page count {page_count}")]
     AlignedPageLengthOverflow { page_count: u64 },
     #[error("download page loop end overflows for start {page_start} and count {page_count}")]
@@ -2222,11 +2224,14 @@ impl XvdFile {
                 }
             }
 
+            let vduid_bytes = xvd_header.vduid.to_bytes_le();
+            let mut vduid = [0_u8; 8];
+            vduid.copy_from_slice(&vduid_bytes[..8]);
             enc_sections.push(EncryptedSectionInfo {
                 section_offset: h.offset,
                 section_length: h.length,
                 header_id: h.region_id,
-                vduid: xvd_header.vduid.to_bytes_le()[..8].try_into().unwrap(),
+                vduid,
                 data_units: Some(data_units),
                 first_segment_index: h.first_segment_index,
                 data_hashs,
@@ -2642,12 +2647,13 @@ impl XvdFile {
                         None => download_data_unit_index(page_in_section)?,
                     };
                     tweak.update_data_unit(data_unit);
-                    decrypt_page_xts(
-                        &mut page,
-                        *tweak,
-                        tweak_cipher.as_ref().unwrap(),
-                        data_cipher.as_ref().unwrap(),
-                    );
+                    let tweak_cipher = tweak_cipher
+                        .as_ref()
+                        .ok_or(DownloadFileHttpError::MissingCipher)?;
+                    let data_cipher = data_cipher
+                        .as_ref()
+                        .ok_or(DownloadFileHttpError::MissingCipher)?;
+                    decrypt_page_xts(&mut page, *tweak, tweak_cipher, data_cipher);
                     to_write_remaining
                 } else if sfile.keep_encrypted {
                     // Decryption needs full 4k blocks
