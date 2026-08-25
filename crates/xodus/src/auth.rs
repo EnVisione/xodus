@@ -14,6 +14,7 @@ use crate::models::live::ExchangeUserTokenOutcome;
 use crate::models::secrets::Token;
 use crate::models::soap;
 use crate::tokens::TokenManager;
+use crate::tokens::store::TokenStoreError;
 
 fn get_app_params() -> XalAppParameters {
     XalAppParameters {
@@ -145,9 +146,7 @@ pub async fn do_sisu(
         } else {
             address
         };
-        if let Err(err) = manager.save_user_token(address, sts) {
-            log::warn!("Failed to persist refreshed STS token: {err}");
-        }
+        persist_refreshed_user_token(manager, address, sts)?;
     }
     let token = security_tokens
         .into_iter()
@@ -185,6 +184,56 @@ pub async fn do_sisu(
         .sisu_authorize_rps(&user_token, &data.token, None)
         .await?;
     Ok((auth, resp, data))
+}
+
+fn persist_refreshed_user_token(
+    manager: &TokenManager,
+    address: String,
+    token: Token,
+) -> Result<(), TokenStoreError> {
+    manager.save_user_token(address, token)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::persist_refreshed_user_token;
+    use crate::models::secrets::Token;
+    use crate::tokens::backend::MemoryBackend;
+    use crate::tokens::manager::TokenManager;
+    use crate::tokens::store::{TokenBackend, TokenStoreError};
+
+    struct FailingBackend;
+
+    impl TokenBackend for FailingBackend {
+        fn get(&self, _key: &str) -> Result<Option<Vec<u8>>, TokenStoreError> {
+            Err(TokenStoreError::Poisoned)
+        }
+
+        fn set(&self, _key: &str, _value: &[u8]) -> Result<(), TokenStoreError> {
+            Err(TokenStoreError::Poisoned)
+        }
+
+        fn remove(&self, _key: &str) -> Result<(), TokenStoreError> {
+            Err(TokenStoreError::Poisoned)
+        }
+    }
+
+    #[test]
+    fn refreshed_token_persistence_failure_is_returned() {
+        let manager =
+            TokenManager::new(Arc::new(FailingBackend), Arc::new(MemoryBackend::default()));
+
+        let error = persist_refreshed_user_token(
+            &manager,
+            "https://user.auth.xboxlive.com".to_owned(),
+            Token::Compact("token".to_owned()),
+        )
+        .expect_err("refresh persistence failure must not be swallowed");
+
+        assert!(matches!(error, TokenStoreError::Poisoned));
+    }
 }
 
 #[ignore = "requires authorized Xbox service access and keychain state"]
