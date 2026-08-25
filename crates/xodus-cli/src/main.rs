@@ -160,7 +160,15 @@ async fn run(args: CliArgs) -> ExitCode {
         }
     };
 
-    if let Err(error) = xodus::secrets::init_secrets() {
+    let needs_secret_store = !matches!(
+        &args.command,
+        SubCommand::Clep { .. }
+            | SubCommand::SpLicense { .. }
+            | SubCommand::Inspect { .. }
+            | SubCommand::InstallMsixvc2 { .. }
+            | SubCommand::ApplyXsp { .. }
+    );
+    if needs_secret_store && let Err(error) = xodus::secrets::init_secrets() {
         eprintln!("Unable to initialize credentials: {error}");
         return ExitCode::FAILURE;
     }
