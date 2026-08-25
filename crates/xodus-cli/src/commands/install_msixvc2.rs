@@ -232,7 +232,7 @@ mod tests {
     }
 
     #[test]
-    fn installs_update_fixture_replacing_prior_package_state() {
+    fn installs_update_fixture_and_preserves_active_state_after_failed_replacement() {
         let temporary = tempfile::tempdir().expect("temporary destination must exist");
         let destination = temporary.path().join("install");
         let base_box = destination.join("Boxes/7a342636-4ffe-4966-91d1-207da876ba09.box");
@@ -266,6 +266,37 @@ mod tests {
         assert_eq!(
             std::fs::read(unrelated_file).expect("unrelated state must remain"),
             b"preserve"
+        );
+
+        assert_eq!(
+            run(
+                fixture("xodus-fixture-integrity-mismatch.msixvc")
+                    .to_string_lossy()
+                    .into_owned(),
+                destination.to_string_lossy().into_owned(),
+            ),
+            std::process::ExitCode::FAILURE
+        );
+        assert!(
+            update_box.is_file(),
+            "failed replacement must preserve active package"
+        );
+        assert!(
+            !destination
+                .join("Boxes/7a342636-4ffe-4966-91d1-207da876ba09.box")
+                .exists()
+        );
+        assert!(
+            std::fs::read_dir(&destination)
+                .expect("destination must remain readable")
+                .all(|entry| {
+                    !entry
+                        .expect("destination entry must be readable")
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".xodus-streaming-txn-")
+                }),
+            "failed replacement must not leave a staging transaction"
         );
     }
 
