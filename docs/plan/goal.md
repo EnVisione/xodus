@@ -4,18 +4,18 @@ Complete every mandatory requirement XODUS-REQ-001 through XODUS-REQ-022 and eve
 Immediate checkpoint:
 Refresh and inspect `origin` without altering the remote. Verify `origin` is the intended repository; fetch `origin` without altering the remote; verify the fetched remote-tracking ref against the current remote default-branch head. Classify the local default branch as equal, behind, ahead, or diverged; fast-forward only when safe. Do not reset, force, discard, or overwrite unexpected history. Search local branches, remote branches, and repository-wide open pull requests; resume applicable work, otherwise branch from the verified authoritative baseline. Do not invent a branch while an applicable active branch exists. Create or resume an implementation branch before modifying tracked files.
 
-SRC-024 through SRC-040 remain valid. SRC-040 typed checked payload-range arithmetic; invalid fixtures inserted no records and valid behavior remained. Phase 2 and XODUS-REQ-002 remain open; the excluded account test prevents an unfiltered-suite claim. Next harden `parse_segment_metadata`: compute each segment path's UTF-16 byte length, relative bounds, and absolute read offset with checked arithmetic; validate against declared `segment_metadata.length` before buffer allocation, seek, filename decoding, or map insertion; return typed failures. Prove invalid paths cause no path read or record insertion, and preserve one valid path, with deterministic in-memory evidence and no filesystem mutation. Leave hash-slice bounds and downstream boundaries for later. No title-package, download, stream, secret-store, package-content, or runtime work. Do not begin XODUS-REQ-003 or Phase 3 until XODUS-REQ-002 closes.
+SRC-024 through SRC-041 remain valid. SRC-041 checked segment-path ranges before allocation, seek, decoding, or insertion; invalid evidence inserted no record and valid behavior remained. Phase 2 and XODUS-REQ-002 remain open; the excluded account test prevents an unfiltered-suite claim. Next harden `parse_segment_metadata`: derive each segment's page-relative hash-slice start and end with checked subtraction, conversion, and addition; validate against `section.data_hashs.len()` before slice indexing or map insertion; return typed failures. Prove out-of-range requests neither panic nor insert records, while preserving one valid hash slice, through deterministic in-memory evidence and no filesystem mutation. Defer section-end, page-byte, and downstream arithmetic. No title-package, download, stream, secret-store, package-content, or runtime work. Do not begin XODUS-REQ-003 or Phase 3 until XODUS-REQ-002 closes.
 
 Perform one bounded inspection that ends as soon as each mandatory criterion is classified as implemented with valid evidence, incomplete, stale evidence, or externally blocked. Immediately execute the first incomplete or stale-evidence criterion. The map is not a deliverable: do not stop after producing it, do not rebuild it while unchanged evidence remains valid, and do not produce a narrative audit before implementation.
 
 Authoritative plan:
 /home/envy/Documents/Codex/2026-08-20/ca/work/xodus/docs/cachyos/plan.md
-Plan SHA-256: 5fb19bb6af339ce0a923adb64ecf86f983aa9a55caf2a5f47b5276c28a37130b
-Validated handoff plan-set SHA-256: 22589d20038fd888df55c65239b54f6a6ba0d694a520fc4d8bf555099c86fc63
+Plan SHA-256: 29ee13783e1a01c200da66541b1e556065a99b3d65d5d3cc46f81f414cbd4ff5
+Validated handoff plan-set SHA-256: e91b2c9e29b2dffcea29ab5ac1d050323ef8bffb15fcff8d21406acda51ff6b3
 Completion endpoint: Xodus stable release is complete only when the signed public CachyOS release and repository local PKGBUILD install on the Tier 1 Lenovo Legion 9 18IAX10, Minecraft for Windows and Forza Horizon 5 each pass the authorized local login, entitlement, license, clean install, update, two consecutive launch, runtime, save, shutdown, repair, and uninstall workflows, Forza passes both absolute performance profiles, Tier 2 compatibility gates pass, MSIXVC2 and XSP update support pass, unsupported anti cheat titles hand off separately to Xbox cloud gaming, all mandatory security, recovery, documentation, and release evidence passes, and no cloud result substitutes for either local target.
 
 Observed checkout branch: envy/target-metadata-evidence
-Observed checkout commit: f372b6ea024056bc985cdfa725134a90d1d97742
+Observed checkout commit: f76bae380bf88e03cbb2c8f5600543e3f8ce4968
 Repository root: /home/envy/Documents/Codex/2026-08-20/ca/work/xodus
 
 Authoritative remote:
@@ -27,7 +27,7 @@ Observed local default-branch commit: 5b77e06eaa5e3cea78af122436d35a9b02992834
 Observed local remote-tracking ref: origin/main
 Observed local remote-tracking commit: 5b77e06eaa5e3cea78af122436d35a9b02992834
 Current remote default-branch head: 5b77e06eaa5e3cea78af122436d35a9b02992834
-Remote-head evidence: git ls-remote read-only query observed 2026-08-25 at 05:57:32Z, corroborated by gh repo view EnVisione/xodus defaultBranchRef main
+Remote-head evidence: git ls-remote read-only query observed 2026-08-25 at 06:14:11Z, corroborated by gh repo view EnVisione/xodus defaultBranchRef main
 Authoritative working baseline: established
 Applicable implementation branch: envy/target-metadata-evidence
 Applicable open pull request: none identified at checkpoint

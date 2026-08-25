@@ -2,6 +2,7 @@ use std::cmp::min;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::io::{self, Error, ErrorKind, Read, Seek, SeekFrom, Write};
+use std::mem::size_of;
 
 use aes::Aes128;
 use aes::cipher::KeyInit;
@@ -419,6 +420,25 @@ pub enum SegmentMetadataParseError {
     SegmentCountTooLarge { segment_count: u32 },
     #[error("unable to reserve {segment_count} segment metadata entries")]
     SegmentAllocationFailed { segment_count: u32 },
+    #[error(
+        "segment path end overflows for paths offset {paths_offset}, path offset {path_offset}, and path length {path_length}"
+    )]
+    SegmentPathEndOverflow {
+        paths_offset: u64,
+        path_offset: u32,
+        path_length: u16,
+    },
+    #[error("segment path end {path_end} exceeds declared metadata length {metadata_length}")]
+    SegmentPathBeyondDeclaredLength { path_end: u64, metadata_length: u64 },
+    #[error(
+        "segment path offset overflows for metadata offset {metadata_offset}, paths offset {paths_offset}, path offset {path_offset}, and path length {path_length}"
+    )]
+    SegmentPathOffsetOverflow {
+        metadata_offset: u64,
+        paths_offset: u64,
+        path_offset: u32,
+        path_length: u16,
+    },
     #[error("segment metadata file name contains invalid UTF-16")]
     InvalidFileName(#[source] std::string::FromUtf16Error),
 }
@@ -666,6 +686,60 @@ fn reserve_segment_metadata_entries(
         .map_err(|_| SegmentMetadataParseError::SegmentAllocationFailed { segment_count })?;
 
     Ok(segments)
+}
+
+fn segment_path_offset(
+    metadata_offset: u64,
+    metadata_length: u64,
+    paths_offset: u64,
+    path_offset: u32,
+    path_length: u16,
+) -> Result<u64, SegmentMetadataParseError> {
+    let path_start = paths_offset.checked_add(u64::from(path_offset)).ok_or(
+        SegmentMetadataParseError::SegmentPathEndOverflow {
+            paths_offset,
+            path_offset,
+            path_length,
+        },
+    )?;
+    let path_bytes = u64::from(path_length)
+        .checked_mul(size_of::<u16>() as u64)
+        .ok_or(SegmentMetadataParseError::SegmentPathEndOverflow {
+            paths_offset,
+            path_offset,
+            path_length,
+        })?;
+    let path_end = path_start.checked_add(path_bytes).ok_or(
+        SegmentMetadataParseError::SegmentPathEndOverflow {
+            paths_offset,
+            path_offset,
+            path_length,
+        },
+    )?;
+    if path_end > metadata_length {
+        return Err(SegmentMetadataParseError::SegmentPathBeyondDeclaredLength {
+            path_end,
+            metadata_length,
+        });
+    }
+    let absolute_path_offset = metadata_offset.checked_add(path_start).ok_or(
+        SegmentMetadataParseError::SegmentPathOffsetOverflow {
+            metadata_offset,
+            paths_offset,
+            path_offset,
+            path_length,
+        },
+    )?;
+    metadata_offset.checked_add(path_end).ok_or(
+        SegmentMetadataParseError::SegmentPathOffsetOverflow {
+            metadata_offset,
+            paths_offset,
+            path_offset,
+            path_length,
+        },
+    )?;
+
+    Ok(absolute_path_offset)
 }
 
 fn validate_xvc_region_hash_entry_addresses(
@@ -1007,12 +1081,15 @@ impl XvdFile {
             for segment_no in section.first_segment_index..segment_header.segment_count {
                 let segment = &segments[segment_no as usize];
                 let s = segment.path_length;
-                let mut buf = vec![0u16, 0];
-                buf.resize(s as usize, 0);
-                file.seek(SeekFrom::Start(
-                    segment_metadata.offset + paths_offset + segment.path_offset as u64,
-                ))
-                .await?;
+                let path_offset = segment_path_offset(
+                    segment_metadata.offset,
+                    segment_metadata.length,
+                    paths_offset,
+                    segment.path_offset,
+                    s,
+                )?;
+                let mut buf = vec![0u16; s as usize];
+                file.seek(SeekFrom::Start(path_offset)).await?;
                 file.read_exact(buf.as_mut_bytes()).await?;
                 let file_name = segment_file_name(buf.as_slice())?;
                 let page_length = if segment.filesize == 0 {
@@ -1542,10 +1619,10 @@ mod tests {
     use tokio::io::{AsyncRead, AsyncSeek, ReadBuf};
 
     use super::{
-        MAX_XVC_REGION_HEADERS, SEGMENT_METADATA_READER_CAPACITY, SegmentMetadataParseError,
-        UserPackageFile, UserPackageFilesParseError, XvdFile, XvdFileParseError,
-        hash_entry_read_offset, hash_page_index, package_file_name, reserve_xvc_region_entries,
-        segment_file_name, segment_metadata_reader_capacity,
+        EncryptedSectionInfo, MAX_XVC_REGION_HEADERS, PAGE_SIZE, SEGMENT_METADATA_READER_CAPACITY,
+        SegmentMetadataParseError, UserPackageFile, UserPackageFilesParseError, XvcRegionId,
+        XvdFile, XvdFileParseError, hash_entry_read_offset, hash_page_index, package_file_name,
+        reserve_xvc_region_entries, segment_file_name, segment_metadata_reader_capacity,
         validate_segment_metadata_table_extent, validate_xvc_region_hash_entry_addresses,
     };
 
@@ -1613,6 +1690,46 @@ mod tests {
             metadata
                 [SEGMENT_METADATA_SEGMENT_COUNT_OFFSET..SEGMENT_METADATA_SEGMENT_COUNT_OFFSET + 4]
                 .copy_from_slice(&segment_count.to_le_bytes());
+            let read_bytes = Arc::new(AtomicUsize::new(0));
+
+            (
+                Self {
+                    inner: Cursor::new(metadata),
+                    fail_seeks: false,
+                    read_bytes: Arc::clone(&read_bytes),
+                },
+                read_bytes,
+            )
+        }
+
+        fn synthetic_segment_metadata_with_single_segment(
+            path_length: u16,
+            path_offset: u32,
+            include_path: bool,
+        ) -> (Self, Arc<AtomicUsize>) {
+            let paths_offset = SEGMENT_METADATA_HEADER_SIZE + 16;
+            let path_end = if include_path {
+                paths_offset + path_offset as usize + path_length as usize * 2
+            } else {
+                paths_offset
+            };
+            let mut metadata = vec![0; path_end];
+            metadata[..4].copy_from_slice(b" PFX");
+            metadata
+                [SEGMENT_METADATA_HEADER_LENGTH_OFFSET..SEGMENT_METADATA_HEADER_LENGTH_OFFSET + 4]
+                .copy_from_slice(&(SEGMENT_METADATA_HEADER_SIZE as u32).to_le_bytes());
+            metadata
+                [SEGMENT_METADATA_SEGMENT_COUNT_OFFSET..SEGMENT_METADATA_SEGMENT_COUNT_OFFSET + 4]
+                .copy_from_slice(&1_u32.to_le_bytes());
+            metadata[SEGMENT_METADATA_HEADER_SIZE + 2..SEGMENT_METADATA_HEADER_SIZE + 4]
+                .copy_from_slice(&path_length.to_le_bytes());
+            metadata[SEGMENT_METADATA_HEADER_SIZE + 4..SEGMENT_METADATA_HEADER_SIZE + 8]
+                .copy_from_slice(&path_offset.to_le_bytes());
+            if include_path && path_length == 1 {
+                metadata
+                    [paths_offset + path_offset as usize..paths_offset + path_offset as usize + 2]
+                    .copy_from_slice(&('a' as u16).to_le_bytes());
+            }
             let read_bytes = Arc::new(AtomicUsize::new(0));
 
             (
@@ -2060,6 +2177,82 @@ mod tests {
             .expect("empty table within declared metadata must parse");
 
         assert!(files.is_empty());
+    }
+
+    #[tokio::test]
+    async fn parse_segment_metadata_rejects_path_beyond_declared_length_before_path_allocation() {
+        let mut xvd = XvdFile::parse(SyntheticXvdReader::synthetic_xvd_with_region_count(0))
+            .await
+            .expect("synthetic XVD must parse");
+        xvd.encrypted_section_infos.push(EncryptedSectionInfo {
+            section_offset: 0,
+            section_length: PAGE_SIZE as u64,
+            header_id: XvcRegionId::Unknown,
+            vduid: [0; 8],
+            data_units: None,
+            first_segment_index: 0,
+            data_hashs: vec![[0; 20]],
+        });
+        let metadata_length = (SEGMENT_METADATA_HEADER_SIZE + 16) as u64;
+        let (reader, read_bytes) =
+            SyntheticXvdReader::synthetic_segment_metadata_with_single_segment(1, 0, false);
+        let error = match xvd
+            .parse_segment_metadata(
+                reader,
+                &UserPackageFile {
+                    offset: 0,
+                    length: metadata_length,
+                },
+            )
+            .await
+        {
+            Ok(_) => panic!("out-of-bounds segment path must not parse"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            SegmentMetadataParseError::SegmentPathBeyondDeclaredLength {
+                path_end,
+                metadata_length: actual_metadata_length,
+            } if path_end == metadata_length + 2 && actual_metadata_length == metadata_length
+        ));
+        assert_eq!(
+            read_bytes.load(Ordering::Relaxed),
+            metadata_length as usize,
+            "out-of-bounds segment path must not seek, decode, or insert a file"
+        );
+    }
+
+    #[tokio::test]
+    async fn parse_segment_metadata_preserves_a_declared_path() {
+        let mut xvd = XvdFile::parse(SyntheticXvdReader::synthetic_xvd_with_region_count(0))
+            .await
+            .expect("synthetic XVD must parse");
+        xvd.encrypted_section_infos.push(EncryptedSectionInfo {
+            section_offset: 0,
+            section_length: PAGE_SIZE as u64,
+            header_id: XvcRegionId::Unknown,
+            vduid: [0; 8],
+            data_units: None,
+            first_segment_index: 0,
+            data_hashs: vec![[0; 20]],
+        });
+        let metadata_length = (SEGMENT_METADATA_HEADER_SIZE + 16 + 2) as u64;
+        let (reader, _) =
+            SyntheticXvdReader::synthetic_segment_metadata_with_single_segment(1, 0, true);
+        let files = xvd
+            .parse_segment_metadata(
+                reader,
+                &UserPackageFile {
+                    offset: 0,
+                    length: metadata_length,
+                },
+            )
+            .await
+            .expect("declared segment path must parse");
+
+        assert!(files.contains_key("a"));
     }
 
     #[tokio::test]
