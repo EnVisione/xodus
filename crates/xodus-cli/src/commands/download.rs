@@ -454,6 +454,8 @@ mod tests {
         });
 
         let directory = tempfile::tempdir().expect("temporary output must exist");
+        std::fs::write(directory.path().join("package.bin"), b"verified")
+            .expect("existing package must be writable");
         let progress = indicatif::ProgressBar::hidden();
         let url = format!("http://{address}/package");
         let client = reqwest::Client::new();
@@ -470,6 +472,19 @@ mod tests {
         .expect_err("short response must be returned as retryable");
         assert!(first.retryable);
         assert!(first.try_next_url);
+        assert_eq!(
+            std::fs::read(directory.path().join("package.bin"))
+                .expect("failed download must preserve the existing package"),
+            b"verified"
+        );
+        assert!(
+            std::fs::read_dir(directory.path())
+                .expect("output directory must remain readable")
+                .all(|entry| {
+                    entry.expect("output entry must be readable").file_name() == "package.bin"
+                }),
+            "failed download must not leave a transaction directory"
+        );
 
         download_file_attempt(
             &client,
