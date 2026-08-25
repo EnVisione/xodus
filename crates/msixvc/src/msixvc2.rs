@@ -248,6 +248,21 @@ mod tests {
     }
 
     #[test]
+    fn mutated_msixvc2_fixture_never_panics() {
+        for seed in 0_u32..256 {
+            let mut bytes = VALID.to_vec();
+            let index = (seed as usize * 97) % bytes.len();
+            let mutation = (seed.rotate_left(7) as u8).wrapping_add(1);
+            bytes[index] ^= mutation;
+
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                inspect(Cursor::new(bytes))
+            }));
+            assert!(result.is_ok(), "MSIXVC2 mutation {seed} panicked");
+        }
+    }
+
+    #[test]
     fn visitor_receives_safe_entries_and_crc_scan_drains_each_entry() {
         let mut metadata_seen = false;
         visit_entries(Cursor::new(VALID), 1_000_000, |entry, file| {

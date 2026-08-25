@@ -3423,6 +3423,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mutated_xvd_metadata_never_panics() {
+        for seed in 0_u32..256 {
+            let mut reader = SyntheticXvdReader::synthetic_xvd_with_region_count(0);
+            let index = XVC_INFO_OFFSET + (seed as usize % XVC_INFO_SIZE);
+            let mutation = (seed.rotate_left(13) as u8).wrapping_add(1);
+            reader.inner.get_mut()[index] ^= mutation;
+
+            let result = tokio::spawn(async move { XvdFile::parse(reader).await }).await;
+            assert!(result.is_ok(), "XVD mutation {seed} panicked");
+        }
+    }
+
+    #[tokio::test]
     async fn parse_rejects_hash_tree_depth_from_adversarial_drive_size_before_seek() {
         let mut reader = SyntheticXvdReader::synthetic_xvd_header(false);
         reader.inner.get_mut()[DRIVE_SIZE_OFFSET..DRIVE_SIZE_OFFSET + 8]

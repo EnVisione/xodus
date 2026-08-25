@@ -863,6 +863,21 @@ mod tests {
         assert_eq!(xsp.entries.len(), 2);
     }
 
+    #[tokio::test]
+    async fn mutated_xsp_fixture_never_panics() {
+        for seed in 0_u32..256 {
+            let mut bytes = VALID_XSP.to_vec();
+            let index = (seed as usize * 53) % bytes.len();
+            let mutation = (seed.rotate_left(11) as u8).wrapping_add(1);
+            bytes[index] ^= mutation;
+
+            let result =
+                tokio::spawn(async move { XspFile::parse_file(TestReader::new(&bytes)).await })
+                    .await;
+            assert!(result.is_ok(), "XSP mutation {seed} panicked");
+        }
+    }
+
     fn hash20(bytes: &[u8]) -> [u8; 20] {
         let digest = Sha256::digest(bytes);
         let mut hash = [0_u8; 20];
