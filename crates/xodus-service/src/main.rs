@@ -1,5 +1,6 @@
 use std::fs::Permissions;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+use std::path::Path;
 use std::sync::Arc;
 
 use tokio::net::UnixListener;
@@ -25,6 +26,31 @@ enum ServiceError {
     RuntimeDirectory(#[from] std::env::VarError),
     #[error("service socket operation failed: {0}")]
     Io(#[from] std::io::Error),
+    #[error("service socket path is not a Unix socket: {path}")]
+    SocketPathNotSocket { path: String },
+    #[error("service socket path is owned by another user: {path}")]
+    SocketPathOwnedByAnotherUser { path: String },
+}
+
+fn prepare_socket(path: &Path, runtime_uid: u32) -> Result<(), ServiceError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if !metadata.file_type().is_socket() {
+                return Err(ServiceError::SocketPathNotSocket {
+                    path: path.display().to_string(),
+                });
+            }
+            if metadata.uid() != runtime_uid {
+                return Err(ServiceError::SocketPathOwnedByAnotherUser {
+                    path: path.display().to_string(),
+                });
+            }
+            std::fs::remove_file(path)?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
 }
 
 #[tokio::main]
@@ -41,8 +67,10 @@ async fn main() -> Result<(), ServiceError> {
 
     env_logger::init_from_env("XODUS_LOG");
     let runtime_dir = utils::get_runtime_dir()?;
+    let runtime_uid = std::fs::metadata(&runtime_dir)?.uid();
     let cancellation = CancellationToken::new();
     let socket_path = format!("{runtime_dir}/xodus.sock");
+    prepare_socket(Path::new(&socket_path), runtime_uid)?;
     let trigger = cancellation.clone();
     tokio::spawn(async move {
         if let Err(error) = tokio::signal::ctrl_c().await {
@@ -65,7 +93,7 @@ async fn main() -> Result<(), ServiceError> {
             let device_token = device_token.clone();
             let tokens = tokens.clone();
             tokio::spawn(async move {
-                connection::router::route(socket, token, device_token, tokens).await
+                connection::router::route(socket, token, device_token, tokens, runtime_uid).await
             });
         }
     }
@@ -77,4 +105,32 @@ async fn main() -> Result<(), ServiceError> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ServiceError, prepare_socket};
+
+    #[test]
+    fn prepare_socket_refuses_to_remove_a_regular_file() {
+        let path =
+            std::env::temp_dir().join(format!("xodus-service-socket-test-{}", std::process::id()));
+        std::fs::write(&path, b"not a socket").expect("test file must be created");
+
+        let error = prepare_socket(&path, 0).expect_err("regular file must not be removed");
+        assert!(matches!(error, ServiceError::SocketPathNotSocket { .. }));
+        assert!(path.exists());
+        std::fs::remove_file(path).expect("test file must be removed");
+    }
+
+    #[test]
+    fn prepare_socket_accepts_an_absent_path() {
+        let path = std::env::temp_dir().join(format!(
+            "xodus-service-missing-socket-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        prepare_socket(&path, 0).expect("absent socket path must be accepted");
+    }
 }

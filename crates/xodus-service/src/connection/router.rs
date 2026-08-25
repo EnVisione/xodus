@@ -12,9 +12,20 @@ pub async fn route(
     token: CancellationToken,
     device_token: LegacyToken,
     tokens: Arc<TokenManager>,
+    runtime_uid: u32,
 ) {
-    let cred = socket.peer_cred().ok().and_then(|cred| cred.pid());
-    log::debug!("Connection from pid {cred:?}");
+    let cred = match socket.peer_cred() {
+        Ok(cred) => cred,
+        Err(error) => {
+            log::error!("failed to inspect IPC peer credentials: {error}");
+            return;
+        }
+    };
+    if cred.uid() != runtime_uid {
+        log::error!("rejecting IPC peer with a different user id");
+        return;
+    }
+    log::debug!("Connection from pid {:?}", cred.pid());
 
     let mut context = match SimpleContext::new(device_token, tokens) {
         Ok(context) => context,
