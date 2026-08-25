@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "planId": "PLAN-MASTER",
-  "planSetSha256": "12baf46281a008d96b509923a6370aab49c8a3f95cc48b0169dbd1794814e320",
+  "planSetSha256": "8ffd23392afa18667ce31e6cd5e438eb7c87a67a66f12927e271a9cb0336981c",
   "planningSubject": {
     "name": "Evolve the EnVisione Xodus fork into a CachyOS native, launcher neutral Game Pass PC launcher and runtime for Hyprland, Wayland, XWayland, and the NVIDIA RTX 5090 Laptop GPU",
     "requestedArtifact": "authoritative_plan",
@@ -153,6 +153,13 @@
         "subject": "Weather-OS GDK-Proton repository, release, and manifest availability",
         "source": "Owner-authorized sanitized GitHub REST repository and release metadata for `Weather-OS/GDK-Proton`, plus its public README, from August 24, 2026",
         "use": "Record the bounded `release10-32` tag, commit, publication date, archive digest-field coverage, license gap, and XUser limitation as a candidate signal only"
+      },
+      {
+        "id": "SRC-022",
+        "role": "review_feedback",
+        "subject": "Phase 2 evidence dependency-cycle correction",
+        "source": "Current owner request and authoritative phase sequencing at `c37f5dd518179ac229abf1dd7c83f2649990d16b`",
+        "use": "Split the Phase 2 package-metadata entry contract from runtime and lifecycle evidence that can exist only after later implementation, without weakening or deleting any requirement"
       }
     ]
   },
@@ -280,7 +287,7 @@
       "owner": "msixvc",
       "contributors": "msixvc-common, xodus core, xodus-cli",
       "dependencies": [
-        "EXT-002",
+        "EXT-002A",
         "EXT-009",
         "XODUS-REQ-002",
         "XODUS-REQ-003"
@@ -447,7 +454,7 @@
       "contributors": "xodus core, msixvc, runtime integration, native desktop application",
       "dependencies": [
         "EXT-001",
-        "EXT-002",
+        "EXT-002A",
         "EXT-003",
         "EXT-004",
         "EXT-008",
@@ -471,7 +478,7 @@
       "contributors": "launcher domain, runtime integration, xodus-service, performance harness",
       "dependencies": [
         "EXT-001",
-        "EXT-002",
+        "EXT-002A",
         "EXT-003",
         "EXT-004",
         "EXT-005",
@@ -493,7 +500,7 @@
       "contributors": "launcher domain, runtime integration, platform integration, performance harness",
       "dependencies": [
         "EXT-001",
-        "EXT-002",
+        "EXT-002A",
         "EXT-003",
         "EXT-004",
         "EXT-005",
@@ -547,7 +554,7 @@
       "owner": "xgameruntime integration",
       "contributors": "xodus-service, runtime integration, compatibility validation",
       "dependencies": [
-        "EXT-002",
+        "EXT-002A",
         "EXT-003",
         "EXT-004",
         "XODUS-REQ-006",
@@ -857,6 +864,24 @@
         "XODUS-REQ-022"
       ],
       "supersedes": []
+    },
+    {
+      "id": "DEC-011",
+      "question": "How should target evidence be sequenced when the Phase 2 entry gate depends on runtime and lifecycle capabilities implemented only in later phases?",
+      "selectedChoice": "Use EXT-002A as the available package-metadata and integrity prerequisite for XODUS-PHASE-002 entry. Preserve the broader EXT-002 runtime, online-service, anti cheat, and target lifecycle evidence contract as later phase acceptance evidence, never as an entry condition for the implementation that must produce it.",
+      "rationale": "Requiring full target runtime traces, dynamic service and anti cheat classification, and real target updates before package transactions, runtime artifacts, launcher orchestration, and lifecycle execution exist creates a dependency cycle. Splitting the entry subset preserves all evidence obligations while restoring strict sequential execution.",
+      "affectedRequirements": [
+        "XODUS-REQ-004",
+        "XODUS-REQ-014",
+        "XODUS-REQ-015",
+        "XODUS-REQ-016",
+        "XODUS-REQ-018",
+        "XODUS-REQ-019"
+      ],
+      "supersedes": [
+        "EXT-002",
+        "XODUS-PHASE-002"
+      ]
     }
   ],
   "externalPrerequisites": [
@@ -882,7 +907,30 @@
     },
     {
       "id": "EXT-002",
-      "name": "Verified target entitlements and current package metadata",
+      "name": "Complete target runtime, service, anti cheat, and lifecycle evidence",
+      "affected_requirements": [
+        "XODUS-REQ-014",
+        "XODUS-REQ-015",
+        "XODUS-REQ-016",
+        "XODUS-REQ-018",
+        "XODUS-REQ-019"
+      ],
+      "mandatory_for_endpoint": true,
+      "kind": "service",
+      "availability": "unavailable",
+      "authorization": "authorized",
+      "blocked_plan_approved": true,
+      "required_evidence": [
+        "Phase 4 controlled runtime artifact and secure service protocol conformance traces",
+        "Phase 5 controlled launcher mapping, supervision, failure propagation, and runtime integration traces",
+        "Phase 7 dynamic lifecycle and compatibility-classifier evidence",
+        "Phase 8 Minecraft full runtime trace, online-service classification, anti cheat classification beyond static signals, and real source-to-target update evidence",
+        "Phase 9 Forza full runtime trace, online-service classification, anti cheat classification beyond static signals, and real source-to-target update evidence"
+      ]
+    },
+    {
+      "id": "EXT-002A",
+      "name": "Verified Phase 2 target package metadata and integrity baseline",
       "affected_requirements": [
         "XODUS-REQ-004",
         "XODUS-REQ-014",
@@ -892,15 +940,14 @@
       ],
       "mandatory_for_endpoint": true,
       "kind": "service",
-      "availability": "unavailable",
+      "availability": "available",
       "authorization": "authorized",
-      "blocked_plan_approved": true,
+      "blocked_plan_approved": false,
       "required_evidence": [
-        "Sanitized authenticated discovery records current target product, content, package, format, architecture, and update metadata without retaining download URLs",
-        "Authorized catalog and entitlement responses for both target product IDs",
-        "Recorded package format, architecture, dependencies, entrypoint, protected files, Game Runtime use and runtime traces, service requirements, and anti cheat classification",
-        "Trustworthy full-transfer integrity path and verification evidence for each target base package independent of the absent entitlement FileHash and HashOfHashes fields; the complete Minecraft XVD internal data hash-tree check and the bounded Forza full-package transport and hash-tree canary satisfy this integrity subcriterion for both targets",
-        "Full Minecraft and Forza target runtime traces, complete online-service classification, anti cheat classification beyond static signals, and real source-to-target update evidence"
+        "Sanitized authenticated records bind both target product and package identities without retaining download URLs",
+        "Both targets record current entitlement, package format, architecture, dependencies, entrypoint, protected-file inventory, and update-descriptor metadata",
+        "Minecraft and Forza complete-transfer integrity evidence passes independently of absent entitlement FileHash and HashOfHashes fields",
+        "Phase 2 entry uses no target runtime, dynamic online-service, anti cheat, applied update, installation, launch, save, or lifecycle claim"
       ]
     },
     {
@@ -1126,7 +1173,7 @@
       "id": "XODUS-PHASE-002",
       "owner": "msixvc",
       "dependencies": [
-        "EXT-002",
+        "EXT-002A",
         "EXT-008",
         "EXT-009",
         "XODUS-PHASE-001"
@@ -1165,7 +1212,7 @@
       "id": "XODUS-PHASE-005",
       "owner": "launcher domain",
       "dependencies": [
-        "EXT-002",
+        "EXT-002A",
         "XODUS-PHASE-004"
       ],
       "canonicalRequirements": [
@@ -1193,7 +1240,7 @@
       "owner": "launcher domain",
       "dependencies": [
         "EXT-001",
-        "EXT-002",
+        "EXT-002A",
         "EXT-006",
         "EXT-008",
         "XODUS-PHASE-006"
@@ -1208,7 +1255,7 @@
       "owner": "compatibility validation",
       "dependencies": [
         "EXT-001",
-        "EXT-002",
+        "EXT-002A",
         "EXT-003",
         "EXT-004",
         "EXT-005",
@@ -1225,7 +1272,7 @@
       "owner": "performance harness",
       "dependencies": [
         "EXT-001",
-        "EXT-002",
+        "EXT-002A",
         "EXT-003",
         "EXT-004",
         "EXT-005",
@@ -1257,11 +1304,11 @@
   "goalCreator": {
     "mandatoryBoundary": "XODUS-REQ-001 through XODUS-REQ-022, including both local targets, both Forza profiles, Tier 2 compatibility, MSIXVC2, XSP updates, separate cloud fallback, and signed release packaging.",
     "optionalFutureDisposition": "excluded",
-    "lockedOwnerDecisions": "DEC-001 through DEC-010 are resolved exactly as recorded in this plan.",
+    "lockedOwnerDecisions": "DEC-001 through DEC-011 are resolved exactly as recorded in this plan.",
     "activePhase": "XODUS-PHASE-002",
-    "nextExecutableAction": "Obtain or produce reviewable versioned artifact manifests for EXT-003 and EXT-004 with every required source, digest, compatibility, license, security, build, patch, runtime, and mapping field, while continuing the remaining EXT-002 evidence separately and without downloading or qualifying a candidate or beginning XODUS-PHASE-002 implementation.",
-    "knownFailingChecks": "Phase 001 baseline verification passed, while Clippy still reports four warnings at the frozen revision. At pre-change implementation branch HEAD 12069a866c6e82d9dd4286f4a6a43dc75cf100a1, EXT-009 synthetic entry artifact evidence is complete but no XODUS-PHASE-002 parser or transaction consumer tests have run. The Minecraft and Forza full-transfer integrity canaries passed independently. A disposable probe reused normal persisted TokenManager state without keyring inspection or credential listing. For each target, entitlement and package metadata resolved, the current protected-content license succeeded, XVD was parsed only in memory, and one eligible protected executable was decrypted only into an anonymous memfd. Every authenticated range was exact and no larger than 8 MiB, with required 206 Partial Content, matching Content-Range, and matching body length. The probe ran `objdump -p` solely against each memfd and emitted booleans. Minecraft's complete PE report recorded no direct Game Runtime import, no online-service signal, no known anti-cheat signal, and a PE delay-import directory. Forza's report recorded no direct Game Runtime import, one online-service signal, no known anti-cheat signal, and a PE delay-import directory. Microsoft documents that games compile static `xgameruntime.lib`, which loads `xgameruntime.dll`, so absent direct DLL imports are non-exclusionary. Delay-directory metadata does not prove actual delay-loaded behavior, no negative static observation excludes dynamic behavior, and the Forza signal does not prove actual online-service behavior. The current `run` path requires a local `.xodus-streaming.msixvc` plus per-segment sidecars before constructing `WINE_DLL_FILE_MAP` and starting Wine. The disposable probes retained no local package tree, so no runtime test occurred. Microsoft also documents colocated `XGameRuntime.dll` dependencies and absent native services for non-Microsoft platforms. Bounded GitHub REST metadata found WineGDK active on `master` with `NOASSERTION` and no releases. It found GDK-Proton active on `main` with no declared license and a `release10-32` archive tied to commit `787fbe84a95419908e63ae9fd6acb01a731fbc24`, published February 22, 2026, with GitHub SHA-256 but no SHA-512 provenance. The GDK-Proton README still says XUser is not implemented for Microsoft Account login. No asset was downloaded, and neither candidate provides a complete EXT-003 or EXT-004 manifest, so both prerequisites are unavailable. No real package apply or recovery, source-to-target update, target runtime trace, complete online-service or anti-cheat classification, artifact qualification, target-game, performance, Tier 2, or release acceptance run has passed.",
-    "knownExternalBlockers": "The current phase-entry blocker is EXT-002, Verified target entitlements and current package metadata. Later endpoint blockers remain EXT-003, Versioned xgameruntime artifact, EXT-004, Versioned Xodus compatible Wine or Proton artifact, EXT-007, Scoped public release publication approval, EXT-010, Tier 2 CachyOS Hyprland NVIDIA compatibility hardware, and EXT-011, Authorized Minecraft and Forza update revision pairs.",
+    "nextExecutableAction": "Create a bounded XODUS-PHASE-002 execution goal from the validated EXT-002A, EXT-008, and EXT-009 entry contract. Keep broader EXT-002 evidence assigned to the Phase 4, 5, 7, 8, and 9 acceptance gates, and do not treat this plan correction as implementation start.",
+    "knownFailingChecks": "Phase 1 baseline verification passed, while Clippy still reports four warnings at the frozen revision. At pre-change implementation branch HEAD c37f5dd518179ac229abf1dd7c83f2649990d16b, EXT-002A, EXT-008, and EXT-009 satisfy the corrected Phase 2 entry contract, but XODUS-PHASE-002 remains not started and no parser consumer, transaction, authorized real-package apply, rollback, or recovery test has run. EXT-002 still lacks full Minecraft and Forza runtime traces, dynamic online-service and anti cheat classification, and real target source-to-target updates; these remain mandatory in later phase gates. EXT-003 and EXT-004 remain unavailable because their reviewable artifact manifests are incomplete. No target-game, performance, Tier 2, or release acceptance run has passed.",
+    "knownExternalBlockers": "No current XODUS-PHASE-002 entry blocker remains after EXT-002A validation. Later endpoint blockers remain EXT-002, Complete target runtime, service, anti cheat, and lifecycle evidence, EXT-003, Versioned xgameruntime artifact, EXT-004, Versioned Xodus compatible Wine or Proton artifact, EXT-007, Scoped public release publication approval, EXT-010, Tier 2 CachyOS Hyprland NVIDIA compatibility hardware, and EXT-011, Authorized Minecraft and Forza update revision pairs.",
     "requiredEvidenceGates": "Sequential phase exits, complete deterministic tests including XODUS-PHASE-002 corpus consumers, authorized real-package apply and recovery exercises, authorized local title lifecycles, target runtime traces, Forza telemetry, Tier 2 results, package lifecycle, security review, documentation, signatures, checksums, SBOM, public release inspection, fresh install, and rollback must pass."
   }
 }

@@ -1,21 +1,21 @@
 Objective:
-Complete every mandatory requirement XODUS-REQ-001 through XODUS-REQ-022 and every stable-release gate, excluding optional and future work; Phase 2 remains entry-blocked by EXT-002. Successful completion is permitted only when runtime verification passes, artifacts are bound to the authoritative default-branch commit, every evidence gate passes, and the final plan-wide audit finds no known mandatory repository-owned defect.
+Complete every mandatory requirement XODUS-REQ-001 through XODUS-REQ-022 and every stable-release gate, excluding optional and future work; Phase 2 is entry-ready through EXT-002A, EXT-008, and EXT-009. Successful completion is permitted only when runtime verification passes, artifacts are bound to the authoritative default-branch commit, every evidence gate passes, and the final plan-wide audit finds no known mandatory repository-owned defect.
 
 Immediate checkpoint:
 Preserve plan evidence. Refresh and inspect `origin` without altering the remote. Verify `origin` is the intended repository; fetch `origin` without altering the remote; verify the fetched remote-tracking ref against the current remote default-branch head. Classify the local default branch as equal, behind, ahead, or diverged; fast-forward only when safe. Do not reset, force, discard, or overwrite unexpected history. Search local branches, remote branches, and repository-wide open pull requests; resume applicable work, otherwise branch from the verified authoritative baseline. Do not invent a branch while an applicable active branch exists. Create or resume an implementation branch before modifying tracked files.
 
-Protected-PE memfd reports were not runtime tests: Microsoft documents static `xgameruntime.lib` loading `xgameruntime.dll`, making direct-import absence non-exclusionary; Xodus `run` needs local `.xodus-streaming.msixvc` plus segment sidecars for `WINE_DLL_FILE_MAP`. EXT-002 remains PARTIAL, unavailable, and the sole Phase 2 entry blocker. EXT-003 and EXT-004 are also unavailable. WineGDK has no releases, declares `NOASSERTION`, and leaves Microsoft services incomplete. GDK-Proton `release10-32` supplies only SHA-256 release metadata: no declared license, SHA-512, provenance, security review, required compatibility proof, or mapping test; XUser remains incomplete. Treat GDK-Proton as a candidate signal only, never a usable artifact. Do not begin Phase 2 or use `xodus-cli` download/streaming. First obtain or produce compliant reviewable EXT-003/004 artifact manifests. Attempt a local runtime lifecycle only afterward, with a versioned runtime artifact and safe authorized disposable package tree; otherwise complete independent mandatory work.
+Phase 2 is ENTRY READY, NOT STARTED: EXT-002A, EXT-008, and EXT-009 satisfy entry; broader EXT-002 remains PARTIAL and unavailable only for later Phase 4, 5, 7, 8, and 9 acceptance and stable completion. Start XODUS-REQ-002 with its first criterion: make package paths reject absolute roots, drive prefixes, parent traversal, ambiguous separators, symlink escapes, invalid names, and destinations outside the transaction root before file creation, using only EXT-009 synthetic fixtures and a disposable sandbox. Implement typed failures and regression tests; run narrow then affected gates. Do not inspect or acquire title packages, download or stream content, or use `xodus-cli` download/streaming. Do not begin Phase 3 or stack a phase branch before Phase 2 exits and integrates.
 
 Perform one bounded inspection that ends as soon as each mandatory criterion is classified as implemented with valid evidence, incomplete, stale evidence, or externally blocked. Immediately execute the first incomplete or stale-evidence criterion. The map is not a deliverable: do not stop after producing it, do not rebuild it while unchanged evidence remains valid, and do not produce a narrative audit before implementation.
 
 Authoritative plan:
 /home/envy/Documents/Codex/2026-08-20/ca/work/xodus/docs/cachyos/plan.md
-Plan SHA-256: 0d68744f69b651b6c1d4bf867d873a28d8bdc2c48a179bee539a83e754ba266c
-Validated handoff plan-set SHA-256: 12baf46281a008d96b509923a6370aab49c8a3f95cc48b0169dbd1794814e320
+Plan SHA-256: a62089f67375b1c448d267e4e4d0f78376c861f10f0fb7e41c97b373fc943ab4
+Validated handoff plan-set SHA-256: 8ffd23392afa18667ce31e6cd5e438eb7c87a67a66f12927e271a9cb0336981c
 Completion endpoint: Xodus stable release is complete only when the signed public CachyOS release and repository local PKGBUILD install on the Tier 1 Lenovo Legion 9 18IAX10, Minecraft for Windows and Forza Horizon 5 each pass the authorized local login, entitlement, license, clean install, update, two consecutive launch, runtime, save, shutdown, repair, and uninstall workflows, Forza passes both absolute performance profiles, Tier 2 compatibility gates pass, MSIXVC2 and XSP update support pass, unsupported anti cheat titles hand off separately to Xbox cloud gaming, all mandatory security, recovery, documentation, and release evidence passes, and no cloud result substitutes for either local target.
 
 Observed checkout branch: envy/target-metadata-evidence
-Observed checkout commit: 12069a866c6e82d9dd4286f4a6a43dc75cf100a1
+Observed checkout commit: c37f5dd518179ac229abf1dd7c83f2649990d16b
 Repository root: /home/envy/Documents/Codex/2026-08-20/ca/work/xodus
 
 Authoritative remote:
@@ -27,7 +27,7 @@ Observed local default-branch commit: 5b77e06eaa5e3cea78af122436d35a9b02992834
 Observed local remote-tracking ref: origin/main
 Observed local remote-tracking commit: 5b77e06eaa5e3cea78af122436d35a9b02992834
 Current remote default-branch head: 5b77e06eaa5e3cea78af122436d35a9b02992834
-Remote-head evidence: git ls-remote read-only query observed 2026-08-25 at 00:55:25Z, corroborated by gh repo view EnVisione/xodus defaultBranchRef main
+Remote-head evidence: git ls-remote read-only query observed 2026-08-25 at 01:17:45Z, corroborated by gh repo view EnVisione/xodus defaultBranchRef main
 Authoritative working baseline: established
 Applicable implementation branch: envy/target-metadata-evidence
 Applicable open pull request: none identified at checkpoint
@@ -35,18 +35,18 @@ Applicable open pull request: none identified at checkpoint
 Verify that the plan, repository identity, package metadata, and remote describe the same project. Never switch revisions silently.
 
 Execution behavior:
-Inspect, implement, test, audit, fix, verify, integrate when required, verify resulting state, and continue through every remaining mandatory requirement. Protect valid evidence unless regression reopens it. After EXT-002 closes, execute phases sequentially. For each defect, preserve evidence, fix the smallest root cause, add regression coverage, rerun affected gates, inspect adjacent behavior, and continue.
+Inspect, implement, test, audit, fix, verify, integrate when required, verify resulting state, and continue through every remaining mandatory requirement. Protect valid evidence unless regression reopens it. Execute Phase 2 without stacking; after verified integration, execute later phases sequentially as prerequisites permit. For each defect, preserve evidence, fix the smallest root cause, add regression coverage, rerun affected gates, inspect adjacent behavior, and continue.
 
 Reuse evidence only while affected code, dependencies, configuration, environment, schemas, fixtures, and paths remain unchanged; otherwise mark it stale. Documentation changes do not substitute for implementation. Do not modify `plan.md` or status documents merely to restate a checkpoint, decision, blocker, or unchanged evidence.
 
 Guardrails and authority:
-DEC-001 through DEC-010 are locked; optional and future scope is excluded. Preserve tracked modifications, recovery paths, and unrelated files. PE reports are bounded evidence, not Phase 2 authority.
+DEC-001 through DEC-011 are locked; optional and future scope is excluded. Preserve tracked modifications, recovery paths, and unrelated files. EXT-002A authorizes only Phase 2 entry; broader EXT-002 and later gates remain mandatory.
 
 Never weaken, skip, disable, delete, or narrow a valid test, and never suppress a valid failure. Never ignore a required exit code, reduce a required threshold, or mark a check allowed to fail. Never introduce a production bypass solely for tests or substitute mocked behavior for required real integration, signing, publication, recovery, or runtime evidence. If a test contradicts the plan or contract, prove it and replace it with equal or stronger coverage.
 
 Do not commit directly to main. Keep the default branch safe: permit a safe fast-forward and require authorized pull-request integration. Use an approved secret mechanism and credential store. Never inspect or list credentials, keyring content, browser storage, or package content; never print, echo, log, commit, serialize, cache, or place secrets in a ledger, fixture, report, command output, or outside that store. Reject secret-bearing files. Repository defects, failed tests, and missing implementation are work, not external blockers.
 
-This blocker-tolerant run covers only: EXT-002 Verified target entitlements and current package metadata; EXT-003 Versioned xgameruntime artifact; EXT-004 Versioned Xodus compatible Wine or Proton artifact; EXT-007 Scoped public release publication approval; EXT-010 Tier 2 CachyOS Hyprland NVIDIA compatibility hardware; and EXT-011 Authorized Minecraft and Forza update revision pairs. It grants no publication approval and does not broaden DEC-004.
+This blocker-tolerant run covers only: EXT-002 Complete target runtime, service, anti cheat, and lifecycle evidence; EXT-003 Versioned xgameruntime artifact; EXT-004 Versioned Xodus compatible Wine or Proton artifact; EXT-007 Scoped public release publication approval; EXT-010 Tier 2 CachyOS Hyprland NVIDIA compatibility hardware; and EXT-011 Authorized Minecraft and Forza update revision pairs. It grants no publication approval and does not broaden DEC-004.
 
 Verification and stopping:
 Use highest-fidelity real behavior proof across deterministic, security, corpus, real-package, runtime, performance, Tier 2, release, rollback, and recovery gates. Compilation and mocks cannot replace real behavior.
