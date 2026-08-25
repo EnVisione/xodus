@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "planId": "PLAN-MASTER",
-  "planSetSha256": "d103c41b0e20265b8980a2a82c2471173b512758123537ff8cb5ffde4e303063",
+  "planSetSha256": "12baf46281a008d96b509923a6370aab49c8a3f95cc48b0169dbd1794814e320",
   "planningSubject": {
     "name": "Evolve the EnVisione Xodus fork into a CachyOS native, launcher neutral Game Pass PC launcher and runtime for Hyprland, Wayland, XWayland, and the NVIDIA RTX 5090 Laptop GPU",
     "requestedArtifact": "authoritative_plan",
@@ -139,6 +139,20 @@
         "subject": "Weather-OS WineGDK candidate upstream context",
         "source": "[Weather-OS/WineGDK README](https://github.com/Weather-OS/WineGDK), accessed August 24, 2026",
         "use": "Record its Microsoft-services work-in-progress status and Minecraft online direction toward GDK-Proton as candidate context only, without a tested, complete, owned, secure, compatible, or EXT-003 or EXT-004 closure claim"
+      },
+      {
+        "id": "SRC-020",
+        "role": "status",
+        "subject": "Weather-OS WineGDK repository and release availability",
+        "source": "Owner-authorized sanitized GitHub REST repository and release metadata for `Weather-OS/WineGDK`, plus its public README, from August 24, 2026",
+        "use": "Record active repository state, default branch, declared license state, zero-release result, and service limitations without downloading an artifact or qualifying EXT-003 or EXT-004"
+      },
+      {
+        "id": "SRC-021",
+        "role": "status",
+        "subject": "Weather-OS GDK-Proton repository, release, and manifest availability",
+        "source": "Owner-authorized sanitized GitHub REST repository and release metadata for `Weather-OS/GDK-Proton`, plus its public README, from August 24, 2026",
+        "use": "Record the bounded `release10-32` tag, commit, publication date, archive digest-field coverage, license gap, and XUser limitation as a candidate signal only"
       }
     ]
   },
@@ -902,11 +916,12 @@
       ],
       "mandatory_for_endpoint": true,
       "kind": "artifact",
-      "availability": "unknown",
+      "availability": "unavailable",
       "authorization": "authorized",
       "blocked_plan_approved": true,
       "required_evidence": [
-        "Artifact manifest binds the exact version and source revision",
+        "Reviewable artifact manifest binds exact version, authoritative source revision, SHA-256, SHA-512, compatibility range, license provenance, and security review",
+        "Manifest records the exported Game Runtime surface and service protocol range",
         "Reproducible build and compatibility tests pass against the selected service protocol"
       ],
       "artifact_evidence": [
@@ -934,11 +949,11 @@
       ],
       "mandatory_for_endpoint": true,
       "kind": "artifact",
-      "availability": "unknown",
+      "availability": "unavailable",
       "authorization": "authorized",
       "blocked_plan_approved": true,
       "required_evidence": [
-        "Artifact manifest binds the exact source revision, patch series, build recipe, DXVK or VKD3D Proton versions, and runtime contents",
+        "Reviewable artifact manifest binds exact version, authoritative source revision, SHA-256, SHA-512, compatibility range, license provenance, security review, patch series, build recipe, build container or chroot, DXVK or VKD3D Proton versions, and runtime contents",
         "Protected executable mapping and target compatibility tests pass"
       ],
       "artifact_evidence": [
@@ -1244,8 +1259,8 @@
     "optionalFutureDisposition": "excluded",
     "lockedOwnerDecisions": "DEC-001 through DEC-010 are resolved exactly as recorded in this plan.",
     "activePhase": "XODUS-PHASE-002",
-    "nextExecutableAction": "Pursue a legitimate local target lifecycle only when a safe authorized disposable package tree and versioned runtime artifact exist, while separately assessing EXT-003 and EXT-004 manifest availability and continuing EXT-002 runtime-trace, online-service, anti-cheat, and real source-to-target update evidence without beginning XODUS-PHASE-002 implementation.",
-    "knownFailingChecks": "Phase 001 baseline verification passed, while Clippy still reports four warnings at the frozen revision. At pre-change implementation branch HEAD 1f8c3332f144e9df47fafe9221dfc71a4bf5be56, EXT-009 synthetic entry artifact evidence is complete but no XODUS-PHASE-002 parser or transaction consumer tests have run. The Minecraft and Forza full-transfer integrity canaries passed independently. A disposable probe reused normal persisted TokenManager state without keyring inspection or credential listing. For each target, entitlement and package metadata resolved, the current protected-content license succeeded, XVD was parsed only in memory, and one eligible protected executable was decrypted only into an anonymous memfd. Every authenticated range was exact and no larger than 8 MiB, with required 206 Partial Content, matching Content-Range, and matching body length. The probe ran `objdump -p` solely against each memfd and emitted booleans. Minecraft's complete PE report recorded no direct Game Runtime import, no online-service signal, no known anti-cheat signal, and a PE delay-import directory. Forza's report recorded no direct Game Runtime import, one online-service signal, no known anti-cheat signal, and a PE delay-import directory. Microsoft documents that games compile static `xgameruntime.lib`, which loads `xgameruntime.dll`, so absent direct DLL imports are non-exclusionary. Delay-directory metadata does not prove actual delay-loaded behavior, no negative static observation excludes dynamic behavior, and the Forza signal does not prove actual online-service behavior. The current `run` path requires a local `.xodus-streaming.msixvc` plus per-segment sidecars before constructing `WINE_DLL_FILE_MAP` and starting Wine. The disposable probes retained no local package tree, so no runtime test occurred. Microsoft also documents colocated `XGameRuntime.dll` dependencies and absent native services for non-Microsoft platforms. Weather-OS/WineGDK remains untested candidate context with Microsoft services described as work in progress and Minecraft online direction toward GDK-Proton; it closes neither EXT-003 nor EXT-004. No real package apply or recovery, source-to-target update, target runtime trace, complete online-service or anti-cheat classification, target-game, performance, Tier 2, or release acceptance run has passed.",
+    "nextExecutableAction": "Obtain or produce reviewable versioned artifact manifests for EXT-003 and EXT-004 with every required source, digest, compatibility, license, security, build, patch, runtime, and mapping field, while continuing the remaining EXT-002 evidence separately and without downloading or qualifying a candidate or beginning XODUS-PHASE-002 implementation.",
+    "knownFailingChecks": "Phase 001 baseline verification passed, while Clippy still reports four warnings at the frozen revision. At pre-change implementation branch HEAD 12069a866c6e82d9dd4286f4a6a43dc75cf100a1, EXT-009 synthetic entry artifact evidence is complete but no XODUS-PHASE-002 parser or transaction consumer tests have run. The Minecraft and Forza full-transfer integrity canaries passed independently. A disposable probe reused normal persisted TokenManager state without keyring inspection or credential listing. For each target, entitlement and package metadata resolved, the current protected-content license succeeded, XVD was parsed only in memory, and one eligible protected executable was decrypted only into an anonymous memfd. Every authenticated range was exact and no larger than 8 MiB, with required 206 Partial Content, matching Content-Range, and matching body length. The probe ran `objdump -p` solely against each memfd and emitted booleans. Minecraft's complete PE report recorded no direct Game Runtime import, no online-service signal, no known anti-cheat signal, and a PE delay-import directory. Forza's report recorded no direct Game Runtime import, one online-service signal, no known anti-cheat signal, and a PE delay-import directory. Microsoft documents that games compile static `xgameruntime.lib`, which loads `xgameruntime.dll`, so absent direct DLL imports are non-exclusionary. Delay-directory metadata does not prove actual delay-loaded behavior, no negative static observation excludes dynamic behavior, and the Forza signal does not prove actual online-service behavior. The current `run` path requires a local `.xodus-streaming.msixvc` plus per-segment sidecars before constructing `WINE_DLL_FILE_MAP` and starting Wine. The disposable probes retained no local package tree, so no runtime test occurred. Microsoft also documents colocated `XGameRuntime.dll` dependencies and absent native services for non-Microsoft platforms. Bounded GitHub REST metadata found WineGDK active on `master` with `NOASSERTION` and no releases. It found GDK-Proton active on `main` with no declared license and a `release10-32` archive tied to commit `787fbe84a95419908e63ae9fd6acb01a731fbc24`, published February 22, 2026, with GitHub SHA-256 but no SHA-512 provenance. The GDK-Proton README still says XUser is not implemented for Microsoft Account login. No asset was downloaded, and neither candidate provides a complete EXT-003 or EXT-004 manifest, so both prerequisites are unavailable. No real package apply or recovery, source-to-target update, target runtime trace, complete online-service or anti-cheat classification, artifact qualification, target-game, performance, Tier 2, or release acceptance run has passed.",
     "knownExternalBlockers": "The current phase-entry blocker is EXT-002, Verified target entitlements and current package metadata. Later endpoint blockers remain EXT-003, Versioned xgameruntime artifact, EXT-004, Versioned Xodus compatible Wine or Proton artifact, EXT-007, Scoped public release publication approval, EXT-010, Tier 2 CachyOS Hyprland NVIDIA compatibility hardware, and EXT-011, Authorized Minecraft and Forza update revision pairs.",
     "requiredEvidenceGates": "Sequential phase exits, complete deterministic tests including XODUS-PHASE-002 corpus consumers, authorized real-package apply and recovery exercises, authorized local title lifecycles, target runtime traces, Forza telemetry, Tier 2 results, package lifecycle, security review, documentation, signatures, checksums, SBOM, public release inspection, fresh install, and rollback must pass."
   }

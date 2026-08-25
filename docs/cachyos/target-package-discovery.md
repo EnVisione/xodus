@@ -63,6 +63,8 @@ The current Xodus `run` command expects a local source tree containing `.xodus-s
 
 Microsoft also documents that non-Microsoft platforms need `XGameRuntime.dll` and its dependencies alongside the executable because native Gaming Runtime services are unavailable. Weather-OS WineGDK and GDK-Proton are useful upstream context, but their published notes leave Microsoft services or XUser incomplete. Neither is a tested, versioned, security-reviewed artifact for this project.
 
+Bounded GitHub metadata checks, without asset download, found no WineGDK release and a `NOASSERTION` license declaration. GDK-Proton has a `release10-32` archive with a GitHub SHA-256 digest, but no declared license or SHA-512 provenance, and it lacks the required artifact provenance, compatibility, security-review, build, patch, runtime, and protected-mapping evidence. These candidates cannot satisfy the Game Runtime or Wine or Proton artifact prerequisites.
+
 ### Isolated Minecraft Update Plan Inspection
 
 One current Minecraft XSP update plan was selected from the entitled package listing and read in a disposable directory under a 1 MiB response limit. The response size matched its 4,304 byte package-listing entry. The current `XspFile` parser accepted it and reported 13 patch records, 10 new-data records, and 3 copy-data records.
