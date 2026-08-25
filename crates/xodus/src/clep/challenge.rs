@@ -1,4 +1,4 @@
-use zerocopy::{FromZeros, transmute, transmute_mut};
+use zerocopy::{FromZeros, transmute};
 
 use crate::models::clep::*;
 
@@ -235,13 +235,16 @@ impl Cipher {
 /// is asserted by tests and the round trip test verifies the byte layout.
 pub fn clep_obfuscate(buffer: &mut [u8; 2048]) {
     // --- IV setup: XOR state with first data word, write back ---
-    let blocks: &mut [[u8; 8]; 256] = transmute_mut!(buffer);
-    let [_word1, word2]: &mut [[u8; 4]; 2] = transmute_mut!(&mut blocks[0]);
+    let (blocks, remainder) = buffer.as_chunks_mut::<8>();
+    debug_assert!(remainder.is_empty());
+    let first = &mut blocks[0];
+    let mut word2 = [0_u8; 4];
+    word2.copy_from_slice(&first[4..8]);
 
-    let iv = u32::from_le_bytes(*word2);
+    let iv = u32::from_le_bytes(word2);
     let mut cipher = Cipher::new(iv);
 
-    *word2 = cipher.lo.to_le_bytes();
+    first[4..8].copy_from_slice(&cipher.lo.to_le_bytes());
 
     // --- CBC-like encryption of 255 blocks (buffer[8..2048]) ---
     for block in blocks.iter_mut().skip(1) {
@@ -252,14 +255,17 @@ pub fn clep_obfuscate(buffer: &mut [u8; 2048]) {
 /// Inverse of [`clep_obfuscate`].
 pub fn clep_deobfuscate(buffer: &mut [u8; 2048]) {
     // --- IV setup: recover the original IV that was XORed into word2 ---
-    let blocks: &mut [[u8; 8]; 256] = transmute_mut!(buffer);
-    let [_word1, word2]: &mut [[u8; 4]; 2] = transmute_mut!(&mut blocks[0]);
+    let (blocks, remainder) = buffer.as_chunks_mut::<8>();
+    debug_assert!(remainder.is_empty());
+    let first = &mut blocks[0];
+    let mut word2 = [0_u8; 4];
+    word2.copy_from_slice(&first[4..8]);
 
-    let obfuscated_lo = u32::from_le_bytes(*word2);
+    let obfuscated_lo = u32::from_le_bytes(word2);
     let iv = Cipher::INITIAL_STATE ^ obfuscated_lo;
     let mut cipher = Cipher::new(iv);
 
-    *word2 = iv.to_le_bytes();
+    first[4..8].copy_from_slice(&iv.to_le_bytes());
 
     // --- CBC-like decryption of 255 blocks (buffer[8..2048]) ---
     for block in blocks.iter_mut().skip(1) {
