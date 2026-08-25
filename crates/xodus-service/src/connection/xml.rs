@@ -92,6 +92,7 @@ pub async fn parse_message(
             let Token::Legacy(token) = user_sts_token else {
                 return Err("stored user STS token is not a legacy token".into());
             };
+            let user = context.tokens().get_user()?;
             let scope = if req.msa_full_trust {
                 "service::user.auth.xboxlive.com::MBI_SSL"
             } else {
@@ -118,7 +119,7 @@ pub async fn parse_message(
             let user_token = xodus::api::live::exchange_user_token(
                 &context.client,
                 token,
-                "USERNAME".to_string(),
+                user.username,
                 device_token.clone(),
                 None,
                 Some("Silent".to_string()),
