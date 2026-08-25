@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::os::fd::{AsFd, IntoRawFd};
 use std::path::Path;
-use std::process::ExitCode;
+use std::process::{ExitCode, ExitStatus};
 
 use msixvc::models::xvd::PAGE_SIZE;
 use msixvc::xvd::{SegmentFile, XvdFile};
@@ -18,6 +18,14 @@ use xodus::tokens::TokenManager;
 
 use crate::commands::streaming::open_package_input;
 use crate::license::get_license;
+
+fn child_exit_code(status: ExitStatus) -> ExitCode {
+    if status.success() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
 
 #[cfg(target_os = "linux")]
 fn make_temp_file(_folder: &str) -> std::io::Result<std::fs::File> {
@@ -390,5 +398,36 @@ pub async fn run(
 
     cleanup().await;
 
-    ExitCode::from(status.code().map(|c| c as u8).unwrap_or(0))
+    child_exit_code(status)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::process::ExitStatusExt;
+
+    use super::child_exit_code;
+
+    #[test]
+    fn child_exit_code_preserves_success() {
+        assert_eq!(
+            child_exit_code(std::process::ExitStatus::from_raw(0)),
+            std::process::ExitCode::SUCCESS
+        );
+    }
+
+    #[test]
+    fn child_exit_code_rejects_nonzero_exit() {
+        assert_eq!(
+            child_exit_code(std::process::ExitStatus::from_raw(256)),
+            std::process::ExitCode::FAILURE
+        );
+    }
+
+    #[test]
+    fn child_exit_code_rejects_signal_termination() {
+        assert_eq!(
+            child_exit_code(std::process::ExitStatus::from_raw(9)),
+            std::process::ExitCode::FAILURE
+        );
+    }
 }
