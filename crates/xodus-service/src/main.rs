@@ -4,6 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use tokio::net::UnixListener;
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use xodus::tokens::TokenManager;
 
@@ -13,6 +14,7 @@ mod utils;
 
 const XML_MAGIC: u32 = 0x58445358;
 const PROTO_MAGIC: u32 = 0x58445350;
+const MAX_CONNECTIONS: usize = 64;
 
 #[derive(Debug, thiserror::Error)]
 enum ServiceError {
@@ -69,6 +71,7 @@ async fn main() -> Result<(), ServiceError> {
     let runtime_dir = utils::get_runtime_dir()?;
     let runtime_uid = std::fs::metadata(&runtime_dir)?.uid();
     let cancellation = CancellationToken::new();
+    let connection_limit = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     let socket_path = format!("{runtime_dir}/xodus.sock");
     prepare_socket(Path::new(&socket_path), runtime_uid)?;
     let trigger = cancellation.clone();
@@ -92,7 +95,16 @@ async fn main() -> Result<(), ServiceError> {
             let token = cancellation.clone();
             let device_token = device_token.clone();
             let tokens = tokens.clone();
+            let connection_limit = connection_limit.clone();
+            let permit = match connection_limit.try_acquire_owned() {
+                Ok(permit) => permit,
+                Err(_) => {
+                    log::warn!("rejecting IPC connection at the concurrency limit");
+                    continue;
+                }
+            };
             tokio::spawn(async move {
+                let _permit = permit;
                 connection::router::route(socket, token, device_token, tokens, runtime_uid).await
             });
         }

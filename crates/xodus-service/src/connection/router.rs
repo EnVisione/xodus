@@ -1,11 +1,17 @@
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use tokio::io::AsyncReadExt;
+use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use xodus::models::secrets::LegacyToken;
 use xodus::tokens::TokenManager;
 
 use crate::simple_context::SimpleContext;
+
+const MESSAGE_TIMEOUT: Duration = Duration::from_secs(30);
+const RATE_WINDOW: Duration = Duration::from_secs(60);
+const MAX_MESSAGES_PER_WINDOW: u32 = 120;
 
 pub async fn route(
     mut socket: tokio::net::UnixStream,
@@ -34,29 +40,73 @@ pub async fn route(
             return;
         }
     };
+    let mut rate_window_start = Instant::now();
+    let mut messages_in_window = 0_u32;
     loop {
-        let mut read_magic = [0; 4];
         if token.is_cancelled() {
             return;
         }
-        let read = socket.read_exact(&mut read_magic).await;
+        if rate_window_start.elapsed() >= RATE_WINDOW {
+            rate_window_start = Instant::now();
+            messages_in_window = 0;
+        }
+        if messages_in_window >= MAX_MESSAGES_PER_WINDOW {
+            log::warn!("closing IPC peer after exceeding the message rate limit");
+            return;
+        }
+        messages_in_window += 1;
+
+        let mut read_magic = [0; 4];
+        let read = match timeout(MESSAGE_TIMEOUT, socket.read_exact(&mut read_magic)).await {
+            Ok(result) => result,
+            Err(_) => {
+                log::error!("timed out reading IPC message magic");
+                return;
+            }
+        };
         if let Err(err) = read {
-            log::error!("Failed to read magic: {err:?}");
+            log::error!("failed to read magic: {err:?}");
             return;
         }
 
         let magic = u32::from_le_bytes(read_magic);
         let res = match magic {
-            crate::XML_MAGIC => super::xml::handle(&mut socket, &mut context).await,
-            crate::PROTO_MAGIC => super::proto::handle(&mut socket, &mut context).await,
+            crate::XML_MAGIC => {
+                match timeout(
+                    MESSAGE_TIMEOUT,
+                    super::xml::handle(&mut socket, &mut context),
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => {
+                        log::error!("timed out handling XML IPC message");
+                        return;
+                    }
+                }
+            }
+            crate::PROTO_MAGIC => {
+                match timeout(
+                    MESSAGE_TIMEOUT,
+                    super::proto::handle(&mut socket, &mut context),
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => {
+                        log::error!("timed out handling protobuf IPC message");
+                        return;
+                    }
+                }
+            }
             _ => {
-                log::error!("Unknown magic");
+                log::error!("unknown IPC magic");
                 return;
             }
         };
 
         if let Err(err) = res {
-            log::error!("There was an error handling the message: {err}");
+            log::error!("IPC message failed: {err}");
         }
     }
 }
