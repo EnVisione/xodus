@@ -36,14 +36,18 @@ pub async fn run(client: &reqwest::Client, tokens: &TokenManager) -> ExitCode {
         }
         Some(soap::BodyContent::RequestSecurityTokenResponse(token)) => vec![*token],
         None => {
-            eprintln!("Didn't log in");
-            vec![]
+            eprintln!("login produced no security token response");
+            return ExitCode::FAILURE;
         }
         Some(_) => {
             eprintln!("Unsupported login response");
             return ExitCode::FAILURE;
         }
     };
+    if issued_tokens.is_empty() {
+        eprintln!("login response contained no security tokens");
+        return ExitCode::FAILURE;
+    }
 
     for token in issued_tokens {
         let address = token.applies_to.endpoint_reference.address.clone();
@@ -173,9 +177,8 @@ impl webview::SessionHandler for LoginHandler {
                     return Ok(webview::HandlerControl::Continue);
                 }
 
-                println!("User token exchange returned a fault without inline auth");
                 runtime.close_session(session_id);
-                Ok(webview::HandlerControl::Complete(None))
+                Err("user token exchange returned a fault without inline auth".into())
             }
             ExchangeUserTokenOutcome::Issued(da) => {
                 runtime.close_session(session_id);
