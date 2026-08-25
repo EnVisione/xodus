@@ -6,7 +6,6 @@ use std::mem::size_of;
 
 use aes::Aes128;
 use aes::cipher::KeyInit;
-use bytes::Bytes;
 use futures_util::StreamExt;
 use msixvc_common::parse::{BinaryParse, BinaryTryParse};
 use reqwest::header::{CONTENT_LENGTH, CONTENT_RANGE, RANGE};
@@ -2655,12 +2654,45 @@ impl XvdFile {
             } else {
                 Ok(None)
             };
-            let data: Bytes;
-            if let Ok(Some(Ok(b))) = next
-                && !b.is_empty()
-            {
-                data = b;
-            } else {
+            let data = match next {
+                Ok(Some(Ok(data))) if !data.is_empty() => Some(data),
+                Ok(Some(Ok(_))) => {
+                    consume_download_retry_budget(
+                        &mut retry_budget,
+                        DownloadFileHttpError::Io(Error::other(
+                            "download HTTP response returned an empty chunk",
+                        )),
+                    )?;
+                    None
+                }
+                Ok(Some(Err(error))) => {
+                    consume_download_retry_budget(
+                        &mut retry_budget,
+                        DownloadFileHttpError::Io(Error::other(error)),
+                    )?;
+                    None
+                }
+                Ok(None) => {
+                    consume_download_retry_budget(
+                        &mut retry_budget,
+                        DownloadFileHttpError::Io(Error::other(
+                            "download HTTP response ended before the requested extent",
+                        )),
+                    )?;
+                    None
+                }
+                Err(_) => {
+                    consume_download_retry_budget(
+                        &mut retry_budget,
+                        DownloadFileHttpError::Io(Error::new(
+                            ErrorKind::TimedOut,
+                            "download HTTP response stalled",
+                        )),
+                    )?;
+                    None
+                }
+            };
+            let Some(data) = data else {
                 let resume_request =
                     download_request_range(sfile.offset, page_plan.page_length, v)?;
                 let (response, total) = loop {
@@ -2683,7 +2715,7 @@ impl XvdFile {
                 response_total = Some(total);
                 stream = Some(response.bytes_stream());
                 continue;
-            }
+            };
 
             v = next_download_received_byte_count(v, data.len(), page_plan.page_length)?;
             progress(min(v, sfile.length), sfile.length);
