@@ -1,21 +1,21 @@
 Objective:
-Complete every mandatory requirement XODUS-REQ-001 through XODUS-REQ-022 and every stable-release gate, excluding optional and future work; Phase 2 is in progress with XODUS-REQ-002 containment first. Successful completion is permitted only when runtime verification passes, artifacts are bound to the authoritative default-branch commit, every evidence gate passes, and the final plan-wide audit finds no known mandatory repository-owned defect.
+Complete every mandatory requirement XODUS-REQ-001 through XODUS-REQ-022 and every stable-release gate, excluding optional and future work; Phase 2 is in progress with XODUS-REQ-002 parser hardening next. Successful completion is permitted only when runtime verification passes, artifacts are bound to the authoritative default-branch commit, every evidence gate passes, and the final plan-wide audit finds no known mandatory repository-owned defect.
 
 Immediate checkpoint:
 Preserve plan evidence. Refresh and inspect `origin` without altering the remote. Verify `origin` is the intended repository; fetch `origin` without altering the remote; verify the fetched remote-tracking ref against the current remote default-branch head. Classify the local default branch as equal, behind, ahead, or diverged; fast-forward only when safe. Do not reset, force, discard, or overwrite unexpected history. Search local branches, remote branches, and repository-wide open pull requests; resume applicable work, otherwise branch from the verified authoritative baseline. Do not invent a branch while an applicable active branch exists. Create or resume an implementation branch before modifying tracked files.
 
-Phase 2 is IN PROGRESS, with no source edit or passing implementation test yet. First, update `crates/xodus-cli/src/commands/streaming.rs`: reject untrusted segment paths before directory or file creation, block symlink escapes, and prove both with EXT-009 synthetic fixtures in a disposable sandbox. Inspect the current join/open path, implement typed containment before creation, add rejection and no-outside-mutation tests, then run narrow and affected gates. Broader EXT-002 remains PARTIAL and unavailable for later Phase 4, 5, 7, 8, and 9 acceptance and stable completion. Do not inspect or acquire title packages, download or stream content, use `xodus-cli` download/streaming, or perform runtime actions. Do not begin Phase 3 or stack a phase branch before Phase 2 exits and integrates.
+XODUS-REQ-002 containment passed only its synthetic Linux sandbox: four targeted tests, formatting, Clippy, release build, and workspace tests with the account-backed test skipped. Phase 2 and XODUS-REQ-002 remain open. The unfiltered run stalled over two minutes in existing account-backed `api::live::test::test_get_xbox_live_dev_token`; it was stopped, not passed. Next, inventory remotely influenced panics, placeholders, unchecked offsets and sizes; convert one bounded parser boundary to typed failures; prove malformed, truncated, and oversized EXT-009 fixtures cause no abort, unbounded allocation, or filesystem mutation. Do not inspect or acquire title packages, download or stream content, inspect secrets, keyrings, browser storage, or package content, or perform runtime actions. No Phase 3 or stacked branch before Phase 2 exits and integrates.
 
 Perform one bounded inspection that ends as soon as each mandatory criterion is classified as implemented with valid evidence, incomplete, stale evidence, or externally blocked. Immediately execute the first incomplete or stale-evidence criterion. The map is not a deliverable: do not stop after producing it, do not rebuild it while unchanged evidence remains valid, and do not produce a narrative audit before implementation.
 
 Authoritative plan:
 /home/envy/Documents/Codex/2026-08-20/ca/work/xodus/docs/cachyos/plan.md
-Plan SHA-256: 11ba4932a12397372fdfb26f493bb46bfeb14ec9eac1989b2c9b4106d503c9b6
-Validated handoff plan-set SHA-256: 23f959201b0789c7abb9ca1830b9b5c42ba3ac28f06b1753bd2749b5e0e2a8c8
+Plan SHA-256: 632bc23593bfe698ab20543b3cd651e226329d6a11ad3381126afb33e10ab2b8
+Validated handoff plan-set SHA-256: c371ec00f8100d9527571d3839529ed7ff57bed2250f8bff7b9c1574c87b4b95
 Completion endpoint: Xodus stable release is complete only when the signed public CachyOS release and repository local PKGBUILD install on the Tier 1 Lenovo Legion 9 18IAX10, Minecraft for Windows and Forza Horizon 5 each pass the authorized local login, entitlement, license, clean install, update, two consecutive launch, runtime, save, shutdown, repair, and uninstall workflows, Forza passes both absolute performance profiles, Tier 2 compatibility gates pass, MSIXVC2 and XSP update support pass, unsupported anti cheat titles hand off separately to Xbox cloud gaming, all mandatory security, recovery, documentation, and release evidence passes, and no cloud result substitutes for either local target.
 
 Observed checkout branch: envy/target-metadata-evidence
-Observed checkout commit: fb291739e298ac16b81a01b36027e4d0146aa53b
+Observed checkout commit: 7f62ec2db0516411f467e4949d7e09e1c5b03ed1
 Repository root: /home/envy/Documents/Codex/2026-08-20/ca/work/xodus
 
 Authoritative remote:
@@ -27,7 +27,7 @@ Observed local default-branch commit: 5b77e06eaa5e3cea78af122436d35a9b02992834
 Observed local remote-tracking ref: origin/main
 Observed local remote-tracking commit: 5b77e06eaa5e3cea78af122436d35a9b02992834
 Current remote default-branch head: 5b77e06eaa5e3cea78af122436d35a9b02992834
-Remote-head evidence: git ls-remote read-only query observed 2026-08-25 at 01:34:21Z, corroborated by gh repo view EnVisione/xodus defaultBranchRef main
+Remote-head evidence: git ls-remote read-only query observed 2026-08-25 at 02:07:17Z, corroborated by gh repo view EnVisione/xodus defaultBranchRef main
 Authoritative working baseline: established
 Applicable implementation branch: envy/target-metadata-evidence
 Applicable open pull request: none identified at checkpoint

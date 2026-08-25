@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "planId": "PLAN-MASTER",
-  "planSetSha256": "23f959201b0789c7abb9ca1830b9b5c42ba3ac28f06b1753bd2749b5e0e2a8c8",
+  "planSetSha256": "c371ec00f8100d9527571d3839529ed7ff57bed2250f8bff7b9c1574c87b4b95",
   "planningSubject": {
     "name": "Evolve the EnVisione Xodus fork into a CachyOS native, launcher neutral Game Pass PC launcher and runtime for Hyprland, Wayland, XWayland, and the NVIDIA RTX 5090 Laptop GPU",
     "requestedArtifact": "authoritative_plan",
@@ -167,6 +167,13 @@
         "subject": "Phase 2 package path containment implementation start",
         "source": "Goal validation and CodeGraph evidence for `crates/xodus-cli/src/commands/streaming.rs` at `fb291739e298ac16b81a01b36027e4d0146aa53b`",
         "use": "Record the untrusted segment-name join, pre-containment directory and file creation, missing coverage, and first ordered XODUS-REQ-002 task without claiming a source change or test result"
+      },
+      {
+        "id": "SRC-024",
+        "role": "repository_evidence",
+        "subject": "Verified Phase 2 package path containment implementation slice",
+        "source": "Owner-authorized implementation, documentation, and verification results for the working tree based on `7f62ec2db0516411f467e4949d7e09e1c5b03ed1`, with `crates/xodus-cli/src/commands/streaming.rs` SHA-256 `f1d82b0aa1807b98a6e7cdca1d11fc9d1e64f5ac4fe73b0c75da4edafc2982f7` and patch SHA-256 `7d5a294a18a2893b990484a0df6596f8029de2e19a4b3bf3605f55214799e6c2`, plus `docs/xodus/architecture.md` SHA-256 `a37ba28441d870ff0df1563506bfd32cf26c668eb9e990f5d11d575449f95f98` and patch SHA-256 `d7cc083011f687e3d98630d19705b31b1af1160e081bdb5f6fad8aaaf247c855`",
+        "use": "Record the exact containment behavior, typed internal invariant failure, documented boundary, targeted and workspace verification results, stopped opt-in account-test limitation, and next bounded XODUS-REQ-002 task without claiming full-suite, requirement, or phase completion"
       }
     ]
   },
@@ -1313,8 +1320,8 @@
     "optionalFutureDisposition": "excluded",
     "lockedOwnerDecisions": "DEC-001 through DEC-011 are resolved exactly as recorded in this plan.",
     "activePhase": "XODUS-PHASE-002",
-    "nextExecutableAction": "Implement only the first XODUS-PHASE-002 criterion in `crates/xodus-cli/src/commands/streaming.rs`: reject unsafe untrusted segment paths before any filesystem creation, prevent package writes from escaping through symlinks, and prove both boundaries with synthetic fixtures in a disposable sandbox before proceeding to later Phase 2 work.",
-    "knownFailingChecks": "Phase 1 baseline verification passed, while Clippy still reports four warnings at the frozen revision. At pre-change implementation branch HEAD fb291739e298ac16b81a01b36027e4d0146aa53b, CodeGraph shows that `streaming.rs` joins an untrusted `SegmentFile` job name below `out` after separator replacement, then creates parent directories and opens files without a containment or symlink-escape boundary. No source coverage exercises this path. XODUS-PHASE-002 is IN PROGRESS, but no source edit or passing implementation test is claimed by this plan-only state update. EXT-002 still lacks later target runtime and lifecycle evidence, EXT-003 and EXT-004 artifact manifests remain unavailable, and no real-package, target-game, performance, Tier 2, or release acceptance run has passed.",
+    "nextExecutableAction": "Continue XODUS-REQ-002 with one bounded package-parser failure-hardening slice: inventory remotely influenced panic, placeholder, unchecked offset, and unchecked size paths, convert the first selected boundary to typed failures, and prove malformed, truncated, and oversized EXT-009 fixtures cause no process abort, unbounded allocation, or filesystem mutation. Do not begin XODUS-REQ-003 until XODUS-REQ-002 closes.",
+    "knownFailingChecks": "Phase 1 baseline verification passed. At the refreshed SRC-024 digests, four targeted path-containment tests, `cargo fmt --check`, and the xodus-cli Clippy check passed after the typed-error correction. Clippy emitted exactly the existing four warnings, one `chunks_exact` warning and three existing CLI warnings, with no new warning. `cargo build --workspace --release` and `cargo test --workspace --all-targets -- --skip test_get_xbox_live_dev_token` were rerun on that exact source and passed. The unfiltered workspace test run was stopped after the opt-in account-backed `api::live::test::test_get_xbox_live_dev_token` made no network activity for more than two minutes, contrary to the plan's offline-test policy; therefore no full-suite pass or fix for that test is claimed. XODUS-REQ-002 still lacks the remaining parser, property, fuzz, unsafe-reshape, and static panic-inventory evidence. EXT-002 still lacks later target runtime and lifecycle evidence, EXT-003 and EXT-004 artifact manifests remain unavailable, and no real-package, target-game, performance, Tier 2, or release acceptance run has passed.",
     "knownExternalBlockers": "No current XODUS-PHASE-002 entry blocker remains after EXT-002A validation. Later endpoint blockers remain EXT-002, Complete target runtime, service, anti cheat, and lifecycle evidence, EXT-003, Versioned xgameruntime artifact, EXT-004, Versioned Xodus compatible Wine or Proton artifact, EXT-007, Scoped public release publication approval, EXT-010, Tier 2 CachyOS Hyprland NVIDIA compatibility hardware, and EXT-011, Authorized Minecraft and Forza update revision pairs.",
     "requiredEvidenceGates": "Sequential phase exits, complete deterministic tests including XODUS-PHASE-002 corpus consumers, authorized real-package apply and recovery exercises, authorized local title lifecycles, target runtime traces, Forza telemetry, Tier 2 results, package lifecycle, security review, documentation, signatures, checksums, SBOM, public release inspection, fresh install, and rollback must pass."
   }
