@@ -55,7 +55,7 @@ Shared-key derivation now rejects empty secrets, unsupported output lengths, and
 
 The service startup path now returns typed initialization, token, runtime-directory, socket, permission, accept, and cleanup failures. Per-connection request-client construction also reports errors and closes the connection without a process panic. The CLI wraps command execution in an outer teardown boundary so the configured secret store is unset on both successful and early-failure paths.
 
-The login command now reports missing or wrong device token state, webview startup errors, unsupported response bodies, and user persistence failures through explicit exit paths. Native webview creation also validates the GTK container and propagates builder errors for Wayland and XWayland sessions.
+The login command now reports missing or wrong device token state, webview startup errors, unsupported response bodies, empty or cancelled token responses, exchange faults without inline authentication, and user persistence failures through explicit exit paths. Native webview creation also validates the GTK container and propagates builder errors for Wayland and XWayland sessions.
 
 The CLI startup now reports HTTP client, credential-store, and device-credential setup failures through a nonzero exit code instead of dispatching a command after failed initialization or panicking. It does not enable reqwest connection-verbose logging, so authorization headers and response bodies are not emitted through transport tracing.
 
