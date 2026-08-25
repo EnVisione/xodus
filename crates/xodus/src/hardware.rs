@@ -15,7 +15,7 @@ use crate::models::devicecredential::Component;
 
 pub fn probe_provision_components() -> Vec<Component> {
     let mut components = Vec::with_capacity(16);
-    let drive_serial = BASE64_STANDARD.decode("AA==").unwrap();
+    let drive_serial = [0u8];
     let mut smbios_buf = [0; 256];
     let mut drive_buf = [0; 64];
 
@@ -79,7 +79,7 @@ pub fn probe_provision_components() -> Vec<Component> {
 fn load_smbios_fields(raw: Option<&[u8]>) -> io::Result<(Vec<u8>, Vec<u8>, [u8; 16])> {
     let smbios =
         raw.ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "missing raw SMBIOS data"))?;
-    Ok(parse_smbios(smbios))
+    parse_smbios(smbios)
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -113,41 +113,113 @@ fn load_smbios_fields(_raw: Option<&[u8]>) -> io::Result<(Vec<u8>, Vec<u8>, [u8;
 }
 
 #[cfg(target_os = "linux")]
-fn parse_smbios(smbios: &[u8]) -> (Vec<u8>, Vec<u8>, [u8; 16]) {
-    let length = smbios[1];
+fn parse_smbios(smbios: &[u8]) -> io::Result<(Vec<u8>, Vec<u8>, [u8; 16])> {
+    let length = *smbios
+        .get(1)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "truncated SMBIOS header"))?
+        as usize;
+    if length < 24 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "SMBIOS header is shorter than its required fields",
+        ));
+    }
 
-    let version = smbios[6];
-    let serial = smbios[7];
-    let uuid: [u8; 16] = smbios[8..24].try_into().unwrap();
+    let version = *smbios.get(6).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidData, "missing SMBIOS version index")
+    })?;
+    let serial = *smbios
+        .get(7)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing SMBIOS serial index"))?;
+    let uuid: [u8; 16] = smbios
+        .get(8..24)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing SMBIOS UUID"))?
+        .try_into()
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid SMBIOS UUID"))?;
 
-    let stringsbuf = &smbios[length as usize..];
+    let stringsbuf = smbios
+        .get(length..)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "SMBIOS header exceeds input"))?;
     let mut strings: Vec<&[u8]> = Vec::new();
     strings.push(&[]);
     let mut cursor = 0;
     while cursor < stringsbuf.len() {
-        let end = stringsbuf[cursor..]
+        let remaining = &stringsbuf[cursor..];
+        let end = remaining
             .iter()
             .position(|&b| b == 0)
-            .unwrap_or(stringsbuf.len() - cursor)
-            + cursor;
+            .map_or(stringsbuf.len(), |offset| cursor + offset);
         let slice = &stringsbuf[cursor..end];
         strings.push(slice);
+        if end == stringsbuf.len() {
+            break;
+        }
         cursor = end + 1;
-        if cursor >= stringsbuf.len() || stringsbuf[cursor] == 0 {
+        if cursor < stringsbuf.len() && stringsbuf[cursor] == 0 {
             break;
         }
     }
 
-    (
-        strings[version as usize].to_vec(),
-        strings[serial as usize].to_vec(),
-        uuid,
-    )
+    let version = strings.get(version as usize).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "SMBIOS version index is out of range",
+        )
+    })?;
+    let serial = strings.get(serial as usize).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "SMBIOS serial index is out of range",
+        )
+    })?;
+
+    Ok((version.to_vec(), serial.to_vec(), uuid))
 }
 
 #[cfg(any(target_os = "macos", target_os = "ios", target_family = "windows"))]
 fn load_raw_smbios() -> io::Result<Vec<u8>> {
     raw_smbios_from_device()
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::parse_smbios;
+
+    #[test]
+    fn parse_smbios_rejects_truncated_header() {
+        assert!(parse_smbios(&[0]).is_err());
+    }
+
+    #[test]
+    fn parse_smbios_rejects_short_header_length() {
+        let mut raw = vec![0; 24];
+        raw[1] = 23;
+        assert!(parse_smbios(&raw).is_err());
+    }
+
+    #[test]
+    fn parse_smbios_rejects_out_of_range_string_index() {
+        let mut raw = vec![0; 26];
+        raw[1] = 24;
+        raw[6] = 2;
+        raw[7] = 1;
+        raw[24..].copy_from_slice(&[b's', 0]);
+        assert!(parse_smbios(&raw).is_err());
+    }
+
+    #[test]
+    fn parse_smbios_reads_valid_string_indexes() {
+        let mut raw = vec![0; 24];
+        raw[1] = 24;
+        raw[6] = 1;
+        raw[7] = 2;
+        raw.extend_from_slice(b"version\0serial\0\0");
+
+        let (version, serial, uuid) = parse_smbios(&raw).expect("valid SMBIOS fixture");
+        assert_eq!(version, b"version");
+        assert_eq!(serial, b"serial");
+        assert_eq!(uuid, [0; 16]);
+    }
 }
 
 #[cfg(target_os = "linux")]
