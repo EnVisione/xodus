@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::os::fd::{AsFd, IntoRawFd};
+use std::os::fd::{AsFd, AsRawFd};
 use std::path::Path;
 use std::process::{ExitCode, ExitStatus};
 
@@ -340,7 +340,7 @@ pub async fn run(
             return ExitCode::FAILURE;
         }
 
-        fds.push((file.0, stdf.into_raw_fd()));
+        fds.push((file.0, stdf));
     }
 
     let mut env_value = String::new();
@@ -349,7 +349,7 @@ pub async fn run(
 
     let mut nt_entry = None;
 
-    for fd in fds {
+    for fd in &fds {
         if !env_value.is_empty() {
             env_value.push('|');
         }
@@ -364,11 +364,17 @@ pub async fn run(
             nt_entry = Some(nt_path)
         }
 
-        env_value.push_str(&format!("{}:\\??\\Z:{}\\{}", fd.1, nt_prefix, nt_suffix))
+        env_value.push_str(&format!(
+            "{}:\\??\\Z:{}\\{}",
+            fd.1.as_raw_fd(),
+            nt_prefix,
+            nt_suffix
+        ))
     }
 
     let Some(nt_entry) = nt_entry else {
         eprintln!("Could not find .exe");
+        cleanup().await;
         return ExitCode::FAILURE;
     };
 
@@ -384,6 +390,7 @@ pub async fn run(
             return ExitCode::FAILURE;
         }
     };
+    drop(fds);
 
     let Some(pid) = wn.id() else {
         eprintln!("wine process did not expose a process id");
