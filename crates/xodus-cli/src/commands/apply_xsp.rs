@@ -3,6 +3,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use msixvc::xsp::{XspBaseState, XspFile, XspUpdateInput};
+use msixvc::xvd::XvdFile;
 use tokio::fs::File;
 
 use crate::commands::streaming::{
@@ -11,6 +12,7 @@ use crate::commands::streaming::{
 };
 
 const MAX_HASH_MANIFEST_BYTES: usize = 64 * 1024 * 1024;
+const XVD_HEADER_BYTES: u64 = 4096;
 
 fn hex_value(byte: u8) -> Option<u8> {
     match byte {
@@ -76,6 +78,36 @@ fn read_bounded_text(path: &Path, limit: usize) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|_| "hash manifest is not valid utf 8".to_owned())
 }
 
+async fn validate_base_identity(base: &Path, xsp: &XspFile) -> Result<(), String> {
+    let metadata = tokio::fs::metadata(base)
+        .await
+        .map_err(|error| format!("could not inspect base content: {error}"))?;
+    if metadata.len() < XVD_HEADER_BYTES {
+        return Ok(());
+    }
+
+    let base_file = File::open(base)
+        .await
+        .map_err(|error| format!("could not open base content header: {error}"))?;
+    let header = XvdFile::parse_header(base_file)
+        .await
+        .map_err(|error| format!("base content has an invalid XVD header: {error}"))?;
+
+    if header.vduid != xsp.header.content_id {
+        return Err(format!(
+            "base content ID {} does not match XSP content ID {}",
+            header.vduid, xsp.header.content_id
+        ));
+    }
+    if header.package_version != xsp.header.upgrade_from_version {
+        return Err(format!(
+            "base package version {} does not match XSP source version {}",
+            header.package_version, xsp.header.upgrade_from_version
+        ));
+    }
+    Ok(())
+}
+
 pub struct ApplyXspRequest {
     pub descriptor: String,
     pub base: String,
@@ -122,6 +154,10 @@ where
             return ExitCode::FAILURE;
         }
     };
+    if let Err(error) = validate_base_identity(Path::new(&base), &xsp).await {
+        eprintln!("XSP update rejected base identity: {error}");
+        return ExitCode::FAILURE;
+    }
     let source_hashes = match read_hashes(Path::new(&source_hashes_path)) {
         Ok(hashes) => hashes,
         Err(error) => {
@@ -300,6 +336,50 @@ mod tests {
         let error = super::read_bounded_text(&manifest, 5)
             .expect_err("hash manifest above the bound must fail");
         assert!(error.contains("exceeds"));
+    }
+
+    #[tokio::test]
+    async fn rejects_malformed_xvd_base_before_staging() {
+        let temporary = tempfile::tempdir().expect("temporary directory must exist");
+        let base = temporary.path().join("base.xvd");
+        let destination = temporary.path().join("install");
+        std::fs::create_dir(&destination).expect("destination must exist");
+        std::fs::write(destination.join("updated.bin"), b"previous")
+            .expect("existing output must be writable");
+        std::fs::write(&base, vec![0_u8; 4096]).expect("base fixture must be writable");
+
+        assert_eq!(
+            run(ApplyXspRequest {
+                descriptor: fixture("xodus-fixture-valid.xsp")
+                    .to_string_lossy()
+                    .into_owned(),
+                base: base.to_string_lossy().into_owned(),
+                new_data: "missing-new-data".to_owned(),
+                source_hashes: "missing-source-hashes".to_owned(),
+                target_hashes: "missing-target-hashes".to_owned(),
+                destination: destination.to_string_lossy().into_owned(),
+                output: "updated.bin".to_owned(),
+                block_size: 4,
+                rollback: false,
+            })
+            .await,
+            std::process::ExitCode::FAILURE
+        );
+        assert_eq!(
+            std::fs::read(destination.join("updated.bin")).expect("existing output must remain"),
+            b"previous"
+        );
+        assert!(
+            std::fs::read_dir(&destination)
+                .expect("destination must remain readable")
+                .all(|entry| {
+                    !entry
+                        .expect("destination entry must be readable")
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".xodus-streaming-txn-")
+                })
+        );
     }
 
     #[tokio::test]

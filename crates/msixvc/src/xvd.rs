@@ -2192,6 +2192,15 @@ impl XvdFile {
         self.header.vduid
     }
 
+    pub async fn parse_header<Reader>(mut file: Reader) -> Result<XvdHeader, XvdFileParseError>
+    where
+        Reader: AsyncRead + Unpin,
+    {
+        let mut buf = XvdHeader::buffer();
+        file.read_exact(&mut buf).await?;
+        Ok(XvdHeader::try_from_array(&buf)?)
+    }
+
     fn non_encrypted_prefix_len(
         &self,
         range_start: u64,
