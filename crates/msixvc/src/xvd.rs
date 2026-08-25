@@ -403,6 +403,8 @@ const MAX_XVC_REGION_HEADERS: u32 = 4_096;
 const MAX_SUPPORTED_XVC_INFO_VERSION: u32 = 2;
 const SEGMENT_METADATA_READER_CAPACITY: usize = PAGE_SIZE;
 const DOWNLOAD_HTTP_RETRY_LIMIT: usize = 3;
+const OUTPUT_WRITE_RETRY_LIMIT: usize = 3;
+const OUTPUT_WRITE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
 
 #[derive(thiserror::Error, Debug)]
 pub enum XvdFileParseError {
@@ -951,6 +953,23 @@ enum PageHashFailure {
     IndexTooLarge,
     Missing { hash_count: usize },
     Mismatch,
+}
+
+async fn write_all_with_retry<Writer>(out: &mut Writer, data: &[u8]) -> io::Result<()>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let mut retries = OUTPUT_WRITE_RETRY_LIMIT;
+    loop {
+        match out.write_all(data).await {
+            Ok(()) => return Ok(()),
+            Err(_error) if retries > 0 => {
+                retries -= 1;
+                sleep(OUTPUT_WRITE_RETRY_DELAY).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 fn verify_page_hash(
@@ -2732,11 +2751,7 @@ impl XvdFile {
                 } else {
                     to_write_remaining
                 };
-                while let Err(err) = out.write_all(&page[..to_write]).await {
-                    eprintln!("Error write file {} waiting 30s", err);
-                    println!("Error write file {} waiting 30s", err);
-                    sleep(tokio::time::Duration::from_secs(30)).await;
-                }
+                write_all_with_retry(out, &page[..to_write]).await?;
                 remaining -= to_write_remaining as u64;
 
                 page_in_section = next_download_page(page_in_section)?;
@@ -2849,11 +2864,7 @@ impl XvdFile {
             } else {
                 write_length
             };
-            while let Err(err) = out.write_all(&page[..to_write]).await {
-                eprintln!("Error write file {} waiting 30s", err);
-                println!("Error write file {} waiting 30s", err);
-                sleep(tokio::time::Duration::from_secs(30)).await;
-            }
+            write_all_with_retry(out, &page[..to_write]).await?;
         }
         Ok(())
     }
@@ -2910,27 +2921,27 @@ mod tests {
     };
 
     use sha2::{Digest, Sha256};
-    use tokio::io::{AsyncRead, AsyncSeek, ReadBuf};
+    use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf};
 
     use crate::streaming_ntfs::{NtfsDataRunReport, NtfsStreamLayoutReport};
 
     use super::{
         DownloadFileHttpError, EncryptedSectionInfo, ExtractFileError,
         MAX_SUPPORTED_XVC_INFO_VERSION, MAX_XVC_REGION_HEADERS, NtfsSegmentMetadataParseError,
-        PAGE_SIZE, PageHashFailure, PopulateSegmentHashesError, SEGMENT_METADATA_READER_CAPACITY,
-        SegmentFile, SegmentMetadataParseError, SyncSubstream, UserPackageFile,
-        UserPackageFilesParseError, XvcRegionId, XvdFile, XvdFileParseError, XvdStream,
-        collect_ntfs_segment_files, consume_download_retry_budget, download_encrypted_section,
-        download_file_end, download_page_plan, download_request_range, extract_data_unit_index,
-        extract_encrypted_section, extract_file_end, extract_page_loop_end, extract_page_plan,
-        extract_progress_bytes, extract_write_length, hash_entry_read_offset, hash_page_index,
-        is_retryable_download_error, next_download_page, next_download_received_byte_count,
-        next_segment_page_offset, non_encrypted_prefix_len, ntfs_drive_extents,
-        ntfs_partition_extents, package_file_name, required_gpt_partition_length,
-        required_gpt_partition_start, reserve_xvc_region_entries, segment_file_name,
-        segment_metadata_reader_capacity, sync_substream_absolute_target,
+        OUTPUT_WRITE_RETRY_LIMIT, PAGE_SIZE, PageHashFailure, PopulateSegmentHashesError,
+        SEGMENT_METADATA_READER_CAPACITY, SegmentFile, SegmentMetadataParseError, SyncSubstream,
+        UserPackageFile, UserPackageFilesParseError, XvcRegionId, XvdFile, XvdFileParseError,
+        XvdStream, collect_ntfs_segment_files, consume_download_retry_budget,
+        download_encrypted_section, download_file_end, download_page_plan, download_request_range,
+        extract_data_unit_index, extract_encrypted_section, extract_file_end,
+        extract_page_loop_end, extract_page_plan, extract_progress_bytes, extract_write_length,
+        hash_entry_read_offset, hash_page_index, is_retryable_download_error, next_download_page,
+        next_download_received_byte_count, next_segment_page_offset, non_encrypted_prefix_len,
+        ntfs_drive_extents, ntfs_partition_extents, package_file_name,
+        required_gpt_partition_length, required_gpt_partition_start, reserve_xvc_region_entries,
+        segment_file_name, segment_metadata_reader_capacity, sync_substream_absolute_target,
         validate_download_response_extent, validate_segment_metadata_table_extent,
-        validate_xvc_region_hash_entry_addresses, verify_page_hash,
+        validate_xvc_region_hash_entry_addresses, verify_page_hash, write_all_with_retry,
         xvd_stream_absolute_seek_target,
     };
 
@@ -2975,6 +2986,26 @@ mod tests {
         let mismatch = verify_page_hash(&page, &[[0_u8; 20]], 0);
         assert!(matches!(mismatch, Err(PageHashFailure::Mismatch)));
     }
+
+    #[tokio::test]
+    async fn output_write_retry_budget_is_bounded() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let mut writer = FailingAsyncWriter {
+            attempts: Arc::clone(&attempts),
+            failures: OUTPUT_WRITE_RETRY_LIMIT + 1,
+        };
+
+        let error = write_all_with_retry(&mut writer, b"data")
+            .await
+            .expect_err("permanently failing output must stop after the retry budget");
+
+        assert_eq!(error.kind(), ErrorKind::Other);
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            OUTPUT_WRITE_RETRY_LIMIT + 1
+        );
+    }
+
     const SEGMENT_METADATA_HEADER_LENGTH_OFFSET: usize = 12;
     const SEGMENT_METADATA_SEGMENT_COUNT_OFFSET: usize = 16;
     const FILETIME_OFFSET: usize = 0x210;
@@ -2986,6 +3017,11 @@ mod tests {
     const WINDOWS_TO_UNIX_FILETIME: i64 = 116_444_736_000_000_000;
 
     struct OverReportingIo;
+
+    struct FailingAsyncWriter {
+        attempts: Arc<AtomicUsize>,
+        failures: usize,
+    }
 
     struct DriftingIo(Cursor<Vec<u8>>);
 
@@ -3024,6 +3060,29 @@ mod tests {
 
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
+        }
+    }
+
+    impl AsyncWrite for FailingAsyncWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            let attempt = self.attempts.fetch_add(1, Ordering::SeqCst);
+            if attempt < self.failures {
+                Poll::Ready(Err(Error::other("synthetic output write failure")))
+            } else {
+                Poll::Ready(Ok(buf.len()))
+            }
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
         }
     }
 
