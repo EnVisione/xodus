@@ -12,7 +12,7 @@ pub async fn run(
     dev_token: LegacyToken,
     legacy: LegacyToken,
     relying_party: &str,
-) -> XstsResponse {
+) -> Result<XstsResponse, Box<dyn std::error::Error>> {
     let user_token = crate::api::live::exchange_user_token(
         client,
         legacy,
@@ -26,34 +26,39 @@ pub async fn run(
             Some(soap::PolicyReference::mbi_ssl()),
         )],
     )
-    .await
-    .expect("Failed to get ms user token");
+    .await?;
 
     let user_token: Token = match user_token {
         ExchangeUserTokenOutcome::Fault(_) => {
-            eprintln!("Failed to get exchange MS token");
-            panic!("TODO");
+            return Err(Box::new(std::io::Error::other("exchange returned a fault")));
         }
         ExchangeUserTokenOutcome::Issued(
-            soap::BodyContent::RequestSecurityTokenResponseCollection(mut collection),
+            soap::BodyContent::RequestSecurityTokenResponseCollection(collection),
         ) => {
-            let token = collection.security_tokens.remove(0);
+            let token = collection
+                .security_tokens
+                .into_iter()
+                .next()
+                .ok_or_else(|| {
+                    std::io::Error::other("exchange returned an empty token collection")
+                })?;
             token.into()
         }
         ExchangeUserTokenOutcome::Issued(soap::BodyContent::RequestSecurityTokenResponse(
             token,
         )) => (*token).into(),
-        _ => unreachable!("Only responses are handled"),
+        _ => {
+            return Err(Box::new(std::io::Error::other(
+                "exchange returned an unsupported response",
+            )));
+        }
     };
     let Token::Compact(user_token) = user_token else {
-        eprintln!("Unsupported token");
-        panic!("TODO");
+        return Err(Box::new(std::io::Error::other(
+            "exchange returned an unsupported token",
+        )));
     };
-    let resp = authenticate_xbox_user(client, user_token)
-        .await
-        .expect("Failed to authenticate Xbox user");
+    let resp = authenticate_xbox_user(client, user_token).await?;
 
-    request_xsts_token(client, resp.token, relying_party)
-        .await
-        .expect("Failed to authenticate Xbox user")
+    Ok(request_xsts_token(client, resp.token, relying_party).await?)
 }

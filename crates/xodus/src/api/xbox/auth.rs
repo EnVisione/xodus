@@ -56,7 +56,29 @@ pub async fn request_xsts_token(
     resp.json().await
 }
 
-pub fn get_xsts_auth_header(xsts: XstsResponse) -> String {
-    let uhs = xsts.user_hash().expect("XSTS response missing xui claim");
-    format!("XBL3.0 x={uhs};{}", xsts.token)
+pub fn get_xsts_auth_header(xsts: XstsResponse) -> Result<String, std::io::Error> {
+    let uhs = xsts
+        .user_hash()
+        .ok_or_else(|| std::io::Error::other("XSTS response missing xui claim"))?;
+    Ok(format!("XBL3.0 x={uhs};{}", xsts.token))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::get_xsts_auth_header;
+    use crate::models::xbox::XstsResponse;
+
+    #[test]
+    fn xsts_header_rejects_missing_user_claim() {
+        let response: XstsResponse = serde_json::from_str(
+            r#"{
+                "NotAfter":"2026-01-01T00:00:00Z",
+                "Token":"token",
+                "DisplayClaims":{"Xui":[],"Xti":[]}
+            }"#,
+        )
+        .expect("synthetic XSTS response must deserialize");
+
+        assert!(get_xsts_auth_header(response).is_err());
+    }
 }

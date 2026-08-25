@@ -21,4 +21,6 @@ The XVD HTTP download path requires partial-content responses with an exact incl
 
 The shared binary parser now builds nested generic-array chunk references through checked slice bounds instead of an unsafe layout transmute. A nested-array regression proves that the parser preserves chunk order and rejects no valid fixed-size input while keeping the type-level reader extent contract.
 
+Xbox package authentication now propagates token, exchange, HTTP status, JSON, unsupported-response, empty-collection, and missing-user-claim failures as typed results. It no longer panics on a malformed or incomplete service response before package metadata access.
+
 MSIXVC parser hardening, complete integrity validation, atomic promotion, rollback policy, and transaction recovery remain Phase 2 work. The account backed Xbox Live development token test is not part of ordinary offline verification and currently requires an explicit bounded opt in.
