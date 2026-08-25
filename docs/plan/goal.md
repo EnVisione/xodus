@@ -4,18 +4,18 @@ Complete every mandatory requirement XODUS-REQ-001 through XODUS-REQ-022 and eve
 Immediate checkpoint:
 Preserve plan evidence. Refresh and inspect `origin` without altering the remote. Verify `origin` is the intended repository; fetch `origin` without altering the remote; verify the fetched remote-tracking ref against the current remote default-branch head. Classify the local default branch as equal, behind, ahead, or diverged; fast-forward only when safe. Do not reset, force, discard, or overwrite unexpected history. Search local branches, remote branches, and repository-wide open pull requests; resume applicable work, otherwise branch from the verified authoritative baseline. Do not invent a branch while an applicable active branch exists. Create or resume an implementation branch before modifying tracked files.
 
-A bounded probe produced full protected-PE import reports after entitlement, license, and memfd-only decryption. Minecraft: no Game Runtime, online-service, or known anti-cheat import; delay-import directory observed. Forza: online-service and delay-import directory observed; no Game Runtime or known anti-cheat import. delay directory metadata does not prove delay-loaded behavior and static absence does not rule out dynamic calls. All data was discarded; no package, credential, URL, executable, install, update, or launch state was retained, and the probe was deleted. No runtime, save, execution, source-to-target update, or compatibility behavior passed. EXT-002 remains PARTIAL, unavailable, and the sole Phase 2 blocker. Do not begin Phase 2 or use `xodus-cli` download or streaming. Make one changed-hypothesis bounded attempt for actual Game Runtime import/runtime evidence, full online/anti-cheat classification, and source-to-target update evidence; then complete independent mandatory work if unavailable.
+Protected-PE reports found no direct Game Runtime import for either target, no known anti-cheat signal, no Minecraft online-service signal, one Forza online-service signal, and delay-import directories. Microsoft documents static `xgameruntime.lib` loading `xgameruntime.dll`, so direct-import absence is non-exclusionary; delay metadata and static negatives do not exclude dynamic behavior. Xodus `run` needs local `.xodus-streaming.msixvc` and segment sidecars for `WINE_DLL_FILE_MAP`; the memfd probe had neither and was not a runtime test. Weather-OS WineGDK and GDK-Proton are candidate context only, not EXT-003/004 closure, because published notes leave Microsoft services and XUser incomplete. EXT-002 remains PARTIAL, unavailable, and the sole Phase 2 blocker; do not begin Phase 2 or use `xodus-cli` download/streaming. Boundedly assess versioned EXT-003/004 artifact-manifest availability. Pursue local lifecycle only with a safe authorized disposable package tree and versioned runtime artifact; otherwise complete independent mandatory work.
 
 Perform one bounded inspection that ends as soon as each mandatory criterion is classified as implemented with valid evidence, incomplete, stale evidence, or externally blocked. Immediately execute the first incomplete or stale-evidence criterion. The map is not a deliverable: do not stop after producing it, do not rebuild it while unchanged evidence remains valid, and do not produce a narrative audit before implementation.
 
 Authoritative plan:
 /home/envy/Documents/Codex/2026-08-20/ca/work/xodus/docs/cachyos/plan.md
-Plan SHA-256: 4cece3bfbccc12b26e4c755f8c0888a785d62693f0d7ecb564f764e9e0225cf1
-Validated handoff plan-set SHA-256: 53189490d9b3d0d9dbda5f66df62f63e1783bab0598dc644e757639458add878
+Plan SHA-256: da760dcd2a3e5d1c9b019bcaa58df57a9ce5185a03ff0832a2e913aa9a11ad91
+Validated handoff plan-set SHA-256: d103c41b0e20265b8980a2a82c2471173b512758123537ff8cb5ffde4e303063
 Completion endpoint: Xodus stable release is complete only when the signed public CachyOS release and repository local PKGBUILD install on the Tier 1 Lenovo Legion 9 18IAX10, Minecraft for Windows and Forza Horizon 5 each pass the authorized local login, entitlement, license, clean install, update, two consecutive launch, runtime, save, shutdown, repair, and uninstall workflows, Forza passes both absolute performance profiles, Tier 2 compatibility gates pass, MSIXVC2 and XSP update support pass, unsupported anti cheat titles hand off separately to Xbox cloud gaming, all mandatory security, recovery, documentation, and release evidence passes, and no cloud result substitutes for either local target.
 
 Observed checkout branch: envy/target-metadata-evidence
-Observed checkout commit: ed096f05c87978601e08c92038192cce29b46937
+Observed checkout commit: 1f8c3332f144e9df47fafe9221dfc71a4bf5be56
 Repository root: /home/envy/Documents/Codex/2026-08-20/ca/work/xodus
 
 Authoritative remote:
@@ -27,7 +27,7 @@ Observed local default-branch commit: 5b77e06eaa5e3cea78af122436d35a9b02992834
 Observed local remote-tracking ref: origin/main
 Observed local remote-tracking commit: 5b77e06eaa5e3cea78af122436d35a9b02992834
 Current remote default-branch head: 5b77e06eaa5e3cea78af122436d35a9b02992834
-Remote-head evidence: git ls-remote read-only query observed 2026-08-25 at 00:06:20Z, corroborated by gh repo view EnVisione/xodus defaultBranchRef main
+Remote-head evidence: git ls-remote read-only query observed 2026-08-25 at 00:28:24Z, corroborated by gh repo view EnVisione/xodus defaultBranchRef main
 Authoritative working baseline: established
 Applicable implementation branch: envy/target-metadata-evidence
 Applicable open pull request: none identified at checkpoint
