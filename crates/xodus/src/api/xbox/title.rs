@@ -16,14 +16,10 @@ pub async fn get_title_management(
 pub fn get_endpoint<'a>(url: &str, response: &'a TitleMgtResponse) -> Option<&'a TitleMgtEndPoint> {
     let parsed_url = reqwest::Url::parse(url).ok()?;
     let host = parsed_url.host_str()?;
-    let filtered: Vec<&TitleMgtEndPoint> = response
+    response
         .end_points
         .iter()
-        .filter(|e| e.protocol == parsed_url.scheme())
-        .collect();
-
-    filtered
-        .into_iter()
+        .filter(|endpoint| endpoint.protocol == parsed_url.scheme())
         .filter(|endpoint| {
             globset::Glob::new(&endpoint.host)
                 .map(|glob| glob.compile_matcher().is_match(host))
