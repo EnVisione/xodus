@@ -34,6 +34,7 @@ const TRANSACTION_DIRECTORY_PREFIX: &str = ".xodus-streaming-txn-";
 const TRANSACTION_PAYLOAD_DIRECTORY: &str = ".xodus-streaming-payload";
 const TRANSACTION_BACKUP_DIRECTORY: &str = ".xodus-streaming-backup";
 const TRANSACTION_JOURNAL: &str = ".xodus-streaming-journal";
+const TRANSACTION_JOURNAL_TEMP: &str = ".xodus-streaming-journal.tmp";
 const TRANSACTION_LOCK_FILE: &str = ".xodus-streaming.lock";
 const MAX_TRANSACTION_JOURNAL_BYTES: usize = 64 * 1024 * 1024;
 
@@ -353,7 +354,7 @@ fn write_transaction_journal(
     entries: &[PromotionEntry],
     complete: bool,
 ) -> io::Result<()> {
-    let mut journal = open_transaction_journal(root, true)?;
+    let mut journal = open_transaction_file(root, TRANSACTION_JOURNAL_TEMP, true)?;
     if complete {
         writeln!(journal, "complete")?;
     } else {
@@ -370,9 +371,10 @@ fn write_transaction_journal(
             )?;
         }
     }
-    journal
-        .sync_all()
-        .and_then(|()| sync_parent_directory(&journal_path(root)))
+    journal.sync_all()?;
+    drop(journal);
+    std::fs::rename(root.join(TRANSACTION_JOURNAL_TEMP), journal_path(root))?;
+    sync_parent_directory(&journal_path(root))
 }
 
 fn read_transaction_journal(root: &Path) -> io::Result<Option<Vec<PromotionEntry>>> {
@@ -435,7 +437,7 @@ fn read_transaction_journal(root: &Path) -> io::Result<Option<Vec<PromotionEntry
     Ok(Some(entries))
 }
 
-fn open_transaction_journal(root: &Path, writable: bool) -> io::Result<std::fs::File> {
+fn open_transaction_file(root: &Path, name: &str, writable: bool) -> io::Result<std::fs::File> {
     let directory = std::fs::File::open(root)?;
     if !directory.metadata()?.is_dir() {
         return Err(invalid_package_path(
@@ -453,15 +455,12 @@ fn open_transaction_journal(root: &Path, writable: bool) -> io::Result<std::fs::
         Mode::empty()
     };
     Ok(std::fs::File::from(
-        openat2(
-            &directory,
-            TRANSACTION_JOURNAL,
-            flags,
-            mode,
-            OUTPUT_RESOLVE_FLAGS,
-        )
-        .map_err(io::Error::from)?,
+        openat2(&directory, name, flags, mode, OUTPUT_RESOLVE_FLAGS).map_err(io::Error::from)?,
     ))
+}
+
+fn open_transaction_journal(root: &Path, writable: bool) -> io::Result<std::fs::File> {
+    open_transaction_file(root, TRANSACTION_JOURNAL, writable)
 }
 
 fn read_bounded_transaction_journal<R: Read>(reader: R, max_bytes: usize) -> io::Result<String> {
@@ -1404,8 +1403,8 @@ mod tests {
 
     use super::{
         PromotionState, SegmentFile, TRANSACTION_DIRECTORY_PREFIX, TRANSACTION_JOURNAL,
-        acquire_transaction_lock, changed_jobs, new_transaction, open_package_input,
-        open_package_output, package_path_components, promote_transaction,
+        TRANSACTION_JOURNAL_TEMP, acquire_transaction_lock, changed_jobs, new_transaction,
+        open_package_input, open_package_output, package_path_components, promote_transaction,
         promote_transaction_with_interruption, promotion_entries, promotion_entries_with_removals,
         promotion_entry_capacity, read_bounded_transaction_journal, read_transaction_journal,
         recover_transaction_dir, recover_transactions, rollback_transaction,
@@ -1429,6 +1428,23 @@ mod tests {
         let result = read_bounded_transaction_journal(Cursor::new(b"12345"), 4);
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn transaction_journal_replacement_leaves_no_partial_writer() {
+        let temporary = tempfile::tempdir().unwrap();
+        let (transaction, _) = new_transaction(temporary.path()).unwrap();
+        let entries = promotion_entries(&[("new.bin".to_owned(), "new.bin".to_owned())]).unwrap();
+
+        write_transaction_journal(transaction.path(), &entries, false).unwrap();
+
+        assert!(transaction.path().join(TRANSACTION_JOURNAL).is_file());
+        assert!(!transaction.path().join(TRANSACTION_JOURNAL_TEMP).exists());
+        assert!(
+            read_transaction_journal(transaction.path())
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]
