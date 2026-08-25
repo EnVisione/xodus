@@ -22,14 +22,22 @@ fn package_top_level(path: &str) -> Option<String> {
 }
 
 fn collect_stale_package_files(root: &Path, specs: &[(String, String)]) -> io::Result<Vec<String>> {
-    let current = specs
-        .iter()
-        .map(|(_, path)| normalized_package_path(path))
-        .collect::<HashSet<_>>();
-    let owned_top_levels = current
-        .iter()
-        .filter_map(|path| package_top_level(path))
-        .collect::<HashSet<_>>();
+    let mut current = HashSet::new();
+    current
+        .try_reserve(specs.len())
+        .map_err(|_| io::Error::other("current package path index allocation failed"))?;
+    for (_, path) in specs {
+        current.insert(normalized_package_path(path));
+    }
+    let mut owned_top_levels = HashSet::new();
+    owned_top_levels
+        .try_reserve(current.len())
+        .map_err(|_| io::Error::other("package root index allocation failed"))?;
+    for path in &current {
+        if let Some(top_level) = package_top_level(path) {
+            owned_top_levels.insert(top_level);
+        }
+    }
     let mut stale = Vec::new();
     collect_stale_package_files_in(root, Path::new(""), &current, &owned_top_levels, &mut stale)?;
     stale.sort();
@@ -66,6 +74,9 @@ fn collect_stale_package_files_in(
         } else if (file_type.is_file() || file_type.is_symlink())
             && !current.contains(&relative_text)
         {
+            stale
+                .try_reserve(1)
+                .map_err(|_| io::Error::other("stale package path allocation failed"))?;
             stale.push(relative_text);
         }
     }
@@ -96,11 +107,17 @@ pub fn run(path: String, destination: String) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let specs = archive
-        .entries
-        .iter()
-        .map(|entry| (entry.name.clone(), entry.name.clone()))
-        .collect::<Vec<_>>();
+    let mut specs = Vec::new();
+    if let Err(error) = specs.try_reserve(archive.entries.len()) {
+        eprintln!("MSIXVC2 install could not allocate archive paths: {error}");
+        return ExitCode::FAILURE;
+    }
+    specs.extend(
+        archive
+            .entries
+            .iter()
+            .map(|entry| (entry.name.clone(), entry.name.clone())),
+    );
     let output_root = Path::new(&destination);
     if let Err(error) = std::fs::create_dir_all(output_root) {
         eprintln!("MSIXVC2 install could not create destination: {error}");
