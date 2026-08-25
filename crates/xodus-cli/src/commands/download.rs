@@ -138,6 +138,16 @@ fn validate_file_hash(expected: Option<[u8; 32]>, actual: [u8; 32]) -> io::Resul
     Ok(())
 }
 
+struct DownloadAttemptRequest<'a> {
+    client: &'a reqwest::Client,
+    url: &'a str,
+    file_name: &'a str,
+    file_size: u64,
+    expected_hash: Option<[u8; 32]>,
+    output_root: &'a Path,
+    progress_bar: &'a ProgressBar,
+}
+
 async fn download_file_attempt(
     client: &reqwest::Client,
     url: &str,
@@ -147,6 +157,37 @@ async fn download_file_attempt(
     output_root: &Path,
     progress_bar: &ProgressBar,
 ) -> Result<(), DownloadAttemptError> {
+    download_file_attempt_with_hook(
+        DownloadAttemptRequest {
+            client,
+            url,
+            file_name,
+            file_size,
+            expected_hash,
+            output_root,
+            progress_bar,
+        },
+        || false,
+    )
+    .await
+}
+
+async fn download_file_attempt_with_hook<F>(
+    request: DownloadAttemptRequest<'_>,
+    mut should_interrupt: F,
+) -> Result<(), DownloadAttemptError>
+where
+    F: FnMut() -> bool,
+{
+    let DownloadAttemptRequest {
+        client,
+        url,
+        file_name,
+        file_size,
+        expected_hash,
+        output_root,
+        progress_bar,
+    } = request;
     progress_bar.set_position(0);
     let response = client
         .get(url)
@@ -177,6 +218,12 @@ async fn download_file_attempt(
             .await
             .map_err(fatal_download_error)?;
         progress_bar.set_position(downloaded);
+        if should_interrupt() {
+            return Err(fatal_download_error(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "download attempt interrupted after staged write",
+            )));
+        }
     }
 
     if downloaded != file_size {
@@ -345,14 +392,17 @@ mod tests {
     use base64::Engine;
     use indicatif::ProgressBar;
     use sha2::{Digest, Sha256};
+    use std::io::{Read as _, Write as _};
+    use std::net::TcpListener as StdTcpListener;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
     use super::{
-        DOWNLOAD_RETRY_LIMIT, MAX_FILE_HASH_BASE64_CHARS, checked_download_total,
-        consume_download_retry, decode_file_hash, download_file_attempt,
-        validate_declared_download_length, validate_file_hash,
+        DOWNLOAD_RETRY_LIMIT, DownloadAttemptRequest, MAX_FILE_HASH_BASE64_CHARS,
+        checked_download_total, consume_download_retry, decode_file_hash, download_file_attempt,
+        download_file_attempt_with_hook, validate_declared_download_length, validate_file_hash,
     };
+    use crate::commands::streaming::recover_transactions;
     use crate::package::package_download_urls;
 
     #[test]
@@ -563,6 +613,98 @@ mod tests {
             "hash failure must not leave a transaction directory"
         );
         server.await.expect("test server must exit");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn download_process_crash_recovers_staged_partial_package() {
+        let temporary = tempfile::tempdir().expect("temporary output must exist");
+        let output = temporary.path().to_path_buf();
+        std::fs::write(output.join("package.bin"), b"verified")
+            .expect("existing package must be writable");
+        let listener = StdTcpListener::bind(("127.0.0.1", 0)).expect("test server must bind");
+        let address = listener
+            .local_addr()
+            .expect("test server address must exist");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("request must connect");
+            let mut request = [0_u8; 1024];
+            let received = stream.read(&mut request).expect("request must be readable");
+            assert!(received > 0, "request must contain bytes");
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 16\r\nConnection: close\r\n\r\npartial",
+                )
+                .expect("response must be writable");
+        });
+
+        let status = std::process::Command::new(
+            std::env::current_exe().expect("test executable must be available"),
+        )
+        .args([
+            "--exact",
+            "commands::download::tests::download_file_crash_helper",
+            "--nocapture",
+        ])
+        .env(
+            "XODUS_DOWNLOAD_CRASH_URL",
+            format!("http://{address}/package"),
+        )
+        .env("XODUS_DOWNLOAD_CRASH_OUTPUT", &output)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("crash helper must start");
+
+        assert!(
+            !status.success(),
+            "download crash helper must terminate before promotion"
+        );
+        recover_transactions(&output).expect("staged download must be recoverable");
+        assert_eq!(
+            std::fs::read(output.join("package.bin")).expect("verified package must remain"),
+            b"verified"
+        );
+        assert!(
+            std::fs::read_dir(&output)
+                .expect("output directory must remain readable")
+                .all(|entry| {
+                    entry
+                        .expect("output entry must be readable")
+                        .file_name()
+                        .to_string_lossy()
+                        == "package.bin"
+                }),
+            "recovery must remove the crashed download transaction"
+        );
+        server.join().expect("test server must exit");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn download_file_crash_helper() {
+        let Some(url) = std::env::var_os("XODUS_DOWNLOAD_CRASH_URL") else {
+            return;
+        };
+        let output = std::env::var_os("XODUS_DOWNLOAD_CRASH_OUTPUT")
+            .map(std::path::PathBuf::from)
+            .expect("crash helper output must be configured");
+        let progress = ProgressBar::hidden();
+        let client = reqwest::Client::new();
+        let _ = download_file_attempt_with_hook(
+            DownloadAttemptRequest {
+                client: &client,
+                url: &url.to_string_lossy(),
+                file_name: "package.bin",
+                file_size: 16,
+                expected_hash: None,
+                output_root: &output,
+                progress_bar: &progress,
+            },
+            || std::process::abort(),
+        )
+        .await;
+        panic!("download crash helper completed without aborting");
     }
 
     #[test]
