@@ -156,7 +156,11 @@ fn read_uuid<R: Read>(reader: R) -> io::Result<uuid::Uuid> {
 }
 
 fn read_vec<R: Read>(mut reader: R, len: usize) -> io::Result<Vec<u8>> {
-    let mut buf = vec![0u8; len];
+    let mut buf = Vec::new();
+    buf.try_reserve_exact(len).map_err(|error| {
+        io::Error::other(format!("SPLicense buffer allocation failed: {error}"))
+    })?;
+    buf.resize(len, 0);
     reader.read_exact(&mut buf)?;
     Ok(buf)
 }
@@ -222,6 +226,12 @@ pub enum SPLicenseDecodeError {
 
     #[error("invalid UTF-16 package name: {0}")]
     InvalidPackageNameUtf16(#[from] std::string::FromUtf16Error),
+
+    #[error("SPLicense allocation failed for {collection} at {count} entries")]
+    AllocationFailed {
+        collection: &'static str,
+        count: usize,
+    },
 }
 
 #[derive(Debug, Error)]
@@ -306,10 +316,16 @@ impl SPLicense {
                         len: data.len(),
                     });
                 }
-                let utf16: Vec<u16> = utf16_bytes
-                    .iter()
-                    .map(|bytes| u16::from_le_bytes(*bytes))
-                    .collect();
+                let mut utf16 = Vec::new();
+                utf16.try_reserve_exact(utf16_bytes.len()).map_err(|_| {
+                    SPLicenseDecodeError::AllocationFailed {
+                        collection: "package name",
+                        count: utf16_bytes.len(),
+                    }
+                })?;
+                for bytes in utf16_bytes {
+                    utf16.push(u16::from_le_bytes(*bytes));
+                }
                 let mut s = String::from_utf16(&utf16)?;
                 if s.ends_with('\0') {
                     s.pop();
@@ -340,6 +356,12 @@ impl SPLicense {
                     let _unknown = read_vec(&mut reader, id_len - 16)?;
                     let key = PackedContentKey(read_array(&mut reader)?);
 
+                    self.content_keys.try_reserve(1).map_err(|_| {
+                        SPLicenseDecodeError::AllocationFailed {
+                            collection: "content keys",
+                            count: self.content_keys.len().saturating_add(1),
+                        }
+                    })?;
                     self.content_keys.insert(key_id, key);
                     offset += 4 + id_len + 40;
                 }
@@ -372,7 +394,14 @@ impl SPLicense {
                 let _unknown4: [u8; 2] = read_array(&mut reader)?;
             }
             Ok(BlockId::LicenseEntryIds) => {
-                let count = read_u16(&mut reader)?;
+                let count = usize::from(read_u16(&mut reader)?);
+
+                self.entry_ids.try_reserve(count).map_err(|_| {
+                    SPLicenseDecodeError::AllocationFailed {
+                        collection: "license entry IDs",
+                        count: self.entry_ids.len().saturating_add(count),
+                    }
+                })?;
 
                 for _ in 0..count {
                     let entry_id: [u8; 32] = read_array(&mut reader)?;
