@@ -305,6 +305,8 @@ pub enum XvdFileParseError {
         num_pages: u64,
         allocation: &'static str,
     },
+    #[error("XVC region end overflows for offset {offset} and length {length}")]
+    RegionEndOverflow { offset: u64, length: u64 },
 }
 
 #[derive(Debug)]
@@ -444,6 +446,13 @@ impl XvdFile {
                 });
             }
 
+            let _region_end =
+                h.offset
+                    .checked_add(length)
+                    .ok_or(XvdFileParseError::RegionEndOverflow {
+                        offset: h.offset,
+                        length,
+                    })?;
             let start_page = offset_to_page_number(h.offset - user_data_offset);
             let num_pages = bytes_to_pages(length);
             let page_capacity = usize::try_from(num_pages)
@@ -1328,7 +1337,7 @@ mod tests {
 
     #[tokio::test]
     async fn parse_rejects_unreservable_xvc_region_pages() {
-        let length = !((XVD_HEADER_SIZE - 1) as u64);
+        let length = !((XVD_HEADER_SIZE - 1) as u64) - XVC_INFO_OFFSET as u64;
         let result =
             XvdFile::parse(SyntheticXvdReader::synthetic_xvd_with_region_length(length)).await;
         let error = match result {
@@ -1342,6 +1351,25 @@ mod tests {
                 num_pages,
                 allocation: "data-unit",
             } if num_pages == length / XVD_HEADER_SIZE as u64
+        ));
+    }
+
+    #[tokio::test]
+    async fn parse_rejects_overflowing_xvc_region_end() {
+        let length = !((XVD_HEADER_SIZE - 1) as u64);
+        let result =
+            XvdFile::parse(SyntheticXvdReader::synthetic_xvd_with_region_length(length)).await;
+        let error = match result {
+            Ok(_) => panic!("overflowing XVC region end must not parse an XVD"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            XvdFileParseError::RegionEndOverflow {
+                offset,
+                length: actual_length,
+            } if offset == XVC_INFO_OFFSET as u64 && actual_length == length
         ));
     }
 }
