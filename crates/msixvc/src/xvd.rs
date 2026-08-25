@@ -9,7 +9,7 @@ use aes::cipher::KeyInit;
 use bytes::Bytes;
 use futures_util::StreamExt;
 use msixvc_common::parse::{BinaryParse, BinaryTryParse};
-use reqwest::header::RANGE;
+use reqwest::header::{CONTENT_LENGTH, CONTENT_RANGE, RANGE};
 use tokio::fs::OpenOptions;
 use tokio::io::{
     AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt, BufReader,
@@ -400,6 +400,7 @@ pub struct XvdFile {
 
 const MAX_XVC_REGION_HEADERS: u32 = 4_096;
 const SEGMENT_METADATA_READER_CAPACITY: usize = PAGE_SIZE;
+const DOWNLOAD_HTTP_RETRY_LIMIT: usize = 3;
 
 #[derive(thiserror::Error, Debug)]
 pub enum XvdFileParseError {
@@ -810,6 +811,46 @@ pub enum DownloadFileHttpError {
         received_bytes: u64,
         chunk_length: u64,
     },
+    #[error("download received {received_bytes} bytes beyond aligned page span {page_length}")]
+    ReceivedBytesBeyondPageSpan {
+        received_bytes: u64,
+        page_length: u64,
+    },
+    #[error("download HTTP response status {status} is not partial content")]
+    UnexpectedResponseStatus { status: u16 },
+    #[error("download HTTP response is missing Content-Range")]
+    MissingResponseContentRange,
+    #[error("download HTTP response has invalid Content-Range")]
+    InvalidResponseContentRange,
+    #[error(
+        "download response start {actual_start} does not match requested start {expected_start}"
+    )]
+    ResponseStartMismatch {
+        expected_start: u64,
+        actual_start: u64,
+    },
+    #[error("download response end {actual_end} does not match requested end {expected_end}")]
+    ResponseEndMismatch { expected_end: u64, actual_end: u64 },
+    #[error("download response range end {actual_end} exceeds total length {total}")]
+    ResponseRangeBeyondTotal { actual_end: u64, total: u64 },
+    #[error("download response is missing Content-Length")]
+    MissingResponseContentLength,
+    #[error(
+        "download response length {actual_length} does not match range length {expected_length}"
+    )]
+    ResponseLengthMismatch {
+        expected_length: u64,
+        actual_length: u64,
+    },
+    #[error(
+        "download response total length {actual_total} does not match previous total {expected_total}"
+    )]
+    ResponseTotalLengthMismatch {
+        expected_total: u64,
+        actual_total: u64,
+    },
+    #[error("download HTTP retry budget exhausted")]
+    HttpRetryBudgetExhausted,
     #[error(
         "download is incomplete: {remaining} of {file_length} bytes remain after {received_bytes} bytes"
     )]
@@ -1688,6 +1729,150 @@ fn download_request_range(
     Ok(DownloadRequestRange { start, end })
 }
 
+fn validate_download_response_extent(
+    status: u16,
+    expected_start: u64,
+    expected_end: u64,
+    content_range: Option<&str>,
+    content_length: Option<u64>,
+    expected_total: Option<u64>,
+) -> Result<u64, DownloadFileHttpError> {
+    if status != reqwest::StatusCode::PARTIAL_CONTENT.as_u16() {
+        return Err(DownloadFileHttpError::UnexpectedResponseStatus { status });
+    }
+
+    let content_range = content_range.ok_or(DownloadFileHttpError::MissingResponseContentRange)?;
+    let (range, total) = content_range
+        .split_once('/')
+        .ok_or(DownloadFileHttpError::InvalidResponseContentRange)?;
+    let range = range
+        .strip_prefix("bytes ")
+        .ok_or(DownloadFileHttpError::InvalidResponseContentRange)?;
+    let (actual_start, actual_end) = range
+        .split_once('-')
+        .ok_or(DownloadFileHttpError::InvalidResponseContentRange)?;
+    let actual_start = actual_start
+        .parse::<u64>()
+        .map_err(|_| DownloadFileHttpError::InvalidResponseContentRange)?;
+    let actual_end = actual_end
+        .parse::<u64>()
+        .map_err(|_| DownloadFileHttpError::InvalidResponseContentRange)?;
+    let total = total
+        .parse::<u64>()
+        .map_err(|_| DownloadFileHttpError::InvalidResponseContentRange)?;
+
+    if actual_start != expected_start {
+        return Err(DownloadFileHttpError::ResponseStartMismatch {
+            expected_start,
+            actual_start,
+        });
+    }
+    if actual_end != expected_end {
+        return Err(DownloadFileHttpError::ResponseEndMismatch {
+            expected_end,
+            actual_end,
+        });
+    }
+    if actual_start > actual_end {
+        return Err(DownloadFileHttpError::InvalidResponseContentRange);
+    }
+    if actual_end >= total {
+        return Err(DownloadFileHttpError::ResponseRangeBeyondTotal { actual_end, total });
+    }
+    if let Some(expected_total) = expected_total
+        && expected_total != total
+    {
+        return Err(DownloadFileHttpError::ResponseTotalLengthMismatch {
+            expected_total,
+            actual_total: total,
+        });
+    }
+
+    let expected_length = actual_end
+        .checked_sub(actual_start)
+        .and_then(|length| length.checked_add(1))
+        .ok_or(DownloadFileHttpError::InvalidResponseContentRange)?;
+    let actual_length =
+        content_length.ok_or(DownloadFileHttpError::MissingResponseContentLength)?;
+    if actual_length != expected_length {
+        return Err(DownloadFileHttpError::ResponseLengthMismatch {
+            expected_length,
+            actual_length,
+        });
+    }
+
+    Ok(total)
+}
+
+fn is_retryable_download_error(error: &DownloadFileHttpError) -> bool {
+    matches!(
+        error,
+        DownloadFileHttpError::Io(error)
+            if matches!(error.kind(), ErrorKind::Other | ErrorKind::TimedOut)
+    )
+}
+
+fn consume_download_retry_budget(
+    retry_budget: &mut usize,
+    error: DownloadFileHttpError,
+) -> Result<(), DownloadFileHttpError> {
+    if !is_retryable_download_error(&error) {
+        return Err(error);
+    }
+    if *retry_budget == 0 {
+        return Err(download_http_retry_budget_exhausted());
+    }
+    *retry_budget -= 1;
+    Ok(())
+}
+
+fn download_http_retry_budget_exhausted() -> DownloadFileHttpError {
+    DownloadFileHttpError::HttpRetryBudgetExhausted
+}
+
+async fn open_download_response(
+    client: &reqwest::Client,
+    url: &str,
+    request: DownloadRequestRange,
+    expected_total: Option<u64>,
+    stall_timeout: tokio::time::Duration,
+) -> Result<(reqwest::Response, u64), DownloadFileHttpError> {
+    let response = timeout(
+        stall_timeout,
+        client
+            .get(url)
+            .header(RANGE, format!("bytes={}-{}", request.start, request.end))
+            .send(),
+    )
+    .await
+    .map_err(|_| {
+        DownloadFileHttpError::Io(Error::new(
+            ErrorKind::TimedOut,
+            "download HTTP request timed out",
+        ))
+    })?
+    .map_err(|error| DownloadFileHttpError::Io(Error::other(error)))?;
+
+    let content_range = response
+        .headers()
+        .get(CONTENT_RANGE)
+        .and_then(|value| value.to_str().ok());
+    let total = validate_download_response_extent(
+        response.status().as_u16(),
+        request.start,
+        request.end,
+        content_range,
+        response
+            .headers()
+            .get(CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok()),
+        expected_total,
+    )?;
+
+    Ok((response, total))
+}
+
 fn download_page_plan(
     file_offset_in_section: u64,
     file_offset: u64,
@@ -1735,15 +1920,23 @@ fn next_download_page(page_in_section: u64) -> Result<u64, DownloadFileHttpError
 fn next_download_received_byte_count(
     received_bytes: u64,
     chunk_length: usize,
+    page_length: u64,
 ) -> Result<u64, DownloadFileHttpError> {
     let chunk_length = u64::try_from(chunk_length)
         .map_err(|_| DownloadFileHttpError::ReceivedChunkLengthTooLarge { chunk_length })?;
-    received_bytes.checked_add(chunk_length).ok_or(
+    let next = received_bytes.checked_add(chunk_length).ok_or(
         DownloadFileHttpError::ReceivedByteCountOverflow {
             received_bytes,
             chunk_length,
         },
-    )
+    )?;
+    if next > page_length {
+        return Err(DownloadFileHttpError::ReceivedBytesBeyondPageSpan {
+            received_bytes: next,
+            page_length,
+        });
+    }
+    Ok(next)
 }
 
 fn segment_section_end(
@@ -2359,30 +2552,30 @@ impl XvdFile {
         let mut page = [0u8; PAGE_SIZE];
         let mut remaining = sfile.length;
         let mut page_in_section = page_plan.page_start;
-        let mut stream = None;
         let mut pending = bytes::BytesMut::new();
         let mut v: u64 = 0;
 
         let stall_timeout = tokio::time::Duration::from_secs(5);
-        if let Ok(Ok(Ok(response))) = timeout(
-            stall_timeout,
-            client
-                .get(url)
-                .header(
-                    RANGE,
-                    format!(
-                        "bytes={}-{}",
-                        page_plan.initial_request.start, page_plan.initial_request.end
-                    ),
-                )
-                .send(),
-        )
-        .await
-        .map(|o| o.map(|o| o.error_for_status()))
-            && response.status() == 206
-        {
-            stream = Some(response.bytes_stream());
-        }
+        let mut retry_budget = DOWNLOAD_HTTP_RETRY_LIMIT;
+        let (response, total) = loop {
+            match open_download_response(
+                client,
+                url,
+                page_plan.initial_request,
+                None,
+                stall_timeout,
+            )
+            .await
+            {
+                Ok(response) => break response,
+                Err(error) if is_retryable_download_error(&error) => {
+                    consume_download_retry_budget(&mut retry_budget, error)?;
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        let mut response_total = Some(total);
+        let mut stream = Some(response.bytes_stream());
         loop {
             if page_in_section >= page_plan.page_loop_end || remaining == 0 {
                 break;
@@ -2393,33 +2586,36 @@ impl XvdFile {
                 Ok(None)
             };
             let data: Bytes;
-            if let Ok(Some(Ok(b))) = next {
+            if let Ok(Some(Ok(b))) = next
+                && !b.is_empty()
+            {
                 data = b;
             } else {
-                // error
                 let resume_request =
                     download_request_range(sfile.offset, page_plan.page_length, v)?;
-                if let Ok(Ok(Ok(response))) = timeout(
-                    stall_timeout,
-                    client
-                        .get(url)
-                        .header(
-                            RANGE,
-                            format!("bytes={}-{}", resume_request.start, resume_request.end),
-                        )
-                        .send(),
-                )
-                .await
-                .map(|o| o.map(|o| o.error_for_status()))
-                    && response.status() == 206
-                {
-                    stream = Some(response.bytes_stream());
-                    continue;
-                }
+                let (response, total) = loop {
+                    match open_download_response(
+                        client,
+                        url,
+                        resume_request,
+                        response_total,
+                        stall_timeout,
+                    )
+                    .await
+                    {
+                        Ok(response) => break response,
+                        Err(error) if is_retryable_download_error(&error) => {
+                            consume_download_retry_budget(&mut retry_budget, error)?;
+                        }
+                        Err(error) => return Err(error),
+                    }
+                };
+                response_total = Some(total);
+                stream = Some(response.bytes_stream());
                 continue;
             }
 
-            v = next_download_received_byte_count(v, data.len())?;
+            v = next_download_received_byte_count(v, data.len(), page_plan.page_length)?;
             progress(min(v, sfile.length), sfile.length);
 
             pending.extend_from_slice(&data);
@@ -2620,16 +2816,17 @@ mod tests {
         NtfsSegmentMetadataParseError, PAGE_SIZE, PopulateSegmentHashesError,
         SEGMENT_METADATA_READER_CAPACITY, SegmentFile, SegmentMetadataParseError, SyncSubstream,
         UserPackageFile, UserPackageFilesParseError, XvcRegionId, XvdFile, XvdFileParseError,
-        XvdStream, collect_ntfs_segment_files, download_encrypted_section, download_file_end,
-        download_page_plan, download_request_range, extract_data_unit_index,
-        extract_encrypted_section, extract_file_end, extract_page_loop_end, extract_page_plan,
-        extract_progress_bytes, extract_write_length, hash_entry_read_offset, hash_page_index,
-        next_download_page, next_segment_page_offset, non_encrypted_prefix_len, ntfs_drive_extents,
-        ntfs_partition_extents, package_file_name, required_gpt_partition_length,
-        required_gpt_partition_start, reserve_xvc_region_entries, segment_file_name,
-        segment_metadata_reader_capacity, sync_substream_absolute_target,
-        validate_segment_metadata_table_extent, validate_xvc_region_hash_entry_addresses,
-        xvd_stream_absolute_seek_target,
+        XvdStream, collect_ntfs_segment_files, consume_download_retry_budget,
+        download_encrypted_section, download_file_end, download_page_plan, download_request_range,
+        extract_data_unit_index, extract_encrypted_section, extract_file_end,
+        extract_page_loop_end, extract_page_plan, extract_progress_bytes, extract_write_length,
+        hash_entry_read_offset, hash_page_index, is_retryable_download_error, next_download_page,
+        next_download_received_byte_count, next_segment_page_offset, non_encrypted_prefix_len,
+        ntfs_drive_extents, ntfs_partition_extents, package_file_name,
+        required_gpt_partition_length, required_gpt_partition_start, reserve_xvc_region_entries,
+        segment_file_name, segment_metadata_reader_capacity, sync_substream_absolute_target,
+        validate_download_response_extent, validate_segment_metadata_table_extent,
+        validate_xvc_region_hash_entry_addresses, xvd_stream_absolute_seek_target,
     };
 
     const XVD_HEADER_SIZE: usize = 4096;
@@ -4159,6 +4356,228 @@ mod tests {
         assert_eq!(plan.page_length, PAGE_SIZE as u64);
         assert_eq!(plan.initial_request.start, 64);
         assert_eq!(plan.initial_request.end, 64 + PAGE_SIZE as u64 - 1);
+    }
+
+    #[test]
+    fn download_response_extent_accepts_exact_partial_range_and_stable_total() {
+        let total = validate_download_response_extent(
+            206,
+            64,
+            4_159,
+            Some("bytes 64-4159/8192"),
+            Some(4_096),
+            None,
+        )
+        .expect("exact partial response extent must validate");
+        assert_eq!(total, 8_192);
+
+        let resumed_total = validate_download_response_extent(
+            206,
+            4_160,
+            8_255,
+            Some("bytes 4160-8255/16384"),
+            Some(4_096),
+            Some(16_384),
+        )
+        .expect("a resumed response must preserve its declared total");
+        assert_eq!(resumed_total, 16_384);
+    }
+
+    #[test]
+    fn download_response_extent_rejects_status_and_range_drift() {
+        let status = validate_download_response_extent(
+            200,
+            64,
+            4_159,
+            Some("bytes 64-4159/8192"),
+            Some(4_096),
+            None,
+        )
+        .expect_err("a non partial response must fail");
+        assert!(matches!(
+            status,
+            DownloadFileHttpError::UnexpectedResponseStatus { status: 200 }
+        ));
+
+        let start = validate_download_response_extent(
+            206,
+            65,
+            4_159,
+            Some("bytes 64-4159/8192"),
+            Some(4_096),
+            None,
+        )
+        .expect_err("a response start drift must fail");
+        assert!(matches!(
+            start,
+            DownloadFileHttpError::ResponseStartMismatch {
+                expected_start: 65,
+                actual_start: 64,
+            }
+        ));
+
+        let end = validate_download_response_extent(
+            206,
+            64,
+            4_160,
+            Some("bytes 64-4159/8192"),
+            Some(4_096),
+            None,
+        )
+        .expect_err("a response end drift must fail");
+        assert!(matches!(
+            end,
+            DownloadFileHttpError::ResponseEndMismatch {
+                expected_end: 4_160,
+                actual_end: 4_159,
+            }
+        ));
+
+        let total = validate_download_response_extent(
+            206,
+            64,
+            4_159,
+            Some("bytes 64-4159/9000"),
+            Some(4_096),
+            Some(8_192),
+        )
+        .expect_err("a resumed total drift must fail");
+        assert!(matches!(
+            total,
+            DownloadFileHttpError::ResponseTotalLengthMismatch {
+                expected_total: 8_192,
+                actual_total: 9_000,
+            }
+        ));
+    }
+
+    #[test]
+    fn download_response_extent_rejects_missing_invalid_and_overlong_headers() {
+        let missing_range =
+            validate_download_response_extent(206, 64, 4_159, None, Some(4_096), None)
+                .expect_err("missing Content-Range must fail");
+        assert!(matches!(
+            missing_range,
+            DownloadFileHttpError::MissingResponseContentRange
+        ));
+
+        let invalid_range = validate_download_response_extent(
+            206,
+            64,
+            4_159,
+            Some("bytes 64-4159"),
+            Some(4_096),
+            None,
+        )
+        .expect_err("malformed Content-Range must fail");
+        assert!(matches!(
+            invalid_range,
+            DownloadFileHttpError::InvalidResponseContentRange
+        ));
+
+        let beyond_total = validate_download_response_extent(
+            206,
+            64,
+            4_159,
+            Some("bytes 64-4159/4096"),
+            Some(4_096),
+            None,
+        )
+        .expect_err("a response range beyond its total must fail");
+        assert!(matches!(
+            beyond_total,
+            DownloadFileHttpError::ResponseRangeBeyondTotal {
+                actual_end: 4_159,
+                total: 4_096,
+            }
+        ));
+
+        let missing_length = validate_download_response_extent(
+            206,
+            64,
+            4_159,
+            Some("bytes 64-4159/8192"),
+            None,
+            None,
+        )
+        .expect_err("missing Content-Length must fail");
+        assert!(matches!(
+            missing_length,
+            DownloadFileHttpError::MissingResponseContentLength
+        ));
+
+        let wrong_length = validate_download_response_extent(
+            206,
+            64,
+            4_159,
+            Some("bytes 64-4159/8192"),
+            Some(4_095),
+            None,
+        )
+        .expect_err("a mismatched Content-Length must fail");
+        assert!(matches!(
+            wrong_length,
+            DownloadFileHttpError::ResponseLengthMismatch {
+                expected_length: 4_096,
+                actual_length: 4_095,
+            }
+        ));
+    }
+
+    #[test]
+    fn download_received_bytes_rejects_data_beyond_the_page_span() {
+        let error = next_download_received_byte_count(4_095, 2, 4_096)
+            .expect_err("a response body beyond the aligned page must fail");
+
+        assert!(matches!(
+            error,
+            DownloadFileHttpError::ReceivedBytesBeyondPageSpan {
+                received_bytes: 4_097,
+                page_length: 4_096,
+            }
+        ));
+    }
+
+    #[test]
+    fn download_http_retry_policy_is_bounded_and_preserves_typed_failures() {
+        assert!(is_retryable_download_error(&DownloadFileHttpError::Io(
+            Error::other("temporary transport failure"),
+        )));
+        assert!(!is_retryable_download_error(
+            &DownloadFileHttpError::UnexpectedResponseStatus { status: 200 }
+        ));
+
+        let mut budget = 3;
+        for expected_budget in [2, 1, 0] {
+            consume_download_retry_budget(
+                &mut budget,
+                DownloadFileHttpError::Io(Error::other("temporary transport failure")),
+            )
+            .expect("retryable transport failures must consume bounded budget");
+            assert_eq!(budget, expected_budget);
+        }
+
+        let exhausted = consume_download_retry_budget(
+            &mut budget,
+            DownloadFileHttpError::Io(Error::other("temporary transport failure")),
+        )
+        .expect_err("retry budget exhaustion must return a typed failure");
+        assert!(matches!(
+            exhausted,
+            DownloadFileHttpError::HttpRetryBudgetExhausted
+        ));
+
+        let mut budget = 3;
+        let nonretryable = consume_download_retry_budget(
+            &mut budget,
+            DownloadFileHttpError::UnexpectedResponseStatus { status: 200 },
+        )
+        .expect_err("invalid response semantics must not consume retry budget");
+        assert!(matches!(
+            nonretryable,
+            DownloadFileHttpError::UnexpectedResponseStatus { status: 200 }
+        ));
+        assert_eq!(budget, 3);
     }
 
     #[test]
