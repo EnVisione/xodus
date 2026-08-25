@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -12,6 +13,16 @@ use crate::simple_context::SimpleContext;
 const MESSAGE_TIMEOUT: Duration = Duration::from_secs(30);
 const RATE_WINDOW: Duration = Duration::from_secs(60);
 const MAX_MESSAGES_PER_WINDOW: u32 = 120;
+
+async fn wait_or_cancel<T, F>(token: &CancellationToken, future: F) -> Option<T>
+where
+    F: Future<Output = T>,
+{
+    tokio::select! {
+        _ = token.cancelled() => None,
+        result = future => Some(result),
+    }
+}
 
 pub async fn route(
     mut socket: tokio::net::UnixStream,
@@ -57,7 +68,15 @@ pub async fn route(
         messages_in_window += 1;
 
         let mut read_magic = [0; 4];
-        let read = match timeout(MESSAGE_TIMEOUT, socket.read_exact(&mut read_magic)).await {
+        let Some(read) = wait_or_cancel(
+            &token,
+            timeout(MESSAGE_TIMEOUT, socket.read_exact(&mut read_magic)),
+        )
+        .await
+        else {
+            return;
+        };
+        let read = match read {
             Ok(result) => result,
             Err(_) => {
                 log::error!("timed out reading IPC message magic");
@@ -72,12 +91,18 @@ pub async fn route(
         let magic = u32::from_le_bytes(read_magic);
         let res = match magic {
             crate::XML_MAGIC => {
-                match timeout(
-                    MESSAGE_TIMEOUT,
-                    super::xml::handle(&mut socket, &mut context),
+                let Some(result) = wait_or_cancel(
+                    &token,
+                    timeout(
+                        MESSAGE_TIMEOUT,
+                        super::xml::handle(&mut socket, &mut context),
+                    ),
                 )
                 .await
-                {
+                else {
+                    return;
+                };
+                match result {
                     Ok(result) => result,
                     Err(_) => {
                         log::error!("timed out handling XML IPC message");
@@ -86,12 +111,18 @@ pub async fn route(
                 }
             }
             crate::PROTO_MAGIC => {
-                match timeout(
-                    MESSAGE_TIMEOUT,
-                    super::proto::handle(&mut socket, &mut context),
+                let Some(result) = wait_or_cancel(
+                    &token,
+                    timeout(
+                        MESSAGE_TIMEOUT,
+                        super::proto::handle(&mut socket, &mut context),
+                    ),
                 )
                 .await
-                {
+                else {
+                    return;
+                };
+                match result {
                     Ok(result) => result,
                     Err(_) => {
                         log::error!("timed out handling protobuf IPC message");
@@ -108,5 +139,29 @@ pub async fn route(
         if let Err(err) = res {
             log::error!("IPC message failed: {err}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::future::pending;
+
+    use tokio_util::sync::CancellationToken;
+
+    use super::wait_or_cancel;
+
+    #[tokio::test]
+    async fn cancellation_interrupts_a_pending_operation() {
+        let token = CancellationToken::new();
+        token.cancel();
+
+        assert!(wait_or_cancel(&token, pending::<()>()).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn completed_operation_wins_before_cancellation() {
+        let token = CancellationToken::new();
+
+        assert_eq!(wait_or_cancel(&token, async { 7_u8 }).await, Some(7));
     }
 }
