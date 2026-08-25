@@ -53,6 +53,8 @@ pub enum Msixvc2ParseError {
     VerificationSizeTooLarge { required: u64, limit: u64 },
     #[error("MSIXVC2 archive uncompressed size overflows")]
     ArchiveSizeOverflow,
+    #[error("MSIXVC2 archive entry metadata is missing for entry index {index}")]
+    EntryMetadataMissing { index: usize },
 }
 
 pub fn inspect<R>(reader: R) -> Result<Msixvc2Archive, Msixvc2ParseError>
@@ -163,11 +165,21 @@ where
     let mut archive = ZipArchive::new(reader)?;
     for index in 0..archive.len() {
         let mut file = archive.by_index(index)?;
-        visitor(&metadata.entries[index], &mut file)?;
+        let entry = metadata_entry(&metadata.entries, index)?;
+        visitor(entry, &mut file)?;
         let mut sink = std::io::sink();
         std::io::copy(&mut file, &mut sink)?;
     }
     Ok(())
+}
+
+fn metadata_entry(
+    entries: &[Msixvc2Entry],
+    index: usize,
+) -> Result<&Msixvc2Entry, Msixvc2ParseError> {
+    entries
+        .get(index)
+        .ok_or(Msixvc2ParseError::EntryMetadataMissing { index })
 }
 
 fn validate_entry_name(name: &str) -> Result<(), Msixvc2ParseError> {
@@ -195,7 +207,7 @@ fn validate_entry_name(name: &str) -> Result<(), Msixvc2ParseError> {
 mod tests {
     use std::io::Cursor;
 
-    use super::{Msixvc2ParseError, inspect, verify_all, visit_entries};
+    use super::{Msixvc2ParseError, inspect, metadata_entry, verify_all, visit_entries};
 
     const VALID: &[u8] = include_bytes!("../testdata/msixvc2/xodus-fixture-base.msixvc");
     const TRUNCATED: &[u8] = include_bytes!("../testdata/msixvc2/xodus-fixture-truncated.msixvc");
@@ -277,5 +289,13 @@ mod tests {
         .expect("valid entries should be visited");
 
         assert!(metadata_seen);
+    }
+
+    #[test]
+    fn missing_entry_metadata_returns_typed_error() {
+        assert!(matches!(
+            metadata_entry(&[], 0),
+            Err(Msixvc2ParseError::EntryMetadataMissing { index: 0 })
+        ));
     }
 }
