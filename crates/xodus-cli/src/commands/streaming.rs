@@ -246,6 +246,7 @@ fn ensure_package_parent(root: &Path, package_path: &Path) -> io::Result<()> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PromotionState {
     Pending,
+    BackupPending,
     BackedUp,
     Promoted,
 }
@@ -254,6 +255,7 @@ impl PromotionState {
     fn as_str(self) -> &'static str {
         match self {
             Self::Pending => "pending",
+            Self::BackupPending => "backup_pending",
             Self::BackedUp => "backed_up",
             Self::Promoted => "promoted",
         }
@@ -262,6 +264,7 @@ impl PromotionState {
     fn parse(value: &str) -> io::Result<Self> {
         match value {
             "pending" => Ok(Self::Pending),
+            "backup_pending" => Ok(Self::BackupPending),
             "backed_up" => Ok(Self::BackedUp),
             "promoted" => Ok(Self::Promoted),
             _ => Err(invalid_package_path(
@@ -509,6 +512,20 @@ fn restore_previous_file(backup_path: &Path, final_path: &Path) -> io::Result<()
     }
 }
 
+fn recover_backup_pending(backup_path: &Path, final_path: &Path) -> io::Result<()> {
+    match std::fs::symlink_metadata(backup_path) {
+        Ok(_) => restore_previous_file(backup_path, final_path),
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            if std::fs::symlink_metadata(final_path).is_ok() {
+                Ok(())
+            } else {
+                Err(error)
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn sync_parent_directory(path: &Path) -> io::Result<()> {
     let Some(parent) = path.parent() else {
         return Ok(());
@@ -529,9 +546,13 @@ fn rollback_transaction(
         let final_path = output_root.join(&entry.final_relative);
         let backup_path = transaction_root.join(&entry.backup_relative);
         let result = if entry.had_previous {
-            restore_previous_file(&backup_path, &final_path)
-                .and_then(|()| sync_parent_directory(&backup_path))
-                .and_then(|()| sync_parent_directory(&final_path))
+            if entry.state == PromotionState::BackupPending {
+                recover_backup_pending(&backup_path, &final_path)
+            } else {
+                restore_previous_file(&backup_path, &final_path)
+            }
+            .and_then(|()| sync_parent_directory(&backup_path))
+            .and_then(|()| sync_parent_directory(&final_path))
         } else if matches!(
             entry.state,
             PromotionState::BackedUp | PromotionState::Promoted
@@ -607,16 +628,33 @@ where
             return Err(error);
         }
         if std::fs::symlink_metadata(&final_path).is_ok() {
+            entries[index].had_previous = true;
+            entries[index].state = PromotionState::BackupPending;
+            if let Err(error) = write_transaction_journal(transaction_root, entries, false) {
+                let _ = rollback_transaction(transaction_root, output_root, entries);
+                return Err(error);
+            }
+            if should_interrupt() {
+                return Err(io::Error::new(
+                    ErrorKind::Interrupted,
+                    "transaction promotion interrupted before backup",
+                ));
+            }
             if let Err(error) = std::fs::rename(&final_path, &backup_path) {
                 let _ = rollback_transaction(transaction_root, output_root, entries);
                 return Err(error);
             }
-            entries[index].had_previous = true;
             if let Err(error) = sync_parent_directory(&final_path)
                 .and_then(|()| sync_parent_directory(&backup_path))
             {
                 let _ = rollback_transaction(transaction_root, output_root, entries);
                 return Err(error);
+            }
+            if should_interrupt() {
+                return Err(io::Error::new(
+                    ErrorKind::Interrupted,
+                    "transaction promotion interrupted after backup rename",
+                ));
             }
         }
         entries[index].state = PromotionState::BackedUp;
@@ -636,6 +674,12 @@ where
         {
             let _ = rollback_transaction(transaction_root, output_root, entries);
             return Err(error);
+        }
+        if should_interrupt() {
+            return Err(io::Error::new(
+                ErrorKind::Interrupted,
+                "transaction promotion interrupted after staged rename",
+            ));
         }
         if !entries[index].remove_final
             && let Err(error) = sync_parent_directory(&staged_path)
@@ -1815,7 +1859,7 @@ mod tests {
 
     #[test]
     fn transaction_recovery_restores_after_injected_promotion_interruptions() {
-        for checkpoint in 0..=2 {
+        for checkpoint in 0..6 {
             let temporary = tempfile::tempdir().unwrap();
             let output = temporary.path().join("output");
             std::fs::create_dir(&output).unwrap();
