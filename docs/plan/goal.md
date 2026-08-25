@@ -4,18 +4,18 @@ Complete every mandatory requirement XODUS-REQ-001 through XODUS-REQ-022 and eve
 Immediate checkpoint:
 Refresh and inspect `origin` without altering the remote. Verify `origin` is the intended repository; fetch `origin` without altering the remote; verify the fetched remote-tracking ref against the current remote default-branch head. Classify the local default branch as equal, behind, ahead, or diverged; fast-forward only when safe. Do not reset, force, discard, or overwrite unexpected history. Search local branches, remote branches, and repository-wide open pull requests; resume applicable work, otherwise branch from the verified authoritative baseline. Do not invent a branch while an applicable active branch exists. Create or resume an implementation branch before modifying tracked files.
 
-SRC-024 through SRC-033 passed checks: formatting, 24 msixvc tests, clean crate Clippy, CodeGraph sync, release build, workspace Clippy with four unrelated warnings, 43 filtered workspace test passes, and diff check. Phase 2 and XODUS-REQ-002 remain open; excluded account test prevents full-suite claim. Next replace both XVD `start_page + page` uses in the full-region preflight and hash-read loop with one checked page-index helper returning typed `XvdFileParseError` before reservation or I/O on overflow. Preserve ordinary page progression; prove direct overflow plus the normal parser path with deterministic in-memory evidence and no filesystem mutation. Defer other downstream arithmetic. No title package, download/stream, secret/keyring/browser/package-content, or runtime work. Do not begin XODUS-REQ-003 or Phase 3 until Phase 2 closes.
+SRC-024 through SRC-034 passed checks: formatting, 25 msixvc tests, clean crate Clippy, CodeGraph sync, release build, workspace Clippy with four unrelated warnings, 43 filtered workspace test passes, and diff check. Phase 2 and XODUS-REQ-002 remain open; excluded account test prevents full-suite claim. Next replace package-controlled `String::from_utf16(&fullname[..end]).unwrap()` in `parse_user_package_files` with typed parse failure. Preserve NUL-truncated valid names; prove an invalid surrogate sequence fails before map insertion or filesystem mutation using deterministic in-memory evidence. Defer package-file count and offset validation, segment-metadata parsing, and downstream boundaries. No title package, download/stream, secret/keyring/browser/package-content, or runtime work. Do not begin XODUS-REQ-003 or Phase 3 until Phase 2 closes.
 
 Perform one bounded inspection that ends as soon as each mandatory criterion is classified as implemented with valid evidence, incomplete, stale evidence, or externally blocked. Immediately execute the first incomplete or stale-evidence criterion. The map is not a deliverable: do not stop after producing it, do not rebuild it while unchanged evidence remains valid, and do not produce a narrative audit before implementation.
 
 Authoritative plan:
 /home/envy/Documents/Codex/2026-08-20/ca/work/xodus/docs/cachyos/plan.md
-Plan SHA-256: 9c550d6ec94b2d661b04af73bf2cba59f59d86ac73d6a6170f5c6bb20f193102
-Validated handoff plan-set SHA-256: d8b11cb855a93d33f4b8bca51106a4367ba5d276a734d076452e8bfefa700560
+Plan SHA-256: 0909a6a2845a9fdbe2392efbeea433c5fc4bedeabc83fa99436e796356edb87b
+Validated handoff plan-set SHA-256: 729080d73c2d5b162accf1b27ebebffeb696a8bc5d7781a077a0994eed6aac5e
 Completion endpoint: Xodus stable release is complete only when the signed public CachyOS release and repository local PKGBUILD install on the Tier 1 Lenovo Legion 9 18IAX10, Minecraft for Windows and Forza Horizon 5 each pass the authorized local login, entitlement, license, clean install, update, two consecutive launch, runtime, save, shutdown, repair, and uninstall workflows, Forza passes both absolute performance profiles, Tier 2 compatibility gates pass, MSIXVC2 and XSP update support pass, unsupported anti cheat titles hand off separately to Xbox cloud gaming, all mandatory security, recovery, documentation, and release evidence passes, and no cloud result substitutes for either local target.
 
 Observed checkout branch: envy/target-metadata-evidence
-Observed checkout commit: 8870c60bc4e58f57e65ed17459a0c49edeb47aa6
+Observed checkout commit: 4505b3a3c629913b1533c1b56df597f14cf27db1
 Repository root: /home/envy/Documents/Codex/2026-08-20/ca/work/xodus
 
 Authoritative remote:
@@ -27,7 +27,7 @@ Observed local default-branch commit: 5b77e06eaa5e3cea78af122436d35a9b02992834
 Observed local remote-tracking ref: origin/main
 Observed local remote-tracking commit: 5b77e06eaa5e3cea78af122436d35a9b02992834
 Current remote default-branch head: 5b77e06eaa5e3cea78af122436d35a9b02992834
-Remote-head evidence: git ls-remote read-only query observed 2026-08-25 at 04:21:45Z, corroborated by gh repo view EnVisione/xodus defaultBranchRef main
+Remote-head evidence: git ls-remote read-only query observed 2026-08-25 at 04:32:56Z, corroborated by gh repo view EnVisione/xodus defaultBranchRef main
 Authoritative working baseline: established
 Applicable implementation branch: envy/target-metadata-evidence
 Applicable open pull request: none identified at checkpoint

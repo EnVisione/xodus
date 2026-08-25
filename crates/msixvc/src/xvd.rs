@@ -325,6 +325,8 @@ pub enum XvdFileParseError {
         hash_block: u64,
         entry_start: u64,
     },
+    #[error("XVD hash page index overflows for start page {start_page} and page {page}")]
+    HashPageIndexOverflow { start_page: u64, page: u64 },
 }
 
 fn reserve_xvc_region_entries(
@@ -380,6 +382,12 @@ fn hash_entry_read_offset(
         })
 }
 
+fn hash_page_index(start_page: u64, page: u64) -> Result<u64, XvdFileParseError> {
+    start_page
+        .checked_add(page)
+        .ok_or(XvdFileParseError::HashPageIndexOverflow { start_page, page })
+}
+
 fn validate_xvc_region_hash_entry_addresses(
     xvd_type: u32,
     hash_tree_levels: u64,
@@ -394,7 +402,7 @@ fn validate_xvc_region_hash_entry_addresses(
             xvd_type,
             hash_tree_levels,
             number_of_hashed_pages,
-            start_page + page,
+            hash_page_index(start_page, page)?,
             0,
             false,
             false,
@@ -584,7 +592,7 @@ impl XvdFile {
                         xvd_header.xvd_type as u32,
                         _hash_tree_levels,
                         xvd_header.number_of_hashed_pages(),
-                        start_page + page,
+                        hash_page_index(start_page, page)?,
                         0,
                         false,
                         false,
@@ -1240,7 +1248,7 @@ mod tests {
 
     use super::{
         MAX_XVC_REGION_HEADERS, XvdFile, XvdFileParseError, hash_entry_read_offset,
-        reserve_xvc_region_entries, validate_xvc_region_hash_entry_addresses,
+        hash_page_index, reserve_xvc_region_entries, validate_xvc_region_hash_entry_addresses,
     };
 
     const XVD_HEADER_SIZE: usize = 4096;
@@ -1499,6 +1507,20 @@ mod tests {
                 hash_tree_offset: u64::MAX,
                 hash_block: 1,
                 entry_start: 0,
+            }
+        ));
+    }
+
+    #[test]
+    fn hash_page_index_rejects_overflow_before_allocation_or_io() {
+        let error = hash_page_index(u64::MAX, 1)
+            .expect_err("overflowing hash page index must fail before allocation or I/O");
+
+        assert!(matches!(
+            error,
+            XvdFileParseError::HashPageIndexOverflow {
+                start_page: u64::MAX,
+                page: 1,
             }
         ));
     }
