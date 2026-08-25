@@ -771,12 +771,23 @@ pub(crate) fn recover_transactions(output_root: &Path) -> io::Result<()> {
 }
 
 pub(crate) fn acquire_transaction_lock(output_root: &Path) -> io::Result<std::fs::File> {
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(output_root.join(TRANSACTION_LOCK_FILE))?;
+    let root = std::fs::File::open(output_root)?;
+    if !root.metadata()?.is_dir() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "transaction root is not a directory",
+        ));
+    }
+    let lock = std::fs::File::from(
+        openat2(
+            &root,
+            TRANSACTION_LOCK_FILE,
+            OFlags::RDWR | OFlags::CREATE | OFlags::CLOEXEC,
+            Mode::RUSR | Mode::WUSR,
+            OUTPUT_RESOLVE_FLAGS,
+        )
+        .map_err(io::Error::from)?,
+    );
     lock.try_lock_exclusive()?;
     Ok(lock)
 }
@@ -2035,5 +2046,25 @@ mod tests {
         assert!(acquire_transaction_lock(temporary.path()).is_err());
         drop(first);
         assert!(acquire_transaction_lock(temporary.path()).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transaction_lock_rejects_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_lock = outside.path().join("outside.lock");
+        std::fs::write(&outside_lock, b"outside").unwrap();
+        symlink(
+            &outside_lock,
+            temporary.path().join(super::TRANSACTION_LOCK_FILE),
+        )
+        .unwrap();
+
+        let _error = acquire_transaction_lock(temporary.path())
+            .expect_err("transaction lock must reject symlink paths");
+        assert_eq!(std::fs::read(&outside_lock).unwrap(), b"outside");
     }
 }
