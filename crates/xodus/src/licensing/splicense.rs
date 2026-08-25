@@ -483,6 +483,7 @@ impl Deref for ContentKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::licensing::utils::{BcryptRsaPrivateError, parse_bcrypt_rsa_private};
     use std::io::Cursor;
 
     fn make_test_header() -> Vec<u8> {
@@ -563,5 +564,31 @@ mod tests {
         let license =
             SPLicense::decode(Cursor::new(data)).expect("Valid UTF-16 package name should decode");
         assert_eq!(license.package_name, "Microsoft.Minecraft_8wekyb3d8bbwe");
+    }
+
+    #[test]
+    fn test_bcrypt_rsa_rejects_unknown_magic_without_panic() {
+        let result = parse_bcrypt_rsa_private(&BCryptRsaBlock([0; 544]));
+        assert_eq!(result, Err(BcryptRsaPrivateError::UnsupportedMagic(0)));
+    }
+
+    #[test]
+    fn test_bcrypt_rsa_rejects_component_extent_without_panic() {
+        let mut bytes = [0_u8; 544];
+        bytes[0..4].copy_from_slice(&0x3241_5352_u32.to_le_bytes());
+        bytes[8..12].copy_from_slice(&u32::MAX.to_le_bytes());
+        let result = parse_bcrypt_rsa_private(&BCryptRsaBlock(bytes));
+        assert_eq!(result, Err(BcryptRsaPrivateError::InvalidComponentExtent));
+    }
+
+    #[test]
+    fn test_bcrypt_rsa_rejects_invalid_prime_factors_without_panic() {
+        let mut bytes = [0_u8; 544];
+        bytes[0..4].copy_from_slice(&0x3241_5352_u32.to_le_bytes());
+        for offset in [8, 12, 16, 20] {
+            bytes[offset..offset + 4].copy_from_slice(&1_u32.to_le_bytes());
+        }
+        let result = parse_bcrypt_rsa_private(&BCryptRsaBlock(bytes));
+        assert_eq!(result, Err(BcryptRsaPrivateError::InvalidPrimeFactors));
     }
 }

@@ -57,17 +57,38 @@ async fn provision_device(client: &reqwest::Client, tokens: &TokenManager) {
 }
 
 async fn reauthenticate_device(client: &reqwest::Client, tokens: &TokenManager, license: Device) {
-    let sp_license =
-        SPLicense::parse_base64(&license.splicense).expect("Failed to parse SPLicense");
-    let clep_sign_state = sp_license.clep_sign_state.expect("Missing clep sign state");
+    let sp_license = match SPLicense::parse_base64(&license.splicense) {
+        Ok(license) => license,
+        Err(error) => {
+            log::error!("failed to parse device SPLicense: {error}");
+            return;
+        }
+    };
+    let Some(clep_sign_state) = sp_license.clep_sign_state else {
+        log::error!("device SPLicense is missing CLEP signing state");
+        return;
+    };
     let key = clep_sign_state.get_rsa_key();
-    let private_key = parse_bcrypt_rsa_private(&key).unwrap();
-    let resp = crate::api::live::authenticate_device(client, license.username, private_key)
-        .await
-        .expect("Failed to auth device");
+    let private_key = match parse_bcrypt_rsa_private(&key) {
+        Ok(key) => key,
+        Err(error) => {
+            log::error!("failed to parse device RSA key: {error}");
+            return;
+        }
+    };
+    let resp =
+        match crate::api::live::authenticate_device(client, license.username, private_key).await {
+            Ok(response) => response,
+            Err(error) => {
+                log::error!("failed to authenticate device: {error}");
+                return;
+            }
+        };
 
     if let BodyContent::RequestSecurityTokenResponse(resp) = resp.body.body {
         save_device_sts_token(tokens, resp);
+    } else {
+        log::warn!("device authentication returned an unsupported response");
     }
 }
 
