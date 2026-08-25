@@ -400,6 +400,7 @@ pub struct XvdFile {
 }
 
 const MAX_XVC_REGION_HEADERS: u32 = 4_096;
+const MAX_SUPPORTED_XVC_INFO_VERSION: u32 = 2;
 const SEGMENT_METADATA_READER_CAPACITY: usize = PAGE_SIZE;
 const DOWNLOAD_HTTP_RETRY_LIMIT: usize = 3;
 
@@ -420,6 +421,8 @@ pub enum XvdFileParseError {
         region_count: u32,
         max_region_count: u32,
     },
+    #[error("XVC information version {version} exceeds the supported maximum of {max_version}")]
+    UnsupportedXvcInfoVersion { version: u32, max_version: u32 },
     #[error("XVC key ID {key_id} is not supported")]
     UnsupportedXvcKeyId { key_id: u8 },
     #[error("XVC region offset {offset} is before user data offset {user_data_offset}")]
@@ -2165,6 +2168,13 @@ impl XvdFile {
                 XvcInfo::from_array(&buf)
             };
 
+            if xvc_info.version > MAX_SUPPORTED_XVC_INFO_VERSION {
+                return Err(XvdFileParseError::UnsupportedXvcInfoVersion {
+                    version: xvc_info.version,
+                    max_version: MAX_SUPPORTED_XVC_INFO_VERSION,
+                });
+            }
+
             let region_count = xvc_info.region_count;
             if region_count > MAX_XVC_REGION_HEADERS {
                 return Err(XvdFileParseError::RegionCountTooLarge {
@@ -2905,19 +2915,20 @@ mod tests {
     use crate::streaming_ntfs::{NtfsDataRunReport, NtfsStreamLayoutReport};
 
     use super::{
-        DownloadFileHttpError, EncryptedSectionInfo, ExtractFileError, MAX_XVC_REGION_HEADERS,
-        NtfsSegmentMetadataParseError, PAGE_SIZE, PageHashFailure, PopulateSegmentHashesError,
-        SEGMENT_METADATA_READER_CAPACITY, SegmentFile, SegmentMetadataParseError, SyncSubstream,
-        UserPackageFile, UserPackageFilesParseError, XvcRegionId, XvdFile, XvdFileParseError,
-        XvdStream, collect_ntfs_segment_files, consume_download_retry_budget,
-        download_encrypted_section, download_file_end, download_page_plan, download_request_range,
-        extract_data_unit_index, extract_encrypted_section, extract_file_end,
-        extract_page_loop_end, extract_page_plan, extract_progress_bytes, extract_write_length,
-        hash_entry_read_offset, hash_page_index, is_retryable_download_error, next_download_page,
-        next_download_received_byte_count, next_segment_page_offset, non_encrypted_prefix_len,
-        ntfs_drive_extents, ntfs_partition_extents, package_file_name,
-        required_gpt_partition_length, required_gpt_partition_start, reserve_xvc_region_entries,
-        segment_file_name, segment_metadata_reader_capacity, sync_substream_absolute_target,
+        DownloadFileHttpError, EncryptedSectionInfo, ExtractFileError,
+        MAX_SUPPORTED_XVC_INFO_VERSION, MAX_XVC_REGION_HEADERS, NtfsSegmentMetadataParseError,
+        PAGE_SIZE, PageHashFailure, PopulateSegmentHashesError, SEGMENT_METADATA_READER_CAPACITY,
+        SegmentFile, SegmentMetadataParseError, SyncSubstream, UserPackageFile,
+        UserPackageFilesParseError, XvcRegionId, XvdFile, XvdFileParseError, XvdStream,
+        collect_ntfs_segment_files, consume_download_retry_budget, download_encrypted_section,
+        download_file_end, download_page_plan, download_request_range, extract_data_unit_index,
+        extract_encrypted_section, extract_file_end, extract_page_loop_end, extract_page_plan,
+        extract_progress_bytes, extract_write_length, hash_entry_read_offset, hash_page_index,
+        is_retryable_download_error, next_download_page, next_download_received_byte_count,
+        next_segment_page_offset, non_encrypted_prefix_len, ntfs_drive_extents,
+        ntfs_partition_extents, package_file_name, required_gpt_partition_length,
+        required_gpt_partition_start, reserve_xvc_region_entries, segment_file_name,
+        segment_metadata_reader_capacity, sync_substream_absolute_target,
         validate_download_response_extent, validate_segment_metadata_table_extent,
         validate_xvc_region_hash_entry_addresses, verify_page_hash,
         xvd_stream_absolute_seek_target,
@@ -3170,6 +3181,13 @@ mod tests {
             reader
         }
 
+        fn synthetic_xvd_with_xvc_info_version(version: u32) -> Self {
+            let mut reader = Self::synthetic_xvd_with_region_count(0);
+            let start = XVC_INFO_OFFSET + XVC_INFO_VERSION_OFFSET;
+            reader.inner.get_mut()[start..start + 4].copy_from_slice(&version.to_le_bytes());
+            reader
+        }
+
         fn synthetic_xvd_with_region_key_id(key_id: u16) -> Self {
             Self::synthetic_xvd_with_region_key_id_and_offset(key_id, XVC_INFO_OFFSET as u64)
         }
@@ -3306,6 +3324,23 @@ mod tests {
                 region_count: actual_region_count,
                 max_region_count: MAX_XVC_REGION_HEADERS,
             } if actual_region_count == region_count
+        ));
+    }
+
+    #[tokio::test]
+    async fn parse_rejects_unknown_xvc_info_version_before_region_reads() {
+        let version = MAX_SUPPORTED_XVC_INFO_VERSION + 1;
+        let result = XvdFile::parse(SyntheticXvdReader::synthetic_xvd_with_xvc_info_version(
+            version,
+        ))
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(XvdFileParseError::UnsupportedXvcInfoVersion {
+                version: actual_version,
+                max_version: MAX_SUPPORTED_XVC_INFO_VERSION,
+            }) if actual_version == version
         ));
     }
 
