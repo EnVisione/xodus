@@ -2,16 +2,8 @@
 all-features = true
 
 [advisories]
-# These advisories remain only in the pinned external XAL dependency chain.
-# The workspace h2 0.4 path is locked to 0.4.16 or newer, and the workspace
-# uses rustls-webpki 0.103.13 or newer. XAL still pins reqwest 0.11 and its
-# h2 0.3 and rustls-webpki 0.101 transitive versions. Remove these entries
-# when XAL publishes a compatible dependency update.
+# These advisories remain only in the pinned GTK3 desktop stack.
 ignore = [
-    { id = "RUSTSEC-2026-0258", reason = "Only h2 0.3.27 through the pinned external XAL reqwest 0.11 chain remains; the workspace h2 0.4 path is 0.4.16." },
-    { id = "RUSTSEC-2026-0098", reason = "Only rustls-webpki 0.101.7 through the pinned external XAL reqwest 0.11 chain remains; the workspace path is 0.103.13." },
-    { id = "RUSTSEC-2026-0099", reason = "Only rustls-webpki 0.101.7 through the pinned external XAL reqwest 0.11 chain remains; the workspace path is 0.103.13." },
-    { id = "RUSTSEC-2026-0104", reason = "Only rustls-webpki 0.101.7 through the pinned external XAL reqwest 0.11 chain remains; the workspace path is 0.103.13." },
     { id = "RUSTSEC-2024-0370", reason = "proc-macro-error is pulled only by the pinned GTK3 desktop stack used by the current tao and wry UI dependencies; no safe upgrade is available." },
     { id = "RUSTSEC-2024-0411", reason = "gdkwayland-sys is pulled only by the pinned GTK3 desktop stack used by tao and wry; no safe upgrade is available." },
     { id = "RUSTSEC-2024-0412", reason = "gdk is pulled only by the pinned GTK3 desktop stack used by tao and wry; no safe upgrade is available." },
@@ -23,7 +15,6 @@ ignore = [
     { id = "RUSTSEC-2024-0418", reason = "gdk-sys is pulled only by the pinned GTK3 desktop stack used by tao and wry; no safe upgrade is available." },
     { id = "RUSTSEC-2024-0419", reason = "gtk3-macros is pulled only by the pinned GTK3 desktop stack used by tao and wry; no safe upgrade is available." },
     { id = "RUSTSEC-2024-0420", reason = "gtk-sys is pulled only by the pinned GTK3 desktop stack used by tao and wry; no safe upgrade is available." },
-    { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile is pulled only by the pinned external XAL reqwest 0.11 chain; no safe upgrade is available without an XAL dependency update." },
 ]
 
 [bans]
@@ -60,5 +51,4 @@ unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = [
     "https://github.com/xodus-gaming/ntfs.git",
-    "https://github.com/xodus-gaming/xal-rs",
 ]

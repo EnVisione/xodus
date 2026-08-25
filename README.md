@@ -87,14 +87,14 @@ cargo run --bin xodus-service
 
 ### Verification
 
-The repository dependency policy is checked with cargo deny. It validates the allowed license and source set, duplicate dependency review, and the reviewed advisory exceptions for the pinned external XAL and GTK3 dependency paths.
+The repository dependency policy is checked with cargo deny. It validates the allowed license and source set, duplicate dependency review, and the reviewed GTK3 advisory exceptions. The XAL authentication library is vendored from the audited upstream commit and uses the maintained OAuth2 and Reqwest transport stack.
 
 ```bash
 cargo fmt --all --check
 cargo deny --all-features check
 ```
 
-Run `cargo audit` separately when refreshing the advisory database. Its remaining findings must be checked against the external XAL dependency path recorded in `deny.toml` before a release is accepted.
+Run `cargo audit` separately when refreshing the advisory database. Its remaining findings must be checked against the GTK3 desktop dependency path recorded in `deny.toml` before a release is accepted.
 
 > [!WARNING]
 > For better performance when decrypting MSIXVC files, the `aes` and `ssse3` features are enabled on `x86_64`,
