@@ -1,9 +1,9 @@
 #[cfg(target_os = "linux")]
-pub fn get_runtime_dir() -> String {
-    std::env::var("XDG_RUNTIME_DIR").expect("Runtime dir not set")
+pub fn get_runtime_dir() -> Result<String, std::env::VarError> {
+    std::env::var("XDG_RUNTIME_DIR")
 }
 
 #[cfg(target_os = "macos")]
-pub fn get_runtime_dir() -> String {
-    return "/tmp/".to_string();
+pub fn get_runtime_dir() -> Result<String, std::env::VarError> {
+    Ok("/tmp/".to_string())
 }

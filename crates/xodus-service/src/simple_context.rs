@@ -12,18 +12,20 @@ pub struct SimpleContext {
 }
 
 impl SimpleContext {
-    pub fn new(device_token: LegacyToken, tokens: Arc<TokenManager>) -> Self {
+    pub fn new(
+        device_token: LegacyToken,
+        tokens: Arc<TokenManager>,
+    ) -> Result<Self, reqwest::Error> {
         let client = reqwest::ClientBuilder::new()
             .user_agent(format!("xodus-service/{}", env!("CARGO_PKG_VERSION")))
             .connection_verbose(true)
-            .build()
-            .unwrap();
+            .build()?;
 
-        Self {
+        Ok(Self {
             client,
             device_token: Some(device_token),
             tokens,
-        }
+        })
     }
 
     pub fn tokens(&self) -> &Arc<TokenManager> {

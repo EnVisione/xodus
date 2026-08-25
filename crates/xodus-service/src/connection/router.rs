@@ -16,7 +16,13 @@ pub async fn route(
     let cred = socket.peer_cred().ok().and_then(|cred| cred.pid());
     log::debug!("Connection from pid {cred:?}");
 
-    let mut context = SimpleContext::new(device_token, tokens);
+    let mut context = match SimpleContext::new(device_token, tokens) {
+        Ok(context) => context,
+        Err(error) => {
+            log::error!("failed to create service request client: {error}");
+            return;
+        }
+    };
     loop {
         let mut read_magic = [0; 4];
         if token.is_cancelled() {
