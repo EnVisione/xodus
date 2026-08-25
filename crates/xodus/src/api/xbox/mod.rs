@@ -42,11 +42,11 @@ pub async fn run(
                 .ok_or_else(|| {
                     std::io::Error::other("exchange returned an empty token collection")
                 })?;
-            token.into()
+            token.try_into()?
         }
         ExchangeUserTokenOutcome::Issued(soap::BodyContent::RequestSecurityTokenResponse(
             token,
-        )) => (*token).into(),
+        )) => (*token).try_into()?,
         _ => {
             return Err(Box::new(std::io::Error::other(
                 "exchange returned an unsupported response",

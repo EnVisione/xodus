@@ -46,7 +46,8 @@ pub async fn get_license(
     .await
     .expect("Failed to get ms user token");
 
-    let ms_device_token: Token = ms_device_token.into();
+    let ms_device_token: Token =
+        Token::try_from(ms_device_token).map_err(|error| error.to_string())?;
     let Token::Compact(ms_device_token) = ms_device_token else {
         return Err("Unsupported token".to_string());
     };
@@ -56,15 +57,19 @@ pub async fn get_license(
             return Err("Failed to get exchange MS token".to_string());
         }
         ExchangeUserTokenOutcome::Issued(
-            soap::BodyContent::RequestSecurityTokenResponseCollection(mut collection),
+            soap::BodyContent::RequestSecurityTokenResponseCollection(collection),
         ) => {
-            let token = collection.security_tokens.remove(0);
-            token.into()
+            let token = collection
+                .security_tokens
+                .into_iter()
+                .next()
+                .ok_or_else(|| "Failed to get exchange MS token: empty response".to_string())?;
+            Token::try_from(token).map_err(|error| error.to_string())?
         }
         ExchangeUserTokenOutcome::Issued(soap::BodyContent::RequestSecurityTokenResponse(
             token,
-        )) => (*token).into(),
-        _ => unreachable!("Only responses are handled"),
+        )) => Token::try_from(*token).map_err(|error| error.to_string())?,
+        _ => return Err("Only token responses are handled".to_string()),
     };
     let Token::Compact(user_token) = user_token else {
         return Err("Unsupported token".to_string());

@@ -72,11 +72,12 @@ pub async fn exchange_device_token(
 
     match envelope.body.body {
         soap::BodyContent::RequestSecurityTokenResponse(res) => Ok(*res),
-        soap::BodyContent::RequestSecurityTokenResponseCollection(mut collection) => {
-            let token = collection.security_tokens.remove(0);
-            Ok(token)
-        }
-        b => unimplemented!("Exchange token supports only singular token right now {b:?}"),
+        soap::BodyContent::RequestSecurityTokenResponseCollection(collection) => collection
+            .security_tokens
+            .into_iter()
+            .next()
+            .ok_or(rst::RSTError::EmptyTokenCollection),
+        _ => Err(rst::RSTError::UnsupportedTokenResponse),
     }
 }
 
@@ -158,7 +159,7 @@ mod test {
         .await
         .unwrap();
 
-        let ms_device_token: Token = resp.into();
+        let ms_device_token: Token = resp.try_into().unwrap();
         let Token::Compact(ms_device_token) = ms_device_token else {
             todo!("Unsupported token");
         };

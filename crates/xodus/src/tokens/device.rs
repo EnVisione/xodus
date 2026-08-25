@@ -70,18 +70,24 @@ fn save_device_sts_token(
     tokens: &TokenManager,
     resp: Box<crate::models::soap::RequestSecurityTokenResponse>,
 ) {
-    let key_name = resp
-        .requested_security_token
-        .encrypted_data
-        .as_ref()
-        .unwrap()
-        .key_info
-        .key_name
-        .as_ref()
-        .unwrap()
-        .clone();
-    let token = (*resp).into();
-    tokens
-        .save_device_token(key_name, token)
-        .expect("Failed to save device token");
+    let token = match (*resp).try_into() {
+        Ok(crate::models::secrets::Token::Legacy(token)) => token,
+        Ok(crate::models::secrets::Token::Compact(_)) => {
+            log::warn!("device STS response returned a compact token");
+            return;
+        }
+        Err(error) => {
+            log::warn!("device STS response was invalid: {error}");
+            return;
+        }
+    };
+    let Some(key_name) = token.key_name.clone() else {
+        log::warn!("device STS response did not include a token key name");
+        return;
+    };
+    if let Err(error) =
+        tokens.save_device_token(key_name, crate::models::secrets::Token::Legacy(token))
+    {
+        log::warn!("failed to save device STS token: {error}");
+    }
 }

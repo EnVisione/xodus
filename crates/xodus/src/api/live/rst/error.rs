@@ -19,6 +19,10 @@ pub enum RSTError {
     HmacKey,
     #[error("The signature verification failed - {0}")]
     InvalidResponseSignature(String),
+    #[error("Response token collection is empty")]
+    EmptyTokenCollection,
+    #[error("Unsupported token response body")]
+    UnsupportedTokenResponse,
 }
 
 #[derive(thiserror::Error, Debug)]

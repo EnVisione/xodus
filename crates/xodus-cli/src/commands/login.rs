@@ -34,13 +34,22 @@ pub async fn run(client: &reqwest::Client, tokens: &TokenManager) -> ExitCode {
 
     for token in issued_tokens {
         let address = token.applies_to.endpoint_reference.address.clone();
-        let token = token.into();
+        let token: secrets::Token = match token.try_into() {
+            Ok(token) => token,
+            Err(error) => {
+                eprintln!("Invalid token response: {error}");
+                return ExitCode::FAILURE;
+            }
+        };
         let address = if let secrets::Token::Legacy(legacy) = &token {
             legacy.key_name.clone().unwrap_or(address)
         } else {
             address
         };
-        tokens.save_user_token(address, token).unwrap();
+        if let Err(error) = tokens.save_user_token(address, token) {
+            eprintln!("Failed to save user token: {error}");
+            return ExitCode::FAILURE;
+        }
     }
 
     ExitCode::SUCCESS

@@ -53,7 +53,9 @@ pub async fn parse_message(
             } else {
                 "xboxlive.signin"
             };
-            let device_token = context.device_token.as_ref().unwrap();
+            let Some(device_token) = context.device_token.as_ref() else {
+                return Err("device STS token is unavailable".into());
+            };
             let device_token_resp = xodus::api::live::exchange_device_token(
                 &context.client,
                 device_token.clone(),
@@ -63,15 +65,13 @@ pub async fn parse_message(
             )
             .await;
 
-            let ms_device_rps_token = if let Some((Token::Compact(ms_device_token), Ok(lifetime))) =
-                device_token_resp.ok().map(|t| {
-                    let expiry = chrono::DateTime::parse_from_rfc3339(&t.lifetime.expires);
-                    (t.into(), expiry)
-                }) {
+            let ms_device_rps_token = device_token_resp.ok().and_then(|t| {
+                let lifetime = chrono::DateTime::parse_from_rfc3339(&t.lifetime.expires).ok()?;
+                let Token::Compact(ms_device_token) = Token::try_from(t).ok()? else {
+                    return None;
+                };
                 Some((ms_device_token, lifetime.timestamp()))
-            } else {
-                None
-            };
+            });
 
             let user_token = xodus::api::live::exchange_user_token(
                 &context.client,
@@ -93,11 +93,12 @@ pub async fn parse_message(
 
             match user_token {
                 ExchangeUserTokenOutcome::Issued(
-                    soap::BodyContent::RequestSecurityTokenResponseCollection(mut collection),
+                    soap::BodyContent::RequestSecurityTokenResponseCollection(collection),
                 ) => {
-                    if let Some(sts) = collection.security_tokens.pop() {
+                    let mut security_tokens = collection.security_tokens;
+                    if let Some(sts) = security_tokens.pop() {
                         let address = sts.applies_to.endpoint_reference.address.clone();
-                        let sts: Token = sts.into();
+                        let sts: Token = Token::try_from(sts)?;
                         let address = if let Token::Legacy(legacy) = &sts {
                             legacy.key_name.clone().unwrap_or(address)
                         } else {
@@ -107,9 +108,12 @@ pub async fn parse_message(
                             log::warn!("Failed to persist refreshed STS token: {err}");
                         }
                     }
-                    let token = collection.security_tokens.remove(0);
+                    let token = security_tokens
+                        .into_iter()
+                        .next()
+                        .ok_or("user token exchange returned an empty collection")?;
                     let expiry = chrono::DateTime::parse_from_rfc3339(&token.lifetime.expires)?;
-                    let token: Token = token.into();
+                    let token: Token = Token::try_from(token)?;
                     let Token::Compact(user_token) = token else {
                         return Ok(vec![]);
                     };
@@ -124,7 +128,7 @@ pub async fn parse_message(
                     let payload = quick_xml::se::to_string(&payload)?;
                     Ok(payload.as_bytes().to_vec())
                 }
-                _ => todo!("Error handling sill sucks"),
+                _ => Err("user token exchange returned an unsupported response".into()),
             }
         }
         _ => Err("Unimplemented".into()),
