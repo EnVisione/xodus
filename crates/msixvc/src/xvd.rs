@@ -369,6 +369,28 @@ pub enum UserPackageFilesParseError {
         table_end: u64,
         user_data_length: u64,
     },
+    #[error(
+        "package file payload end overflows for entry offset {payload_offset} and length {payload_length}"
+    )]
+    PackageFilePayloadEndOverflow {
+        payload_offset: u32,
+        payload_length: u32,
+    },
+    #[error(
+        "package file payload end {payload_end} exceeds declared user-data length {user_data_length}"
+    )]
+    PackageFilePayloadBeyondUserData {
+        payload_end: u64,
+        user_data_length: u64,
+    },
+    #[error(
+        "package file payload offset overflows for user-data offset {user_data_offset}, entry offset {payload_offset}, and length {payload_length}"
+    )]
+    PackageFilePayloadOffsetOverflow {
+        user_data_offset: u64,
+        payload_offset: u32,
+        payload_length: u32,
+    },
     #[error("package file name contains invalid UTF-16")]
     InvalidFileName(#[source] std::string::FromUtf16Error),
 }
@@ -542,6 +564,53 @@ fn validate_package_files_table_end(
             file_count,
         },
     )
+}
+
+fn package_file_payload(
+    user_data_offset: u64,
+    user_data_length: u64,
+    payload_offset: u32,
+    payload_length: u32,
+) -> Result<UserPackageFile, UserPackageFilesParseError> {
+    let payload_start = (XvdUserDataHeader::SIZE as u64)
+        .checked_add(u64::from(payload_offset))
+        .ok_or(UserPackageFilesParseError::PackageFilePayloadEndOverflow {
+            payload_offset,
+            payload_length,
+        })?;
+    let payload_end = payload_start.checked_add(u64::from(payload_length)).ok_or(
+        UserPackageFilesParseError::PackageFilePayloadEndOverflow {
+            payload_offset,
+            payload_length,
+        },
+    )?;
+    if payload_end > user_data_length {
+        return Err(
+            UserPackageFilesParseError::PackageFilePayloadBeyondUserData {
+                payload_end,
+                user_data_length,
+            },
+        );
+    }
+    let absolute_offset = user_data_offset.checked_add(payload_start).ok_or(
+        UserPackageFilesParseError::PackageFilePayloadOffsetOverflow {
+            user_data_offset,
+            payload_offset,
+            payload_length,
+        },
+    )?;
+    user_data_offset.checked_add(payload_end).ok_or(
+        UserPackageFilesParseError::PackageFilePayloadOffsetOverflow {
+            user_data_offset,
+            payload_offset,
+            payload_length,
+        },
+    )?;
+
+    Ok(UserPackageFile {
+        offset: absolute_offset,
+        length: u64::from(payload_length),
+    })
 }
 
 fn segment_file_name(fullname: &[u16]) -> Result<String, SegmentMetadataParseError> {
@@ -892,15 +961,10 @@ impl XvdFile {
                 off += XvdUserDataPackageFileEntry::SIZE as u64;
                 let o = user_data_package_file_entry.offset;
                 let s: u32 = user_data_package_file_entry.size;
+                let package_file = package_file_payload(user_data_offset, user_data_length, o, s)?;
                 let pfull_name = package_file_name(&user_data_package_file_entry.file_path)?;
 
-                files.insert(
-                    pfull_name,
-                    UserPackageFile {
-                        offset: user_data_offset + XvdUserDataHeader::SIZE as u64 + o as u64,
-                        length: s as u64,
-                    },
-                );
+                files.insert(pfull_name, package_file);
             }
         }
         Ok(files)
@@ -1500,6 +1564,8 @@ mod tests {
     const USER_DATA_HEADER_TYPE_OFFSET: usize = 8;
     const USER_DATA_PACKAGE_FILES_HEADER_SIZE: usize = 528;
     const USER_DATA_PACKAGE_FILES_FILE_COUNT_OFFSET: usize = 524;
+    const USER_DATA_PACKAGE_FILE_SIZE_OFFSET: usize = 520;
+    const USER_DATA_PACKAGE_FILE_OFFSET_OFFSET: usize = 524;
     const SEGMENT_METADATA_HEADER_SIZE: usize = 100;
     const SEGMENT_METADATA_HEADER_LENGTH_OFFSET: usize = 12;
     const SEGMENT_METADATA_SEGMENT_COUNT_OFFSET: usize = 16;
@@ -1585,7 +1651,10 @@ mod tests {
             )
         }
 
-        fn synthetic_user_package_files_with_single_entry() -> (Self, Arc<AtomicUsize>) {
+        fn synthetic_user_package_files_with_single_entry(
+            payload_offset: u32,
+            payload_length: u32,
+        ) -> (Self, Arc<AtomicUsize>) {
             let (mut reader, read_bytes) =
                 Self::synthetic_user_package_files(USER_DATA_HEADER_SIZE as u32, 1);
             let entry_offset = USER_DATA_HEADER_SIZE + USER_DATA_PACKAGE_FILES_HEADER_SIZE;
@@ -1595,6 +1664,12 @@ mod tests {
                 .resize(entry_offset + USER_DATA_PACKAGE_FILES_HEADER_SIZE, 0);
             reader.inner.get_mut()[entry_offset..entry_offset + 2]
                 .copy_from_slice(&('a' as u16).to_le_bytes());
+            reader.inner.get_mut()[entry_offset + USER_DATA_PACKAGE_FILE_SIZE_OFFSET
+                ..entry_offset + USER_DATA_PACKAGE_FILE_SIZE_OFFSET + 4]
+                .copy_from_slice(&payload_length.to_le_bytes());
+            reader.inner.get_mut()[entry_offset + USER_DATA_PACKAGE_FILE_OFFSET_OFFSET
+                ..entry_offset + USER_DATA_PACKAGE_FILE_OFFSET_OFFSET + 4]
+                .copy_from_slice(&payload_offset.to_le_bytes());
 
             (reader, read_bytes)
         }
@@ -2081,7 +2156,7 @@ mod tests {
         xvd.user_data_offset = 0;
         xvd.header.user_data_length =
             (USER_DATA_HEADER_SIZE + 2 * USER_DATA_PACKAGE_FILES_HEADER_SIZE) as u32;
-        let (reader, _) = SyntheticXvdReader::synthetic_user_package_files_with_single_entry();
+        let (reader, _) = SyntheticXvdReader::synthetic_user_package_files_with_single_entry(0, 0);
         let files = xvd
             .parse_user_package_files(reader)
             .await
@@ -2089,6 +2164,68 @@ mod tests {
 
         assert_eq!(files.len(), 1);
         assert!(files.contains_key("a"));
+    }
+
+    #[tokio::test]
+    async fn parse_user_package_files_rejects_payload_offset_before_map_insertion() {
+        let mut xvd = XvdFile::parse(SyntheticXvdReader::synthetic_xvd_with_region_count(0))
+            .await
+            .expect("synthetic XVD must parse");
+        xvd.user_data_offset = 0;
+        xvd.header.user_data_length =
+            (USER_DATA_HEADER_SIZE + 2 * USER_DATA_PACKAGE_FILES_HEADER_SIZE) as u32;
+        let (reader, read_bytes) =
+            SyntheticXvdReader::synthetic_user_package_files_with_single_entry(u32::MAX, 0);
+        let error = match xvd.parse_user_package_files(reader).await {
+            Ok(_) => panic!("out-of-bounds package file payload must not parse"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            UserPackageFilesParseError::PackageFilePayloadBeyondUserData {
+                payload_end,
+                user_data_length,
+            } if payload_end == USER_DATA_HEADER_SIZE as u64 + u64::from(u32::MAX)
+                && user_data_length
+                    == (USER_DATA_HEADER_SIZE + 2 * USER_DATA_PACKAGE_FILES_HEADER_SIZE) as u64
+        ));
+        assert_eq!(
+            read_bytes.load(Ordering::Relaxed),
+            USER_DATA_HEADER_SIZE + 2 * USER_DATA_PACKAGE_FILES_HEADER_SIZE,
+            "invalid payload offset must not insert a record"
+        );
+    }
+
+    #[tokio::test]
+    async fn parse_user_package_files_rejects_payload_length_before_map_insertion() {
+        let mut xvd = XvdFile::parse(SyntheticXvdReader::synthetic_xvd_with_region_count(0))
+            .await
+            .expect("synthetic XVD must parse");
+        xvd.user_data_offset = 0;
+        xvd.header.user_data_length =
+            (USER_DATA_HEADER_SIZE + 2 * USER_DATA_PACKAGE_FILES_HEADER_SIZE) as u32;
+        let (reader, read_bytes) =
+            SyntheticXvdReader::synthetic_user_package_files_with_single_entry(1024, 100);
+        let error = match xvd.parse_user_package_files(reader).await {
+            Ok(_) => panic!("out-of-bounds package file payload must not parse"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            UserPackageFilesParseError::PackageFilePayloadBeyondUserData {
+                payload_end,
+                user_data_length,
+            } if payload_end == USER_DATA_HEADER_SIZE as u64 + 1024 + 100
+                && user_data_length
+                    == (USER_DATA_HEADER_SIZE + 2 * USER_DATA_PACKAGE_FILES_HEADER_SIZE) as u64
+        ));
+        assert_eq!(
+            read_bytes.load(Ordering::Relaxed),
+            USER_DATA_HEADER_SIZE + 2 * USER_DATA_PACKAGE_FILES_HEADER_SIZE,
+            "invalid payload length must not insert a record"
+        );
     }
 
     #[tokio::test]
