@@ -127,10 +127,19 @@ async fn run(args: CliArgs) -> ExitCode {
     let client = reqwest::ClientBuilder::new()
         .user_agent(format!("xodus-cli/{}", env!("CARGO_PKG_VERSION")))
         .connection_verbose(true)
-        .build()
-        .unwrap();
+        .build();
+    let client = match client {
+        Ok(client) => client,
+        Err(error) => {
+            eprintln!("Unable to initialize HTTP client: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
 
-    xodus::secrets::init_secrets().expect("Unable to initialize credentials");
+    if let Err(error) = xodus::secrets::init_secrets() {
+        eprintln!("Unable to initialize credentials: {error}");
+        return ExitCode::FAILURE;
+    }
     let tokens = TokenManager::with_keychain_and_memory();
 
     // Clep/SpLicense are pure local data transforms and Logout only removes

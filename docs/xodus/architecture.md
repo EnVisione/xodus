@@ -39,6 +39,8 @@ The service startup path now returns typed initialization, token, runtime-direct
 
 The login command now reports missing or wrong device token state, webview startup errors, unsupported response bodies, and user persistence failures through explicit exit paths. Native webview creation also validates the GTK container and propagates builder errors for Wayland and XWayland sessions.
 
+The CLI startup now reports HTTP client and credential-store initialization failures through a nonzero exit code instead of panicking before command dispatch.
+
 The legacy package download command now rejects missing CDN roots and invalid sizes, checks HTTP status, and returns failure for output creation, stream, and write errors instead of reporting success after a partial operation or panicking on service data.
 
 MSIXVC parser hardening, complete integrity validation, atomic promotion, rollback policy, and transaction recovery remain Phase 2 work. The account backed Xbox Live development token test is not part of ordinary offline verification and currently requires an explicit bounded opt in.
