@@ -11,6 +11,7 @@ mod rst;
 mod utils;
 
 pub const XML_HEADER: &str = r#"<?xml version="1.0" encoding="UTF-8"?>"#;
+const MAX_DEVICE_CREDENTIAL_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DeviceCredentialError {
@@ -20,6 +21,52 @@ pub enum DeviceCredentialError {
     Serialization(#[from] quick_xml::SeError),
     #[error("device credential response deserialization failed: {0}")]
     Deserialization(#[from] quick_xml::DeError),
+    #[error("device credential response body is {size} bytes, exceeding the limit {limit}")]
+    ResponseBodyTooLarge { size: usize, limit: usize },
+    #[error("device credential response body is not valid utf 8: {0}")]
+    InvalidUtf8(#[from] std::string::FromUtf8Error),
+}
+
+async fn read_bounded_response_text(
+    mut response: reqwest::Response,
+) -> Result<String, DeviceCredentialError> {
+    validate_response_length(response.content_length())?;
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        append_response_chunk(&mut body, &chunk)?;
+    }
+    Ok(String::from_utf8(body)?)
+}
+
+fn validate_response_length(content_length: Option<u64>) -> Result<(), DeviceCredentialError> {
+    let Some(length) = content_length else {
+        return Ok(());
+    };
+    if length > MAX_DEVICE_CREDENTIAL_RESPONSE_BYTES as u64 {
+        return Err(DeviceCredentialError::ResponseBodyTooLarge {
+            size: usize::try_from(length).unwrap_or(usize::MAX),
+            limit: MAX_DEVICE_CREDENTIAL_RESPONSE_BYTES,
+        });
+    }
+    Ok(())
+}
+
+fn append_response_chunk(body: &mut Vec<u8>, chunk: &[u8]) -> Result<(), DeviceCredentialError> {
+    let next_size =
+        body.len()
+            .checked_add(chunk.len())
+            .ok_or(DeviceCredentialError::ResponseBodyTooLarge {
+                size: usize::MAX,
+                limit: MAX_DEVICE_CREDENTIAL_RESPONSE_BYTES,
+            })?;
+    if next_size > MAX_DEVICE_CREDENTIAL_RESPONSE_BYTES {
+        return Err(DeviceCredentialError::ResponseBodyTooLarge {
+            size: next_size,
+            limit: MAX_DEVICE_CREDENTIAL_RESPONSE_BYTES,
+        });
+    }
+    body.extend_from_slice(chunk);
+    Ok(())
 }
 
 fn decode_binary_secret(token: &LegacyToken) -> Result<[u8; 4096], rst::RSTError> {
@@ -48,7 +95,8 @@ pub async fn login_device_credential(
         .body(data)
         .send()
         .await?;
-    let text = response.error_for_status()?.text().await?;
+    let response = response.error_for_status()?;
+    let text = read_bounded_response_text(response).await?;
     Ok(quick_xml::de::from_str(&text)?)
 }
 
@@ -159,6 +207,10 @@ mod test {
     use crate::tokens::TokenManager;
     use crate::tokens::device::ensure_device_credentials;
 
+    use super::{
+        MAX_DEVICE_CREDENTIAL_RESPONSE_BYTES, append_response_chunk, validate_response_length,
+    };
+
     fn legacy_token(binary_secret: Option<&str>) -> LegacyToken {
         LegacyToken {
             key_name: None,
@@ -171,6 +223,30 @@ mod test {
                 expires: String::new(),
             },
         }
+    }
+
+    #[test]
+    fn oversized_device_credential_response_is_rejected_before_decode() {
+        let error =
+            validate_response_length(Some((MAX_DEVICE_CREDENTIAL_RESPONSE_BYTES as u64) + 1))
+                .expect_err("oversized response must fail");
+        assert!(matches!(
+            error,
+            super::DeviceCredentialError::ResponseBodyTooLarge { .. }
+        ));
+    }
+
+    #[test]
+    fn streamed_device_credential_response_is_rejected_before_decode() {
+        let mut body = Vec::new();
+        let chunk = vec![0_u8; MAX_DEVICE_CREDENTIAL_RESPONSE_BYTES];
+        append_response_chunk(&mut body, &chunk).expect("limit sized response must fit");
+        let error = append_response_chunk(&mut body, b"x")
+            .expect_err("streamed oversized response must fail");
+        assert!(matches!(
+            error,
+            super::DeviceCredentialError::ResponseBodyTooLarge { .. }
+        ));
     }
 
     #[test]
