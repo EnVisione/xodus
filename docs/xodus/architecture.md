@@ -19,6 +19,8 @@ The HTTP reader validates pending chunk offsets before slicing, uses checked ari
 
 The XVD HTTP download path requires partial-content responses with an exact inclusive Content-Range, a stable total length across reconnects, and a matching Content-Length before activating a stream. Transport failures, timeouts, empty chunks, and short streams use one bounded download-wide retry budget; invalid status, range, total, and length metadata fail immediately. Received body bytes cannot exceed the aligned page span, and retry exhaustion returns a typed error before output promotion.
 
+When a segment carries data-integrity hashes, both HTTP download and local extraction verify the complete encrypted 4 KiB page against the first 20 bytes of its SHA-256 digest before decryption or output writes. Missing hash entries and mismatches return typed errors, so an unverified page cannot be promoted. Segments without an integrity table retain the format's explicit no-hash behavior.
+
 The shared binary parser now builds nested generic-array chunk references through checked slice bounds instead of an unsafe layout transmute. A nested-array regression proves that the parser preserves chunk order and rejects no valid fixed-size input while keeping the type-level reader extent contract.
 
 Xbox package authentication now propagates token, exchange, HTTP status, JSON, unsupported-response, empty-collection, and missing-user-claim failures as typed results. It no longer panics on a malformed or incomplete service response before package metadata access.
@@ -48,5 +50,7 @@ The in-memory token backend now reports poisoned mutex state as a typed storage 
 License acquisition and CIK export now propagate token, exchange, entitlement, SPLicense, key derivation, directory, file, and flush failures with nonzero command results. CIK paths are joined beneath the requested export directory and existing files are truncated before replacement.
 
 The legacy package download command now rejects missing CDN roots and invalid sizes, checks HTTP status, and returns failure for output creation, stream, and write errors instead of reporting success after a partial operation or panicking on service data.
+
+The CLI run and streaming commands now report path, parser, cache, license, key-unpack, extraction, descriptor, process, and promotion failures as nonzero results. Endpoint selection rejects malformed globs and hostless URLs without panicking. The streaming path also rejects missing CDN roots, overflowing package totals, unsafe path shortening, and invalid local cache metadata.
 
 MSIXVC parser hardening, complete integrity validation, atomic promotion, rollback policy, and transaction recovery remain Phase 2 work. The account backed Xbox Live development token test is not part of ordinary offline verification and currently requires an explicit bounded opt in.

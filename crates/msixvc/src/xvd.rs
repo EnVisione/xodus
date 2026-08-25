@@ -10,6 +10,7 @@ use bytes::Bytes;
 use futures_util::StreamExt;
 use msixvc_common::parse::{BinaryParse, BinaryTryParse};
 use reqwest::header::{CONTENT_LENGTH, CONTENT_RANGE, RANGE};
+use sha2::{Digest, Sha256};
 use tokio::fs::OpenOptions;
 use tokio::io::{
     AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt, BufReader,
@@ -768,6 +769,14 @@ pub enum DownloadFileHttpError {
     MissingEncryptedSection,
     #[error("download decryption state is missing an initialized cipher")]
     MissingCipher,
+    #[error("download page index {page_index} cannot fit in the hash table index type")]
+    PageHashIndexTooLarge { page_index: u64 },
+    #[error(
+        "download page {page_index} is missing an expected hash from {hash_count} available hashes"
+    )]
+    DataHashMissing { page_index: u64, hash_count: usize },
+    #[error("download page {page_index} failed its content hash check")]
+    DataHashMismatch { page_index: u64 },
     #[error("download aligned page length overflows for page count {page_count}")]
     AlignedPageLengthOverflow { page_count: u64 },
     #[error("download page loop end overflows for start {page_start} and count {page_count}")]
@@ -793,6 +802,11 @@ pub enum DownloadFileHttpError {
     },
     #[error("download page index {page_in_section} cannot fit in usize")]
     PageIndexTooLarge { page_in_section: u64 },
+    #[error("download page {page_in_section} is before page start {page_start}")]
+    PageBeforeStart {
+        page_in_section: u64,
+        page_start: u64,
+    },
     #[error(
         "download data-unit index {page_in_section} is missing from {data_unit_count} section entries"
     )]
@@ -916,6 +930,40 @@ pub enum ExtractFileError {
     DataUnitIndexTooLarge { page_in_section: u64 },
     #[error("extraction decryption state requires an encrypted section")]
     MissingEncryptedSection,
+    #[error("extraction page index {page_index} cannot fit in the hash table index type")]
+    PageHashIndexTooLarge { page_index: u64 },
+    #[error(
+        "extraction page {page_index} is missing an expected hash from {hash_count} available hashes"
+    )]
+    DataHashMissing { page_index: u64, hash_count: usize },
+    #[error("extraction page {page_index} failed its content hash check")]
+    DataHashMismatch { page_index: u64 },
+}
+
+enum PageHashFailure {
+    IndexTooLarge,
+    Missing { hash_count: usize },
+    Mismatch,
+}
+
+fn verify_page_hash(
+    page: &[u8; PAGE_SIZE],
+    hashes: &[[u8; 20]],
+    page_index: u64,
+) -> Result<(), PageHashFailure> {
+    if hashes.is_empty() {
+        return Ok(());
+    }
+
+    let index = usize::try_from(page_index).map_err(|_| PageHashFailure::IndexTooLarge)?;
+    let expected = hashes.get(index).ok_or(PageHashFailure::Missing {
+        hash_count: hashes.len(),
+    })?;
+    let digest = Sha256::digest(page);
+    if digest[..20] != expected[..] {
+        return Err(PageHashFailure::Mismatch);
+    }
+    Ok(())
 }
 
 fn reserve_xvc_region_entries(
@@ -2631,6 +2679,31 @@ impl XvdFile {
                 }
                 let chunk = pending.split_to(4096);
                 page.copy_from_slice(&chunk);
+                let hash_page_index = page_in_section.checked_sub(page_plan.page_start).ok_or(
+                    DownloadFileHttpError::PageBeforeStart {
+                        page_in_section,
+                        page_start: page_plan.page_start,
+                    },
+                )?;
+                match verify_page_hash(&page, &sfile.data_hashs, hash_page_index) {
+                    Ok(()) => {}
+                    Err(PageHashFailure::IndexTooLarge) => {
+                        return Err(DownloadFileHttpError::PageHashIndexTooLarge {
+                            page_index: hash_page_index,
+                        });
+                    }
+                    Err(PageHashFailure::Missing { hash_count }) => {
+                        return Err(DownloadFileHttpError::DataHashMissing {
+                            page_index: hash_page_index,
+                            hash_count,
+                        });
+                    }
+                    Err(PageHashFailure::Mismatch) => {
+                        return Err(DownloadFileHttpError::DataHashMismatch {
+                            page_index: hash_page_index,
+                        });
+                    }
+                }
                 let to_write_remaining = remaining.min(PAGE_SIZE as u64) as usize;
                 let to_write = if let Some(tweak) = tweak.as_mut() {
                     let s = s.ok_or(DownloadFileHttpError::MissingEncryptedSection)?;
@@ -2729,6 +2802,31 @@ impl XvdFile {
                 extract_progress_bytes(page_plan.page_start, page_in_section, sfile.length)?;
             progress(progress_bytes, sfile.length);
             i.read_exact(&mut page).await?;
+            let hash_page_index = page_in_section.checked_sub(page_plan.page_start).ok_or(
+                ExtractFileError::PageBeforeStart {
+                    page_in_section,
+                    page_start: page_plan.page_start,
+                },
+            )?;
+            match verify_page_hash(&page, &sfile.data_hashs, hash_page_index) {
+                Ok(()) => {}
+                Err(PageHashFailure::IndexTooLarge) => {
+                    return Err(ExtractFileError::PageHashIndexTooLarge {
+                        page_index: hash_page_index,
+                    });
+                }
+                Err(PageHashFailure::Missing { hash_count }) => {
+                    return Err(ExtractFileError::DataHashMissing {
+                        page_index: hash_page_index,
+                        hash_count,
+                    });
+                }
+                Err(PageHashFailure::Mismatch) => {
+                    return Err(ExtractFileError::DataHashMismatch {
+                        page_index: hash_page_index,
+                    });
+                }
+            }
             let write_length = extract_write_length(progress_bytes, sfile.length)?;
             let to_write = if let Some((tweak, tweak_cipher, data_cipher)) = decryption.as_mut() {
                 let section = section.ok_or(ExtractFileError::MissingEncryptedSection)?;
@@ -2813,13 +2911,14 @@ mod tests {
         task::{Context, Poll},
     };
 
+    use sha2::{Digest, Sha256};
     use tokio::io::{AsyncRead, AsyncSeek, ReadBuf};
 
     use crate::streaming_ntfs::{NtfsDataRunReport, NtfsStreamLayoutReport};
 
     use super::{
         DownloadFileHttpError, EncryptedSectionInfo, ExtractFileError, MAX_XVC_REGION_HEADERS,
-        NtfsSegmentMetadataParseError, PAGE_SIZE, PopulateSegmentHashesError,
+        NtfsSegmentMetadataParseError, PAGE_SIZE, PageHashFailure, PopulateSegmentHashesError,
         SEGMENT_METADATA_READER_CAPACITY, SegmentFile, SegmentMetadataParseError, SyncSubstream,
         UserPackageFile, UserPackageFilesParseError, XvcRegionId, XvdFile, XvdFileParseError,
         XvdStream, collect_ntfs_segment_files, consume_download_retry_budget,
@@ -2832,7 +2931,8 @@ mod tests {
         required_gpt_partition_length, required_gpt_partition_start, reserve_xvc_region_entries,
         segment_file_name, segment_metadata_reader_capacity, sync_substream_absolute_target,
         validate_download_response_extent, validate_segment_metadata_table_extent,
-        validate_xvc_region_hash_entry_addresses, xvd_stream_absolute_seek_target,
+        validate_xvc_region_hash_entry_addresses, verify_page_hash,
+        xvd_stream_absolute_seek_target,
     };
 
     const XVD_HEADER_SIZE: usize = 4096;
@@ -2853,6 +2953,29 @@ mod tests {
     const USER_DATA_PACKAGE_FILE_SIZE_OFFSET: usize = 520;
     const USER_DATA_PACKAGE_FILE_OFFSET_OFFSET: usize = 524;
     const SEGMENT_METADATA_HEADER_SIZE: usize = 100;
+
+    #[test]
+    fn page_hash_verification_accepts_truncated_sha256() {
+        let page = [7_u8; PAGE_SIZE];
+        let digest = Sha256::digest(page);
+        let mut expected = [0_u8; 20];
+        expected.copy_from_slice(&digest[..20]);
+
+        assert!(verify_page_hash(&page, &[expected], 0).is_ok());
+    }
+
+    #[test]
+    fn page_hash_verification_rejects_missing_and_mismatched_hashes() {
+        let page = [7_u8; PAGE_SIZE];
+        let missing = verify_page_hash(&page, &[[0_u8; 20]], 1);
+        assert!(matches!(
+            missing,
+            Err(PageHashFailure::Missing { hash_count: 1 })
+        ));
+
+        let mismatch = verify_page_hash(&page, &[[0_u8; 20]], 0);
+        assert!(matches!(mismatch, Err(PageHashFailure::Mismatch)));
+    }
     const SEGMENT_METADATA_HEADER_LENGTH_OFFSET: usize = 12;
     const SEGMENT_METADATA_SEGMENT_COUNT_OFFSET: usize = 16;
     const FILETIME_OFFSET: usize = 0x210;
