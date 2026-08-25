@@ -1934,7 +1934,15 @@ fn is_retryable_download_error(error: &DownloadFileHttpError) -> bool {
         error,
         DownloadFileHttpError::Io(error)
             if matches!(error.kind(), ErrorKind::Other | ErrorKind::TimedOut)
+    ) || matches!(
+        error,
+        DownloadFileHttpError::UnexpectedResponseStatus { status }
+            if is_retryable_download_status(*status)
     )
+}
+
+fn is_retryable_download_status(status: u16) -> bool {
+    matches!(status, 408 | 425 | 429) || (500..=599).contains(&status)
 }
 
 fn consume_download_retry_budget(
@@ -3080,8 +3088,8 @@ mod tests {
         download_page_plan, download_request_range, extract_data_unit_index,
         extract_encrypted_section, extract_file_end, extract_page_loop_end, extract_page_plan,
         extract_progress_bytes, extract_write_length, hash_entry_read_offset, hash_page_index,
-        is_retryable_download_error, is_retryable_output_error, next_download_page,
-        next_download_received_byte_count, next_package_files_table_offset,
+        is_retryable_download_error, is_retryable_download_status, is_retryable_output_error,
+        next_download_page, next_download_received_byte_count, next_package_files_table_offset,
         next_segment_page_offset, non_encrypted_prefix_len, ntfs_drive_extents,
         ntfs_partition_extents, package_file_name, required_gpt_partition_length,
         required_gpt_partition_start, reserve_xvc_region_entries, segment_file_name,
@@ -3259,6 +3267,41 @@ mod tests {
         .await
         .expect("a valid ranged response must promote verified output");
         server.await.expect("download test server must finish");
+
+        assert_eq!(writer.0, vec![9]);
+    }
+
+    #[tokio::test]
+    async fn download_file_http_retries_transient_status_before_promotion() {
+        let xvd = XvdFile::parse(SyntheticXvdReader::synthetic_xvd_with_region_count(0))
+            .await
+            .expect("synthetic XVD must parse");
+        let body = vec![9_u8; PAGE_SIZE];
+        let digest = Sha256::digest(&body);
+        let mut page_hash = [0_u8; 20];
+        page_hash.copy_from_slice(&digest[..20]);
+        let (url, server) = spawn_transient_download_server(body).await;
+        let mut writer = RecordingAsyncWriter(Vec::new());
+        let file = SegmentFile {
+            offset: 0,
+            length: 1,
+            data_hashs: vec![page_hash],
+            keep_encrypted: false,
+        };
+
+        xvd.download_file_http(
+            &reqwest::Client::new(),
+            &url,
+            &mut writer,
+            &file,
+            [0_u8; 32],
+            |_, _| {},
+        )
+        .await
+        .expect("a transient status must be retried before promotion");
+        server
+            .await
+            .expect("transient download test server must finish");
 
         assert_eq!(writer.0, vec![9]);
     }
@@ -3462,6 +3505,73 @@ mod tests {
             tokio::io::AsyncWriteExt::write_all(&mut stream, &body)
                 .await
                 .expect("download test response body must write");
+        });
+
+        (format!("http://{address}/file"), handle)
+    }
+
+    async fn spawn_transient_download_server(
+        body: Vec<u8>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("transient download test server must bind");
+        let address = listener
+            .local_addr()
+            .expect("transient download test server address must be available");
+        let total = body.len() as u64;
+        let handle = tokio::spawn(async move {
+            for request_index in 0..2 {
+                let (mut stream, _) =
+                    tokio::time::timeout(tokio::time::Duration::from_secs(5), listener.accept())
+                        .await
+                        .expect("transient download test server must receive both requests")
+                        .expect("transient download test server must accept");
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 1024];
+                loop {
+                    let read = tokio::io::AsyncReadExt::read(&mut stream, &mut buffer)
+                        .await
+                        .expect("transient download test request must read");
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..read]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+
+                if request_index == 0 {
+                    tokio::io::AsyncWriteExt::write_all(
+                        &mut stream,
+                        b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .await
+                    .expect("transient download status must write");
+                    continue;
+                }
+
+                let request = String::from_utf8_lossy(&request);
+                assert!(
+                    request
+                        .lines()
+                        .any(|line| line.eq_ignore_ascii_case("range: bytes=0-4095")),
+                    "retried download request must carry the expected page range"
+                );
+                let headers = format!(
+                    "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-{}/{}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    total - 1,
+                    total,
+                    total
+                );
+                tokio::io::AsyncWriteExt::write_all(&mut stream, headers.as_bytes())
+                    .await
+                    .expect("retried download response headers must write");
+                tokio::io::AsyncWriteExt::write_all(&mut stream, &body)
+                    .await
+                    .expect("retried download response body must write");
+            }
         });
 
         (format!("http://{address}/file"), handle)
@@ -5265,6 +5375,18 @@ mod tests {
         assert!(is_retryable_download_error(&DownloadFileHttpError::Io(
             Error::other("temporary transport failure"),
         )));
+        for status in [408, 425, 429, 500, 503, 599] {
+            assert!(is_retryable_download_status(status));
+            assert!(is_retryable_download_error(
+                &DownloadFileHttpError::UnexpectedResponseStatus { status }
+            ));
+        }
+        for status in [400, 401, 404] {
+            assert!(!is_retryable_download_status(status));
+            assert!(!is_retryable_download_error(
+                &DownloadFileHttpError::UnexpectedResponseStatus { status }
+            ));
+        }
         assert!(!is_retryable_download_error(
             &DownloadFileHttpError::UnexpectedResponseStatus { status: 200 }
         ));
