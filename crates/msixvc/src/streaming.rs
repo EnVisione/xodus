@@ -188,6 +188,15 @@ fn http_retry_budget_exhausted() -> io::Error {
     Error::other("http stream retry budget exhausted")
 }
 
+fn is_retryable_http_status(status: reqwest::StatusCode) -> bool {
+    matches!(
+        status,
+        reqwest::StatusCode::REQUEST_TIMEOUT
+            | reqwest::StatusCode::TOO_EARLY
+            | reqwest::StatusCode::TOO_MANY_REQUESTS
+    ) || status.is_server_error()
+}
+
 fn premature_http_eof(position: u64, total: u64) -> io::Error {
     Error::new(
         ErrorKind::UnexpectedEof,
@@ -929,11 +938,12 @@ async fn open_http_stream(
 }
 
 fn http_err(err: reqwest::Error) -> std::io::Error {
-    if err.is_status() {
-        Error::new(ErrorKind::InvalidData, err)
-    } else {
-        Error::other(err)
-    }
+    let kind = match err.status() {
+        Some(status) if is_retryable_http_status(status) => ErrorKind::Other,
+        Some(_) => ErrorKind::InvalidData,
+        None => ErrorKind::Other,
+    };
+    Error::new(kind, err)
 }
 
 #[cfg(test)]
@@ -948,7 +958,7 @@ mod tests {
     use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, ReadBuf};
     use tokio::net::{TcpListener, TcpStream};
 
-    use super::{HttpRead, PrefixCacheFile, checked_prefix_target_end};
+    use super::{HttpRead, PrefixCacheFile, checked_prefix_target_end, is_retryable_http_status};
 
     #[derive(Clone, Debug)]
     struct RequestRecord {
@@ -1034,6 +1044,63 @@ mod tests {
             requests,
             handle,
         })
+    }
+
+    async fn spawn_transient_status_server(
+        body: Vec<u8>,
+    ) -> io::Result<(String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>)> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&request_count);
+        let handle = tokio::spawn(async move {
+            for request_index in 0..2 {
+                let (mut stream, _) = listener
+                    .accept()
+                    .await
+                    .expect("transient status test server must accept");
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 1024];
+                loop {
+                    let read = stream
+                        .read(&mut buffer)
+                        .await
+                        .expect("transient status test request must read");
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..read]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                count.fetch_add(1, Ordering::SeqCst);
+
+                if request_index == 0 {
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        )
+                        .await
+                        .expect("transient status response must write");
+                } else {
+                    let headers = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    stream
+                        .write_all(headers.as_bytes())
+                        .await
+                        .expect("successful response headers must write");
+                    stream
+                        .write_all(&body)
+                        .await
+                        .expect("successful response body must write");
+                }
+            }
+        });
+
+        Ok((format!("http://{address}/file"), request_count, handle))
     }
 
     async fn handle_connection(mut stream: TcpStream, config: ServerConfig) -> io::Result<()> {
@@ -1507,6 +1574,44 @@ mod tests {
 
         assert_eq!(output, body);
         assert_eq!(server.request_ranges(), vec![None]);
+    }
+
+    #[test]
+    fn retryable_http_status_policy_excludes_permanent_client_errors() {
+        assert!(is_retryable_http_status(
+            reqwest::StatusCode::REQUEST_TIMEOUT
+        ));
+        assert!(is_retryable_http_status(reqwest::StatusCode::TOO_EARLY));
+        assert!(is_retryable_http_status(
+            reqwest::StatusCode::TOO_MANY_REQUESTS
+        ));
+        assert!(is_retryable_http_status(
+            reqwest::StatusCode::SERVICE_UNAVAILABLE
+        ));
+        assert!(!is_retryable_http_status(reqwest::StatusCode::NOT_FOUND));
+        assert!(!is_retryable_http_status(reqwest::StatusCode::UNAUTHORIZED));
+    }
+
+    #[tokio::test]
+    async fn http_read_retries_a_transient_server_status_before_success() {
+        let body = test_body();
+        let (url, request_count, server) =
+            spawn_transient_status_server(body.clone()).await.unwrap();
+        let mut reader = HttpRead::open(reqwest::Client::new(), url, None::<fn(u64, u64)>)
+            .await
+            .expect("a transient server status must be retried");
+
+        let mut output = Vec::new();
+        reader
+            .read_to_end(&mut output)
+            .await
+            .expect("the retry response must complete the read");
+        server
+            .await
+            .expect("transient status test server must finish");
+
+        assert_eq!(output, body);
+        assert_eq!(request_count.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
