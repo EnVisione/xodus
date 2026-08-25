@@ -20,7 +20,6 @@ pub mod byteorder;
 pub mod structs;
 
 use std::hint;
-use std::mem;
 use std::ops::{Mul, Sub};
 
 use generic_array::sequence::{FallibleGenericSequence, GenericSequence, Split};
@@ -274,22 +273,20 @@ impl BinaryParse for i8 {
     }
 }
 
-/// Splits a reference to a `GenericArray<T, Size>` into a reference to `N`
+/// Splits a reference to a `GenericArray<T, Size>` into references to `N`
 /// chunks of length `M` each, where `Size = N * M`.
-///
-/// Usually, the [`Unflatten`](generic_array::sequence::Unflatten) trait should
-/// be preferred, but it causes trouble when dividing by [`U0`].
 #[inline]
 fn unflatten_ref<T, N, M>(
     array: &GenericArray<T, Prod<N, M>>,
-) -> &GenericArray<GenericArray<T, M>, N>
+) -> GenericArray<&GenericArray<T, M>, N>
 where
     N: ArrayLength + Mul<M, Output: ArrayLength>,
     M: ArrayLength,
 {
-    // SAFETY: `GenericArray<T, Prod<N, M>>` and
-    // `GenericArray<GenericArray<T, M>, N>` have identical size and layout.
-    unsafe { mem::transmute(array) }
+    GenericArray::generate(|index| {
+        let start = index * M::USIZE;
+        GenericArray::from_slice(&array.as_slice()[start..start + M::USIZE])
+    })
 }
 
 impl<T, N> BinaryParse for GenericArray<T, N>
@@ -304,7 +301,7 @@ where
     fn parse<'a>(r: BytesReader<'a, Self::Size>) -> (Self::Output, EmptyReader<'a>) {
         let (bytes, r) = r.remaining();
         let chunks = unflatten_ref::<u8, N, T::Size>(bytes);
-        (GenericArray::generate(|i| T::from_array(&chunks[i])), r)
+        (GenericArray::generate(|i| T::from_array(chunks[i])), r)
     }
 }
 
@@ -323,7 +320,7 @@ where
     ) -> Result<(Self::Output, EmptyReader<'a>), Self::Error> {
         let (bytes, r) = r.remaining();
         let chunks = unflatten_ref::<u8, N, T::Size>(bytes);
-        let Ok(result) = GenericArray::try_generate(|i| T::try_from_array(&chunks[i]));
+        let Ok(result) = GenericArray::try_generate(|i| T::try_from_array(chunks[i]));
         result.map(|arr| (arr, r))
     }
 }
@@ -408,5 +405,17 @@ mod tests {
         });
 
         assert_eq!(res, 255);
+    }
+
+    #[test]
+    fn test_nested_generic_array_parse_uses_bounded_chunks() {
+        type Pair = GenericArray<u8, typenum::U2>;
+        type Pairs = GenericArray<Pair, typenum::U2>;
+
+        let data = GenericArray::from_array([1, 2, 3, 4]);
+        let parsed = parse(&data, |r| r.read::<Pairs>());
+
+        assert_eq!(parsed[0].into_array(), [1, 2]);
+        assert_eq!(parsed[1].into_array(), [3, 4]);
     }
 }

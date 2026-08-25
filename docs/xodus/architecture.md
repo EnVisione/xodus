@@ -19,4 +19,6 @@ The HTTP reader validates pending chunk offsets before slicing, uses checked ari
 
 The XVD HTTP download path requires partial-content responses with an exact inclusive Content-Range, a stable total length across reconnects, and a matching Content-Length before activating a stream. Transport failures, timeouts, empty chunks, and short streams use one bounded download-wide retry budget; invalid status, range, total, and length metadata fail immediately. Received body bytes cannot exceed the aligned page span, and retry exhaustion returns a typed error before output promotion.
 
+The shared binary parser now builds nested generic-array chunk references through checked slice bounds instead of an unsafe layout transmute. A nested-array regression proves that the parser preserves chunk order and rejects no valid fixed-size input while keeping the type-level reader extent contract.
+
 MSIXVC parser hardening, complete integrity validation, atomic promotion, rollback policy, and transaction recovery remain Phase 2 work. The account backed Xbox Live development token test is not part of ordinary offline verification and currently requires an explicit bounded opt in.
