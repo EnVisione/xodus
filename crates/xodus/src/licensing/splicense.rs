@@ -32,6 +32,8 @@ use num_enum::TryFromPrimitive;
 use thiserror::Error;
 use zerocopy::{FromBytes, IntoBytes, transmute};
 
+const MAX_SPLICENSE_TLV_BYTES: usize = 64 * 1024 * 1024;
+
 // pub struct Block<'a> {
 //     pub block_id: BlockId,
 //     pub size: u32,
@@ -201,8 +203,14 @@ pub enum SPLicenseDecodeError {
     #[error("expected to read {expected} bytes but only {read} were read")]
     PayloadLengthMismatch { expected: usize, read: usize },
 
+    #[error("SPLicense TLV payload is {size} bytes, exceeding the limit {limit}")]
+    PayloadTooLarge { size: u64, limit: usize },
+
     #[error("PackedContentKey id_len {id_len} is less than 16")]
     InvalidPackedContentKeyIdLength { id_len: usize },
+
+    #[error("SPLicense signature block payload is {size} bytes, less than the four byte header")]
+    InvalidSignatureBlockLength { size: usize },
 
     #[error("invalid UTF-16 package name byte length {len}")]
     InvalidPackageNameByteLength { len: usize },
@@ -241,7 +249,18 @@ impl SPLicense {
             u32::from_le_bytes(buffer).try_into()
         };
 
-        let size = read_u32(&mut reader)? as usize;
+        let declared_size = u64::from(read_u32(&mut reader)?);
+        if declared_size > MAX_SPLICENSE_TLV_BYTES as u64 {
+            return Err(SPLicenseDecodeError::PayloadTooLarge {
+                size: declared_size,
+                limit: MAX_SPLICENSE_TLV_BYTES,
+            });
+        }
+        let size =
+            usize::try_from(declared_size).map_err(|_| SPLicenseDecodeError::PayloadTooLarge {
+                size: declared_size,
+                limit: MAX_SPLICENSE_TLV_BYTES,
+            })?;
 
         // Create a new reader that limits the number of bytes that can be read to `size`
         let mut reader = reader.take(size as u64);
@@ -305,6 +324,9 @@ impl SPLicense {
                 self.clep_sign_state = Some(Box::new(transmute!(data)));
             }
             Ok(BlockId::SignatureBlock) => {
+                if size < 4 {
+                    return Err(SPLicenseDecodeError::InvalidSignatureBlockLength { size });
+                }
                 let _unknown: [u8; 2] = read_array(&mut reader)?;
                 self.signature_origin = read_u16(&mut reader)?;
                 self.signature_block = read_vec(&mut reader, size - 4)?;
@@ -539,6 +561,36 @@ mod tests {
         assert!(matches!(
             result,
             Err(SPLicenseDecodeError::InvalidPackedContentKeyIdLength { id_len: 8 })
+        ));
+    }
+
+    #[test]
+    fn test_signature_block_rejects_short_payload_without_underflow() {
+        let mut data = make_test_header();
+        data.extend_from_slice(&(BlockId::SignatureBlock as u32).to_le_bytes());
+        data.extend_from_slice(&3_u32.to_le_bytes());
+        data.extend_from_slice(&[0; 3]);
+
+        let result = SPLicense::decode(Cursor::new(data));
+        assert!(matches!(
+            result,
+            Err(SPLicenseDecodeError::InvalidSignatureBlockLength { size: 3 })
+        ));
+    }
+
+    #[test]
+    fn test_tlv_payload_limit_rejects_large_allocation_before_read() {
+        let mut data = make_test_header();
+        data.extend_from_slice(&0xffff_u32.to_le_bytes());
+        data.extend_from_slice(&((MAX_SPLICENSE_TLV_BYTES as u32) + 1).to_le_bytes());
+
+        let result = SPLicense::decode(Cursor::new(data));
+        assert!(matches!(
+            result,
+            Err(SPLicenseDecodeError::PayloadTooLarge {
+                size,
+                limit: MAX_SPLICENSE_TLV_BYTES
+            }) if size == (MAX_SPLICENSE_TLV_BYTES as u64) + 1
         ));
     }
 
