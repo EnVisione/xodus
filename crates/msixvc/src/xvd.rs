@@ -471,6 +471,45 @@ pub enum SegmentMetadataParseError {
     InvalidFileName(#[source] std::string::FromUtf16Error),
 }
 
+#[derive(thiserror::Error, Debug)]
+pub enum PopulateSegmentHashesError {
+    #[error(
+        "encrypted section end overflows for section offset {section_offset} and section length {section_length}"
+    )]
+    SectionEndOverflow {
+        section_offset: u64,
+        section_length: u64,
+    },
+    #[error(
+        "segment file end overflows for file offset {file_offset} and file length {file_length}"
+    )]
+    FileEndOverflow { file_offset: u64, file_length: u64 },
+    #[error(
+        "segment file extent {file_offset}..{file_end} exceeds encrypted section {section_offset}..{section_end}"
+    )]
+    FileBeyondSection {
+        file_offset: u64,
+        file_end: u64,
+        section_offset: u64,
+        section_end: u64,
+    },
+    #[error(
+        "segment page offset {page_offset} is before encrypted section page start {segment_page_start}"
+    )]
+    PageOffsetBeforeSection {
+        page_offset: u64,
+        segment_page_start: u64,
+    },
+    #[error("segment hash slice start {page_relative_start} cannot fit in usize")]
+    HashSliceStartTooLarge { page_relative_start: u64 },
+    #[error("segment hash slice page count {page_count} cannot fit in usize")]
+    HashSlicePageCountTooLarge { page_count: u64 },
+    #[error("segment hash slice end overflows for start {start} and page count {page_count}")]
+    HashSliceEndOverflow { start: usize, page_count: usize },
+    #[error("segment hash slice end {end} exceeds {data_hash_count} available section hashes")]
+    HashSliceBeyondAvailableHashes { end: usize, data_hash_count: usize },
+}
+
 fn reserve_xvc_region_entries(
     num_pages: u64,
 ) -> Result<(Vec<u32>, Vec<[u8; 20]>), XvdFileParseError> {
@@ -800,6 +839,57 @@ fn segment_hash_slice_bounds(
                 data_hash_count,
             },
         );
+    }
+
+    Ok(start..end)
+}
+
+fn populate_segment_hash_slice_bounds(
+    file_offset: u64,
+    file_length: u64,
+    section_offset: u64,
+    section_end: u64,
+    data_hash_count: usize,
+) -> Result<std::ops::Range<usize>, PopulateSegmentHashesError> {
+    let file_end = file_offset.checked_add(file_length).ok_or(
+        PopulateSegmentHashesError::FileEndOverflow {
+            file_offset,
+            file_length,
+        },
+    )?;
+    if file_end > section_end {
+        return Err(PopulateSegmentHashesError::FileBeyondSection {
+            file_offset,
+            file_end,
+            section_offset,
+            section_end,
+        });
+    }
+
+    let segment_page_start = section_offset.div_ceil(PAGE_SIZE as u64);
+    let page_offset = file_offset.div_ceil(PAGE_SIZE as u64);
+    let page_relative_start = page_offset.checked_sub(segment_page_start).ok_or(
+        PopulateSegmentHashesError::PageOffsetBeforeSection {
+            page_offset,
+            segment_page_start,
+        },
+    )?;
+    let start = usize::try_from(page_relative_start).map_err(|_| {
+        PopulateSegmentHashesError::HashSliceStartTooLarge {
+            page_relative_start,
+        }
+    })?;
+    let page_count = file_length.div_ceil(PAGE_SIZE as u64);
+    let page_count = usize::try_from(page_count)
+        .map_err(|_| PopulateSegmentHashesError::HashSlicePageCountTooLarge { page_count })?;
+    let end = start
+        .checked_add(page_count)
+        .ok_or(PopulateSegmentHashesError::HashSliceEndOverflow { start, page_count })?;
+    if end > data_hash_count {
+        return Err(PopulateSegmentHashesError::HashSliceBeyondAvailableHashes {
+            end,
+            data_hash_count,
+        });
     }
 
     Ok(start..end)
@@ -1223,63 +1313,44 @@ impl XvdFile {
     pub fn populate_segment_hashes(
         &self,
         files: &mut HashMap<String, SegmentFile>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        for (name, file) in files.iter_mut() {
+    ) -> Result<(), PopulateSegmentHashesError> {
+        for file in files.values_mut() {
             if !file.data_hashs.is_empty() {
                 continue;
             }
 
-            let Some(section) = self.encrypted_section_infos.iter().find(|section| {
-                file.offset >= section.section_offset
-                    && file.offset < section.section_offset + section.section_length
-            }) else {
+            file.offset.checked_add(file.length).ok_or(
+                PopulateSegmentHashesError::FileEndOverflow {
+                    file_offset: file.offset,
+                    file_length: file.length,
+                },
+            )?;
+            let mut matching_section = None;
+            for section in &self.encrypted_section_infos {
+                let section_end = section
+                    .section_offset
+                    .checked_add(section.section_length)
+                    .ok_or(PopulateSegmentHashesError::SectionEndOverflow {
+                        section_offset: section.section_offset,
+                        section_length: section.section_length,
+                    })?;
+                if file.offset >= section.section_offset && file.offset < section_end {
+                    matching_section = Some((section, section_end));
+                    break;
+                }
+            }
+            let Some((section, section_end)) = matching_section else {
                 continue;
             };
 
-            let file_end = file.offset.saturating_add(file.length);
-            let section_end = section
-                .section_offset
-                .saturating_add(section.section_length);
-            if file_end > section_end {
-                return Err(io::Error::new(
-                    ErrorKind::InvalidInput,
-                    format!(
-                        "segment file spans beyond encrypted section: {} ({}..{} > {}..{})",
-                        name, file.offset, file_end, section.section_offset, section_end
-                    ),
-                )
-                .into());
-            }
-
-            let segment_page_start = section.section_offset.div_ceil(PAGE_SIZE as u64);
-            let page_offset = file.offset.div_ceil(PAGE_SIZE as u64);
-            let page_count = file.length.div_ceil(PAGE_SIZE as u64) as usize;
-            let start = page_offset.checked_sub(segment_page_start).ok_or_else(|| {
-                io::Error::new(
-                    ErrorKind::InvalidInput,
-                    format!(
-                        "segment page offset before section start: {} ({})",
-                        name, file.offset
-                    ),
-                )
-            })? as usize;
-            let end = start + page_count;
-
-            if end > section.data_hashs.len() {
-                return Err(io::Error::new(
-                    ErrorKind::InvalidInput,
-                    format!(
-                        "missing data hashes for {}: need [{}..{}], have {}",
-                        name,
-                        start,
-                        end,
-                        section.data_hashs.len()
-                    ),
-                )
-                .into());
-            }
-
-            file.data_hashs = section.data_hashs[start..end].into();
+            let hash_slice = populate_segment_hash_slice_bounds(
+                file.offset,
+                file.length,
+                section.section_offset,
+                section_end,
+                section.data_hashs.len(),
+            )?;
+            file.data_hashs = section.data_hashs[hash_slice].into();
         }
 
         Ok(())
@@ -1703,6 +1774,7 @@ impl XvdFile {
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::HashMap,
         io::{Cursor, Error, ErrorKind, Seek},
         pin::Pin,
         sync::{
@@ -1715,12 +1787,12 @@ mod tests {
     use tokio::io::{AsyncRead, AsyncSeek, ReadBuf};
 
     use super::{
-        EncryptedSectionInfo, MAX_XVC_REGION_HEADERS, PAGE_SIZE, SEGMENT_METADATA_READER_CAPACITY,
-        SegmentMetadataParseError, UserPackageFile, UserPackageFilesParseError, XvcRegionId,
-        XvdFile, XvdFileParseError, hash_entry_read_offset, hash_page_index,
-        next_segment_page_offset, package_file_name, reserve_xvc_region_entries, segment_file_name,
-        segment_metadata_reader_capacity, validate_segment_metadata_table_extent,
-        validate_xvc_region_hash_entry_addresses,
+        EncryptedSectionInfo, MAX_XVC_REGION_HEADERS, PAGE_SIZE, PopulateSegmentHashesError,
+        SEGMENT_METADATA_READER_CAPACITY, SegmentFile, SegmentMetadataParseError, UserPackageFile,
+        UserPackageFilesParseError, XvcRegionId, XvdFile, XvdFileParseError,
+        hash_entry_read_offset, hash_page_index, next_segment_page_offset, package_file_name,
+        reserve_xvc_region_entries, segment_file_name, segment_metadata_reader_capacity,
+        validate_segment_metadata_table_extent, validate_xvc_region_hash_entry_addresses,
     };
 
     const XVD_HEADER_SIZE: usize = 4096;
@@ -2505,6 +2577,183 @@ mod tests {
             }
         ));
         assert_eq!(next_segment_page_offset(1, 1).unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn populate_segment_hashes_rejects_overflowing_section_end_without_mutation() {
+        let mut xvd = XvdFile::parse(SyntheticXvdReader::synthetic_xvd_with_region_count(0))
+            .await
+            .expect("synthetic XVD must parse");
+        xvd.encrypted_section_infos.push(EncryptedSectionInfo {
+            section_offset: u64::MAX,
+            section_length: 1,
+            header_id: XvcRegionId::Unknown,
+            vduid: [0; 8],
+            data_units: None,
+            first_segment_index: 0,
+            data_hashs: vec![[0; 20]],
+        });
+        let mut files = HashMap::from([(
+            "overflowing-section".to_string(),
+            SegmentFile {
+                offset: u64::MAX,
+                length: 0,
+                data_hashs: vec![],
+                keep_encrypted: true,
+            },
+        )]);
+
+        let error = xvd
+            .populate_segment_hashes(&mut files)
+            .expect_err("overflowing section end must fail");
+
+        assert!(matches!(
+            error,
+            PopulateSegmentHashesError::SectionEndOverflow {
+                section_offset: u64::MAX,
+                section_length: 1,
+            }
+        ));
+        assert!(files["overflowing-section"].data_hashs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn populate_segment_hashes_rejects_overflowing_file_end_without_mutation() {
+        let xvd = XvdFile::parse(SyntheticXvdReader::synthetic_xvd_with_region_count(0))
+            .await
+            .expect("synthetic XVD must parse");
+        let mut files = HashMap::from([(
+            "overflowing-file".to_string(),
+            SegmentFile {
+                offset: u64::MAX,
+                length: 1,
+                data_hashs: vec![],
+                keep_encrypted: true,
+            },
+        )]);
+
+        let error = xvd
+            .populate_segment_hashes(&mut files)
+            .expect_err("overflowing file end must fail");
+
+        assert!(matches!(
+            error,
+            PopulateSegmentHashesError::FileEndOverflow {
+                file_offset: u64::MAX,
+                file_length: 1,
+            }
+        ));
+        assert!(files["overflowing-file"].data_hashs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn populate_segment_hashes_rejects_file_beyond_section_without_mutation() {
+        let mut xvd = XvdFile::parse(SyntheticXvdReader::synthetic_xvd_with_region_count(0))
+            .await
+            .expect("synthetic XVD must parse");
+        xvd.encrypted_section_infos.push(EncryptedSectionInfo {
+            section_offset: 0,
+            section_length: PAGE_SIZE as u64,
+            header_id: XvcRegionId::Unknown,
+            vduid: [0; 8],
+            data_units: None,
+            first_segment_index: 0,
+            data_hashs: vec![[0; 20]],
+        });
+        let mut files = HashMap::from([(
+            "spanning-file".to_string(),
+            SegmentFile {
+                offset: (PAGE_SIZE - 1) as u64,
+                length: 2,
+                data_hashs: vec![],
+                keep_encrypted: true,
+            },
+        )]);
+
+        let error = xvd
+            .populate_segment_hashes(&mut files)
+            .expect_err("file beyond encrypted section must fail");
+
+        assert!(matches!(
+            error,
+            PopulateSegmentHashesError::FileBeyondSection {
+                file_offset,
+                file_end,
+                section_offset: 0,
+                section_end,
+            } if file_offset == (PAGE_SIZE - 1) as u64
+                && file_end == PAGE_SIZE as u64 + 1
+                && section_end == PAGE_SIZE as u64
+        ));
+        assert!(files["spanning-file"].data_hashs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn populate_segment_hashes_rejects_missing_hashes_without_mutation() {
+        let mut xvd = XvdFile::parse(SyntheticXvdReader::synthetic_xvd_with_region_count(0))
+            .await
+            .expect("synthetic XVD must parse");
+        xvd.encrypted_section_infos.push(EncryptedSectionInfo {
+            section_offset: 0,
+            section_length: PAGE_SIZE as u64,
+            header_id: XvcRegionId::Unknown,
+            vduid: [0; 8],
+            data_units: None,
+            first_segment_index: 0,
+            data_hashs: vec![],
+        });
+        let mut files = HashMap::from([(
+            "missing-hash".to_string(),
+            SegmentFile {
+                offset: 0,
+                length: PAGE_SIZE as u64,
+                data_hashs: vec![],
+                keep_encrypted: true,
+            },
+        )]);
+
+        let error = xvd
+            .populate_segment_hashes(&mut files)
+            .expect_err("missing section hashes must fail");
+
+        assert!(matches!(
+            error,
+            PopulateSegmentHashesError::HashSliceBeyondAvailableHashes {
+                end: 1,
+                data_hash_count: 0,
+            }
+        ));
+        assert!(files["missing-hash"].data_hashs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn populate_segment_hashes_preserves_a_valid_hash_slice() {
+        let mut xvd = XvdFile::parse(SyntheticXvdReader::synthetic_xvd_with_region_count(0))
+            .await
+            .expect("synthetic XVD must parse");
+        xvd.encrypted_section_infos.push(EncryptedSectionInfo {
+            section_offset: 0,
+            section_length: PAGE_SIZE as u64,
+            header_id: XvcRegionId::Unknown,
+            vduid: [0; 8],
+            data_units: None,
+            first_segment_index: 0,
+            data_hashs: vec![[7; 20]],
+        });
+        let mut files = HashMap::from([(
+            "valid-hash".to_string(),
+            SegmentFile {
+                offset: 0,
+                length: PAGE_SIZE as u64,
+                data_hashs: vec![],
+                keep_encrypted: true,
+            },
+        )]);
+
+        xvd.populate_segment_hashes(&mut files)
+            .expect("valid section hashes must populate");
+
+        assert_eq!(files["valid-hash"].data_hashs, vec![[7; 20]]);
     }
 
     #[tokio::test]
