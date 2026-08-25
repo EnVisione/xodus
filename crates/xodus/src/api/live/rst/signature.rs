@@ -57,22 +57,23 @@ impl<'a> RSTSignature<'a> {
         }
     }
 
-    pub fn hmac_key(&self, nonce: &[u8]) -> Option<[u8; 32]> {
+    pub fn hmac_key(&self, nonce: &[u8]) -> Result<Option<[u8; 32]>, utils::SharedKeyError> {
         if let Self::Hmac {
             clep_secret,
             tpm_secret,
         } = self
         {
-            let clep_key = utils::generate_shared_key(32, clep_secret, soap::HMAC_KEY_USAGE, nonce);
+            let clep_key =
+                utils::generate_shared_key(32, clep_secret, soap::HMAC_KEY_USAGE, nonce)?;
             let hmac_key = if !tpm_secret.is_empty() {
-                utils::generate_shared_key(32, tpm_secret, soap::HMAC_KEY_USAGE, &clep_key)
+                utils::generate_shared_key(32, tpm_secret, soap::HMAC_KEY_USAGE, &clep_key)?
             } else {
                 clep_key
             };
 
-            Some(hmac_key)
+            Ok(Some(hmac_key))
         } else {
-            None
+            Ok(None)
         }
     }
 
@@ -82,12 +83,14 @@ impl<'a> RSTSignature<'a> {
                 clep_secret,
                 tpm_secret,
             } => {
-                let clep = utils::generate_shared_key(32, clep_secret, soap::HMAC_KEY_USAGE, nonce);
+                let clep = utils::generate_shared_key(32, clep_secret, soap::HMAC_KEY_USAGE, nonce)
+                    .map_err(|error| bergshamra::Error::Key(error.to_string()))?;
 
                 let hmac = if tpm_secret.is_empty() {
                     clep
                 } else {
                     utils::generate_shared_key(32, tpm_secret, soap::HMAC_KEY_USAGE, &clep)
+                        .map_err(|error| bergshamra::Error::Key(error.to_string()))?
                 };
 
                 bergshamra::KeyData::from_symmetric_bytes(kryptering::KeyAlgorithm::Hmac, &hmac)

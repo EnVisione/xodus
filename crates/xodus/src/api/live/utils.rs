@@ -7,12 +7,25 @@ use base64::prelude::*;
 use hmac::{Hmac, KeyInit, Mac};
 use rsa::rand_core::{OsRng, RngCore};
 use sha2::Sha256;
+use thiserror::Error;
 use zerocopy::IntoBytes;
 
 use crate::api::live::rst;
 use crate::models::soap;
 
 type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum SharedKeyError {
+    #[error("shared key length must be between 1 and 32 bytes, got {0}")]
+    InvalidKeyLength(usize),
+    #[error("shared key material length overflow")]
+    MaterialLengthOverflow,
+    #[error("shared key length cannot be represented as bits")]
+    BitLengthOverflow,
+    #[error("shared key input must not be empty")]
+    EmptyInputKey,
+}
 
 /// SP800_108 HMAC with counter
 /// - key_usage - KDF_LABEL
@@ -22,8 +35,24 @@ pub fn generate_shared_key(
     in_key: &[u8],
     key_usage: &str,
     context: &[u8],
-) -> [u8; 32] {
-    let len: usize = 4 + key_usage.len() + 1 + context.len() + 4;
+) -> Result<[u8; 32], SharedKeyError> {
+    if !(1..=32).contains(&key_length) {
+        return Err(SharedKeyError::InvalidKeyLength(key_length));
+    }
+    if in_key.is_empty() {
+        return Err(SharedKeyError::EmptyInputKey);
+    }
+
+    let key_bit_length = key_length
+        .checked_mul(8)
+        .and_then(|bits| u32::try_from(bits).ok())
+        .ok_or(SharedKeyError::BitLengthOverflow)?;
+    let len = 4usize
+        .checked_add(key_usage.len())
+        .and_then(|value| value.checked_add(1))
+        .and_then(|value| value.checked_add(context.len()))
+        .and_then(|value| value.checked_add(4))
+        .ok_or(SharedKeyError::MaterialLengthOverflow)?;
     let mut shared_key_material: Vec<u8> = vec![0; len];
 
     let mut offset = 0;
@@ -37,7 +66,6 @@ pub fn generate_shared_key(
     shared_key_material[offset..offset + context.len()].copy_from_slice(context);
     offset += context.len();
 
-    let key_bit_length = u32::try_from(key_length * 8).unwrap();
     shared_key_material[offset..offset + 4].copy_from_slice(&key_bit_length.to_be_bytes());
 
     offset += 4;
@@ -54,7 +82,8 @@ pub fn generate_shared_key(
 
         type HmacSha256 = Hmac<Sha256>;
 
-        let mut hmac = HmacSha256::new_from_slice(in_key).unwrap();
+        let mut hmac =
+            HmacSha256::new_from_slice(in_key).map_err(|_| SharedKeyError::EmptyInputKey)?;
         hmac.update(&shared_key_material[..offset]);
         let signature = hmac.finalize().into_bytes();
         let amount = min(signature.len(), key_length - current_key_length);
@@ -63,7 +92,7 @@ pub fn generate_shared_key(
         current_key_length += amount;
     }
 
-    shared_key
+    Ok(shared_key)
 }
 
 pub fn generate_nonce() -> [u8; 32] {
@@ -113,7 +142,10 @@ pub fn decrypt_soap_encrypted_data<T: serde::de::DeserializeOwned>(
         .ok_or(rst::RSTError::InvalidSecurityTokenReference)?;
     let nonce = nonces.get(nonce_id).ok_or(rst::RSTError::MissingNonce)?;
     let nonce = BASE64_STANDARD.decode(nonce)?;
-    let key = signature.hmac_key(&nonce).ok_or(rst::RSTError::HmacKey)?;
+    let key = signature
+        .hmac_key(&nonce)
+        .map_err(|_| rst::RSTError::HmacKey)?
+        .ok_or(rst::RSTError::HmacKey)?;
     let cipher_value = BASE64_STANDARD.decode(encrypted_data.cipher_data.cipher_value)?;
 
     let (iv, encrypted) = cipher_value
@@ -132,4 +164,35 @@ pub fn decrypt_soap_encrypted_data<T: serde::de::DeserializeOwned>(
     let data = quick_xml::de::from_str::<T>(result)?;
 
     Ok(data)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SharedKeyError, generate_shared_key};
+
+    #[test]
+    fn shared_key_rejects_empty_input() {
+        assert_eq!(
+            generate_shared_key(32, &[], "usage", b"context"),
+            Err(SharedKeyError::EmptyInputKey)
+        );
+    }
+
+    #[test]
+    fn shared_key_rejects_output_larger_than_fixed_buffer() {
+        assert_eq!(
+            generate_shared_key(33, b"secret", "usage", b"context"),
+            Err(SharedKeyError::InvalidKeyLength(33))
+        );
+    }
+
+    #[test]
+    fn shared_key_is_deterministic_for_valid_inputs() {
+        let first = generate_shared_key(32, b"secret", "usage", b"context")
+            .expect("valid shared key inputs");
+        let second = generate_shared_key(32, b"secret", "usage", b"context")
+            .expect("valid shared key inputs");
+
+        assert_eq!(first, second);
+    }
 }
