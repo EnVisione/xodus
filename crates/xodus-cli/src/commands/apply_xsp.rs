@@ -262,6 +262,7 @@ mod tests {
 
     use sha2::{Digest, Sha256};
 
+    use crate::commands::install_msixvc2::run as install_msixvc2;
     use crate::commands::streaming::recover_transactions;
 
     use super::{ApplyXspRequest, run, run_with_hook};
@@ -420,6 +421,115 @@ mod tests {
                         .starts_with(".xodus-streaming-txn-")
                 }),
             "failed update must not leave a staging transaction"
+        );
+    }
+
+    #[tokio::test]
+    async fn applies_xsp_after_msixvc2_replacement_preserves_package_state() {
+        let temporary = tempfile::tempdir().expect("temporary directory must exist");
+        let base = temporary.path().join("base.bin");
+        let new_data = temporary.path().join("new.bin");
+        let source_hashes = temporary.path().join("source.hashes");
+        let target_hashes = temporary.path().join("target.hashes");
+        let destination = temporary.path().join("install");
+        let base_box = destination.join("Boxes/7a342636-4ffe-4966-91d1-207da876ba09.box");
+        let update_box = destination.join("Boxes/204a0f88-704c-4bcb-8a1a-3823119302ce.box");
+
+        assert_eq!(
+            install_msixvc2(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../msixvc/testdata/msixvc2/xodus-fixture-base.msixvc")
+                    .to_string_lossy()
+                    .into_owned(),
+                destination.to_string_lossy().into_owned(),
+            ),
+            std::process::ExitCode::SUCCESS
+        );
+        assert!(base_box.is_file(), "base package must be promoted");
+
+        assert_eq!(
+            install_msixvc2(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../msixvc/testdata/msixvc2/xodus-fixture-update.msixvc")
+                    .to_string_lossy()
+                    .into_owned(),
+                destination.to_string_lossy().into_owned(),
+            ),
+            std::process::ExitCode::SUCCESS
+        );
+        assert!(
+            !base_box.exists(),
+            "package replacement must remove stale base"
+        );
+        assert!(update_box.is_file(), "updated package must be active");
+
+        std::fs::write(&base, b"base").expect("base fixture must be writable");
+        std::fs::write(&new_data, b"new!").expect("new data fixture must be writable");
+        std::fs::write(&source_hashes, format!("{}\n", hash_line(b"base")))
+            .expect("source hash manifest must be writable");
+        std::fs::write(
+            &target_hashes,
+            format!("{}\n{}\n", hash_line(b"new!"), hash_line(b"base")),
+        )
+        .expect("target hash manifest must be writable");
+
+        let request = || ApplyXspRequest {
+            descriptor: fixture("xodus-fixture-valid.xsp")
+                .to_string_lossy()
+                .into_owned(),
+            base: base.to_string_lossy().into_owned(),
+            new_data: new_data.to_string_lossy().into_owned(),
+            source_hashes: source_hashes.to_string_lossy().into_owned(),
+            target_hashes: target_hashes.to_string_lossy().into_owned(),
+            destination: destination.to_string_lossy().into_owned(),
+            output: "updated.bin".to_owned(),
+            block_size: 4,
+            rollback: false,
+        };
+        assert_eq!(
+            run(request()).await,
+            std::process::ExitCode::SUCCESS,
+            "xsp update must follow the package replacement"
+        );
+        assert_eq!(
+            std::fs::read(destination.join("updated.bin")).expect("xsp output must be active"),
+            b"new!base"
+        );
+        assert!(
+            update_box.is_file(),
+            "xsp update must preserve package state"
+        );
+
+        std::fs::write(
+            &target_hashes,
+            format!("{}\n{}\n", hash_line(b"wrong"), hash_line(b"base")),
+        )
+        .expect("failed target hash manifest must be writable");
+        assert_eq!(
+            run(request()).await,
+            std::process::ExitCode::FAILURE,
+            "failed xsp update must not replace active state"
+        );
+        assert_eq!(
+            std::fs::read(destination.join("updated.bin")).expect("active xsp output must remain"),
+            b"new!base"
+        );
+        assert!(
+            update_box.is_file(),
+            "failed xsp update must preserve package state"
+        );
+        recover_transactions(&destination).expect("destination recovery must succeed");
+        assert!(
+            std::fs::read_dir(&destination)
+                .expect("destination must remain readable")
+                .all(|entry| {
+                    !entry
+                        .expect("destination entry must be readable")
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".xodus-streaming-txn-")
+                }),
+            "combined workflow must leave no staging transaction"
         );
     }
 
