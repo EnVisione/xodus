@@ -466,6 +466,43 @@ mod tests {
     }
 
     #[test]
+    fn package_download_urls_reject_unsafe_relative_paths() {
+        let roots = vec!["https://cdn.example/base/".to_owned()];
+        for relative_url in [
+            "",
+            "/absolute.xvd",
+            "../escape.xvd",
+            "content//empty.xvd",
+            r"content\windows.xvd",
+            "content/file.xvd?redirect=1",
+            "content/file.xvd#fragment",
+            "https://other.example/file.xvd",
+        ] {
+            assert!(
+                package_download_urls(&roots, &[], relative_url).is_err(),
+                "unsafe package relative URL accepted: {relative_url:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn package_download_urls_reject_invalid_roots() {
+        for root in [
+            "https://cdn.example/base",
+            "https://cdn.example/base/?query=1",
+            "https://cdn.example/base/#fragment",
+        ] {
+            let roots = vec![root.to_owned()];
+            assert!(
+                package_download_urls(&roots, &[], "file.xvd").is_err(),
+                "invalid package CDN root accepted: {root}"
+            );
+        }
+        let oversized = format!("https://cdn.example/{}", "x".repeat(4096));
+        assert!(package_download_urls(&[oversized], &[], "file.xvd").is_err());
+    }
+
+    #[test]
     fn package_download_urls_preserve_unique_root_order() {
         let roots = vec![
             "https://first.example/".to_owned(),

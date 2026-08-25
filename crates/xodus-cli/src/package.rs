@@ -10,6 +10,8 @@ use xodus::tokens::TokenManager;
 
 const MAX_CONTENT_ID_REDIRECTS: usize = 8;
 const MAX_PACKAGE_ID_BYTES: usize = 512;
+const MAX_PACKAGE_CDN_ROOT_BYTES: usize = 4096;
+const MAX_PACKAGE_RELATIVE_URL_BYTES: usize = 4096;
 
 fn package_download_url_capacity(
     cdn_root_count: usize,
@@ -104,32 +106,85 @@ pub(crate) fn package_download_urls(
     let mut urls = Vec::new();
     urls.try_reserve(capacity)
         .map_err(|_| io::Error::other("package CDN URL allocation failed"))?;
+    validate_package_relative_url(relative_url)?;
     for root in cdn_root_paths.iter().chain(background_cdn_root_paths) {
-        let url = format!("{root}{relative_url}");
-        let parsed = reqwest::Url::parse(&url).map_err(|_| {
+        let parsed_root = validate_package_cdn_root(root)?;
+        let joined = parsed_root.join(relative_url).map_err(|_| {
             io::Error::new(io::ErrorKind::InvalidData, "package CDN URL is invalid")
         })?;
-        if parsed.scheme() != "https" {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "package CDN URL must use HTTPS",
-            ));
-        }
-        if parsed.host_str().is_none()
-            || !parsed.username().is_empty()
-            || parsed.password().is_some()
+        if joined.scheme() != parsed_root.scheme()
+            || joined.host_str() != parsed_root.host_str()
+            || joined.port_or_known_default() != parsed_root.port_or_known_default()
+            || joined.query().is_some()
+            || joined.fragment().is_some()
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "package CDN URL must have a host and no user information",
+                "package CDN relative URL escapes its root",
             ));
         }
+        let url = joined.to_string();
         if !urls.iter().any(|candidate| candidate == &url) {
             urls.push(url);
         }
     }
 
     Ok(urls)
+}
+
+fn validate_package_cdn_root(root: &str) -> io::Result<reqwest::Url> {
+    if root.is_empty()
+        || root.len() > MAX_PACKAGE_CDN_ROOT_BYTES
+        || root.chars().any(char::is_control)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "package CDN root is empty, oversized, or contains control characters",
+        ));
+    }
+    let parsed = reqwest::Url::parse(root)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "package CDN URL is invalid"))?;
+    if parsed.scheme() != "https"
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || !parsed.path().ends_with('/')
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "package CDN root must be an HTTPS directory without user information",
+        ));
+    }
+    Ok(parsed)
+}
+
+fn validate_package_relative_url(relative_url: &str) -> io::Result<()> {
+    if relative_url.is_empty()
+        || relative_url.len() > MAX_PACKAGE_RELATIVE_URL_BYTES
+        || relative_url.chars().any(char::is_control)
+        || relative_url.starts_with('/')
+        || relative_url.starts_with('\\')
+        || relative_url.contains('\\')
+        || relative_url.contains('?')
+        || relative_url.contains('#')
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "package relative URL is empty, oversized, or unsafe",
+        ));
+    }
+    if relative_url
+        .split('/')
+        .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "package relative URL contains an unsafe path segment",
+        ));
+    }
+    Ok(())
 }
 
 pub async fn get_content_id(
