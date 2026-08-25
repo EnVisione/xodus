@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "planId": "PLAN-MASTER",
-  "planSetSha256": "8ffd23392afa18667ce31e6cd5e438eb7c87a67a66f12927e271a9cb0336981c",
+  "planSetSha256": "23f959201b0789c7abb9ca1830b9b5c42ba3ac28f06b1753bd2749b5e0e2a8c8",
   "planningSubject": {
     "name": "Evolve the EnVisione Xodus fork into a CachyOS native, launcher neutral Game Pass PC launcher and runtime for Hyprland, Wayland, XWayland, and the NVIDIA RTX 5090 Laptop GPU",
     "requestedArtifact": "authoritative_plan",
@@ -160,6 +160,13 @@
         "subject": "Phase 2 evidence dependency-cycle correction",
         "source": "Current owner request and authoritative phase sequencing at `c37f5dd518179ac229abf1dd7c83f2649990d16b`",
         "use": "Split the Phase 2 package-metadata entry contract from runtime and lifecycle evidence that can exist only after later implementation, without weakening or deleting any requirement"
+      },
+      {
+        "id": "SRC-023",
+        "role": "repository_evidence",
+        "subject": "Phase 2 package path containment implementation start",
+        "source": "Goal validation and CodeGraph evidence for `crates/xodus-cli/src/commands/streaming.rs` at `fb291739e298ac16b81a01b36027e4d0146aa53b`",
+        "use": "Record the untrusted segment-name join, pre-containment directory and file creation, missing coverage, and first ordered XODUS-REQ-002 task without claiming a source change or test result"
       }
     ]
   },
@@ -1306,8 +1313,8 @@
     "optionalFutureDisposition": "excluded",
     "lockedOwnerDecisions": "DEC-001 through DEC-011 are resolved exactly as recorded in this plan.",
     "activePhase": "XODUS-PHASE-002",
-    "nextExecutableAction": "Create a bounded XODUS-PHASE-002 execution goal from the validated EXT-002A, EXT-008, and EXT-009 entry contract. Keep broader EXT-002 evidence assigned to the Phase 4, 5, 7, 8, and 9 acceptance gates, and do not treat this plan correction as implementation start.",
-    "knownFailingChecks": "Phase 1 baseline verification passed, while Clippy still reports four warnings at the frozen revision. At pre-change implementation branch HEAD c37f5dd518179ac229abf1dd7c83f2649990d16b, EXT-002A, EXT-008, and EXT-009 satisfy the corrected Phase 2 entry contract, but XODUS-PHASE-002 remains not started and no parser consumer, transaction, authorized real-package apply, rollback, or recovery test has run. EXT-002 still lacks full Minecraft and Forza runtime traces, dynamic online-service and anti cheat classification, and real target source-to-target updates; these remain mandatory in later phase gates. EXT-003 and EXT-004 remain unavailable because their reviewable artifact manifests are incomplete. No target-game, performance, Tier 2, or release acceptance run has passed.",
+    "nextExecutableAction": "Implement only the first XODUS-PHASE-002 criterion in `crates/xodus-cli/src/commands/streaming.rs`: reject unsafe untrusted segment paths before any filesystem creation, prevent package writes from escaping through symlinks, and prove both boundaries with synthetic fixtures in a disposable sandbox before proceeding to later Phase 2 work.",
+    "knownFailingChecks": "Phase 1 baseline verification passed, while Clippy still reports four warnings at the frozen revision. At pre-change implementation branch HEAD fb291739e298ac16b81a01b36027e4d0146aa53b, CodeGraph shows that `streaming.rs` joins an untrusted `SegmentFile` job name below `out` after separator replacement, then creates parent directories and opens files without a containment or symlink-escape boundary. No source coverage exercises this path. XODUS-PHASE-002 is IN PROGRESS, but no source edit or passing implementation test is claimed by this plan-only state update. EXT-002 still lacks later target runtime and lifecycle evidence, EXT-003 and EXT-004 artifact manifests remain unavailable, and no real-package, target-game, performance, Tier 2, or release acceptance run has passed.",
     "knownExternalBlockers": "No current XODUS-PHASE-002 entry blocker remains after EXT-002A validation. Later endpoint blockers remain EXT-002, Complete target runtime, service, anti cheat, and lifecycle evidence, EXT-003, Versioned xgameruntime artifact, EXT-004, Versioned Xodus compatible Wine or Proton artifact, EXT-007, Scoped public release publication approval, EXT-010, Tier 2 CachyOS Hyprland NVIDIA compatibility hardware, and EXT-011, Authorized Minecraft and Forza update revision pairs.",
     "requiredEvidenceGates": "Sequential phase exits, complete deterministic tests including XODUS-PHASE-002 corpus consumers, authorized real-package apply and recovery exercises, authorized local title lifecycles, target runtime traces, Forza telemetry, Tier 2 results, package lifecycle, security review, documentation, signatures, checksums, SBOM, public release inspection, fresh install, and rollback must pass."
   }
