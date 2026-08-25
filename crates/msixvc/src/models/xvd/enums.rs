@@ -4,11 +4,11 @@ use msixvc_common::parse::{BinaryParse, BinaryTryParse, BytesReader, EmptyReader
 use num_enum::{FromPrimitive, IntoPrimitive, TryFromPrimitive};
 use typenum::U4 as T4;
 
-// These enums are `repr(u8)`, but they implement `BinaryParse` or `BinaryTryParse`
+// These enums use the wire representation width because they implement `BinaryParse` or `BinaryTryParse`
 // for a size of 4 bytes because they are stored as u32 on the wire.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive)]
-#[repr(u8)]
+#[repr(u32)]
 pub enum XvdType {
     Fixed = 0,
     Dynamic = 1,
@@ -17,18 +17,18 @@ pub enum XvdType {
 impl BinaryTryParse for XvdType {
     type Output = Self;
     type Size = T4;
-    type Error = <Self as TryFrom<u8>>::Error;
+    type Error = <Self as TryFrom<u32>>::Error;
 
     fn try_parse<'a>(
         r: BytesReader<'a, Self::Size>,
     ) -> Result<(Self::Output, EmptyReader<'a>), Self::Error> {
         let (val, r) = r.read::<U32>();
-        Self::try_from(val as u8).map(|val| (val, r))
+        Self::try_from(val).map(|val| (val, r))
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive)]
-#[repr(u8)]
+#[repr(u32)]
 pub enum XvdContentType {
     Data = 0,
     Title = 1,
@@ -72,13 +72,31 @@ pub enum XvdContentType {
 impl BinaryTryParse for XvdContentType {
     type Output = Self;
     type Size = T4;
-    type Error = <Self as TryFrom<u8>>::Error;
+    type Error = <Self as TryFrom<u32>>::Error;
 
     fn try_parse<'a>(
         r: BytesReader<'a, Self::Size>,
     ) -> Result<(Self::Output, EmptyReader<'a>), Self::Error> {
         let (val, r) = r.read::<U32>();
-        Self::try_from(val as u8).map(|val| (val, r))
+        Self::try_from(val).map(|val| (val, r))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{XvdContentType, XvdType};
+    use msixvc_common::parse::BinaryTryParse;
+
+    #[test]
+    fn xvd_type_rejects_values_outside_the_wire_domain() {
+        assert!(XvdType::try_from_slice(&0_u32.to_le_bytes()).is_ok());
+        assert!(XvdType::try_from_slice(&0x100_u32.to_le_bytes()).is_err());
+    }
+
+    #[test]
+    fn xvd_content_type_rejects_values_outside_the_wire_domain() {
+        assert!(XvdContentType::try_from_slice(&0_u32.to_le_bytes()).is_ok());
+        assert!(XvdContentType::try_from_slice(&0x100_u32.to_le_bytes()).is_err());
     }
 }
 
