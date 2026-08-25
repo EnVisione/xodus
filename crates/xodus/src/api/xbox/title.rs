@@ -10,23 +10,21 @@ pub async fn get_title_management(client: &reqwest::Client) -> reqwest::Result<T
 
 pub fn get_endpoint<'a>(url: &str, response: &'a TitleMgtResponse) -> Option<&'a TitleMgtEndPoint> {
     let parsed_url = reqwest::Url::parse(url).ok()?;
+    let host = parsed_url.host_str()?;
     let filtered: Vec<&TitleMgtEndPoint> = response
         .end_points
         .iter()
         .filter(|e| e.protocol == parsed_url.scheme())
         .collect();
-    let hosts: Vec<globset::Glob> = filtered
-        .iter()
-        .map(|e| globset::Glob::new(&e.host).expect("Unsupported glob"))
-        .collect();
-    let set = globset::GlobSet::new(hosts).ok()?;
-    let matched = set.matches(parsed_url.host_str().unwrap());
-    let matched: Vec<&TitleMgtEndPoint> = matched.into_iter().map(|m| filtered[m]).collect();
 
-    matched
-        .iter()
-        .max_by_key(|&&pat| pat.host.chars().filter(|&c| c != '*').count())
-        .copied()
+    filtered
+        .into_iter()
+        .filter(|endpoint| {
+            globset::Glob::new(&endpoint.host)
+                .map(|glob| glob.compile_matcher().is_match(host))
+                .unwrap_or(false)
+        })
+        .max_by_key(|endpoint| endpoint.host.chars().filter(|&c| c != '*').count())
 }
 
 #[cfg(test)]
@@ -56,5 +54,39 @@ mod test {
             updates.relying_party.as_deref(),
             Some("http://update.xboxlive.com")
         );
+    }
+
+    #[test]
+    fn malformed_glob_does_not_panic_or_match() {
+        let response = TitleMgtResponse {
+            end_points: vec![TitleMgtEndPoint {
+                protocol: "https".to_owned(),
+                host: "[".to_owned(),
+                host_type: None,
+                relying_party: None,
+                token_type: None,
+                signature_policy_index: None,
+            }],
+            signature_policies: vec![],
+        };
+
+        assert!(get_endpoint("https://example.com", &response).is_none());
+    }
+
+    #[test]
+    fn hostless_url_does_not_panic_or_match() {
+        let response = TitleMgtResponse {
+            end_points: vec![TitleMgtEndPoint {
+                protocol: "file".to_owned(),
+                host: "*".to_owned(),
+                host_type: None,
+                relying_party: None,
+                token_type: None,
+                signature_policy_index: None,
+            }],
+            signature_policies: vec![],
+        };
+
+        assert!(get_endpoint("file:///tmp/package", &response).is_none());
     }
 }

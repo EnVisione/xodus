@@ -123,31 +123,67 @@ pub async fn run(
     let mut lfiles: HashMap<String, SegmentFile> = HashMap::new();
 
     let out: &Path = Path::new(&source);
-    let out_absolute = std::fs::canonicalize(out).unwrap();
+    let out_absolute = match std::fs::canonicalize(out) {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("failed to resolve source path {}: {err}", out.display());
+            return ExitCode::FAILURE;
+        }
+    };
     let final_path = out.join(".xodus-streaming.msixvc");
 
-    let mut file = OpenOptions::new()
+    let mut file = match OpenOptions::new()
         .read(true)
         .open(final_path.to_owned())
         .await
-        .unwrap();
+    {
+        Ok(file) => file,
+        Err(err) => {
+            eprintln!("failed to open {}: {err}", final_path.display());
+            return ExitCode::FAILURE;
+        }
+    };
 
-    let xvd = XvdFile::parse(&mut file).await.expect("no err");
+    let xvd = match XvdFile::parse(&mut file).await {
+        Ok(xvd) => xvd,
+        Err(err) => {
+            eprintln!("failed to parse {}: {err}", final_path.display());
+            return ExitCode::FAILURE;
+        }
+    };
 
-    let files = xvd.parse_user_package_files(&mut file).await.expect("ok");
+    let files = match xvd.parse_user_package_files(&mut file).await {
+        Ok(files) => files,
+        Err(err) => {
+            eprintln!("failed to parse package files: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
     for (k, v) in &files {
         if k == "SegmentMetadata.bin" {
-            let sfiles = xvd.parse_segment_metadata(&mut file, v).await.expect("ok");
+            let sfiles = match xvd.parse_segment_metadata(&mut file, v).await {
+                Ok(sfiles) => sfiles,
+                Err(err) => {
+                    eprintln!("failed to parse segment metadata: {err}");
+                    return ExitCode::FAILURE;
+                }
+            };
             lfiles = sfiles;
         }
     }
 
     // Classic files
     if lfiles.is_empty() {
-        let sfiles = xvd
+        let sfiles = match xvd
             .parse_ntfs_segment_metadata(&mut file, !lfiles.is_empty())
             .await
-            .expect("ok");
+        {
+            Ok(sfiles) => sfiles,
+            Err(err) => {
+                eprintln!("failed to parse ntfs segment metadata: {err}");
+                return ExitCode::FAILURE;
+            }
+        };
         for (n, sfile) in &sfiles {
             if sfile.length.div_ceil(PAGE_SIZE as u64) as usize != sfile.data_hashs.len() {
                 println!("{}: {} {}", n, sfile.offset, sfile.length);
@@ -167,7 +203,13 @@ pub async fn run(
         eprintln!("{}", err);
         return ExitCode::FAILURE;
     }
-    let (key, game_splicense) = license.unwrap();
+    let (key, game_splicense) = match license {
+        Ok(license) => license,
+        Err(err) => {
+            eprintln!("{}", err);
+            return ExitCode::FAILURE;
+        }
+    };
     if game_splicense.content_keys.len() != 1 {
         eprintln!(
             "unexpected number of content keys {}",
@@ -179,7 +221,13 @@ pub async fn run(
         return ExitCode::FAILURE;
     };
 
-    let full_key = content_key.unpack(&key).expect("failed to unpack");
+    let full_key = match content_key.unpack(&key) {
+        Ok(full_key) => full_key,
+        Err(err) => {
+            eprintln!("failed to unpack content key: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
 
     let mut fds = vec![];
 
@@ -189,21 +237,52 @@ pub async fn run(
         if !file.1.keep_encrypted {
             continue;
         }
-        let mut game_exe = File::from_std(make_temp_file(&mount_dir).unwrap());
+        let game_exe_file = match make_temp_file(&mount_dir) {
+            Ok(file) => file,
+            Err(err) => {
+                eprintln!("failed to create temporary executable file: {err}");
+                cleanup().await;
+                return ExitCode::FAILURE;
+            }
+        };
+        let mut game_exe = File::from_std(game_exe_file);
 
         let source_path = out.join(file.0.replace("\\", "/"));
 
-        let mut i = File::open(&source_path).await.unwrap();
+        let mut i = match File::open(&source_path).await {
+            Ok(file) => file,
+            Err(err) => {
+                eprintln!("failed to open {}: {err}", source_path.display());
+                cleanup().await;
+                return ExitCode::FAILURE;
+            }
+        };
 
-        xvd.mount_mem_fd(&mut i, &mut game_exe, file.1, *full_key, |_, _| {})
+        if let Err(err) = xvd
+            .mount_mem_fd(&mut i, &mut game_exe, file.1, *full_key, |_, _| {})
             .await
-            .unwrap();
+        {
+            eprintln!("failed to mount {}: {err}", source_path.display());
+            cleanup().await;
+            return ExitCode::FAILURE;
+        }
 
         let stdf = game_exe.into_std().await;
 
-        let mut flags = fcntl_getfd(stdf.as_fd()).unwrap();
+        let mut flags = match fcntl_getfd(stdf.as_fd()) {
+            Ok(flags) => flags,
+            Err(err) => {
+                eprintln!("failed to read executable descriptor flags: {err}");
+                cleanup().await;
+                return ExitCode::FAILURE;
+            }
+        };
         flags.remove(FdFlags::CLOEXEC);
-        fcntl_setfd(stdf.as_fd(), flags).unwrap();
+        if let Err(err) = fcntl_setfd(stdf.as_fd(), flags) {
+            eprintln!("failed to update executable descriptor flags: {err}");
+            cleanup().await;
+            return ExitCode::FAILURE;
+        }
 
         fds.push((file.0, stdf.into_raw_fd()));
     }
@@ -237,22 +316,45 @@ pub async fn run(
         return ExitCode::FAILURE;
     };
 
-    let mut wn = Command::new(wine)
+    let mut wn = match Command::new(wine)
         .arg(nt_entry)
         .env("WINE_DLL_FILE_MAP", env_value)
         .spawn()
-        .unwrap();
+    {
+        Ok(process) => process,
+        Err(err) => {
+            eprintln!("failed to start wine process: {err}");
+            cleanup().await;
+            return ExitCode::FAILURE;
+        }
+    };
 
-    let pid = wn.id().unwrap();
+    let Some(pid) = wn.id() else {
+        eprintln!("wine process did not expose a process id");
+        let _ = wn.kill().await;
+        cleanup().await;
+        return ExitCode::FAILURE;
+    };
 
-    ctrlc::set_handler(move || {
+    if let Err(err) = ctrlc::set_handler(move || {
         if pid > 0 {
             let _ = kill(Pid::from_raw(pid as i32), Signal::SIGINT);
         }
-    })
-    .expect("failed to install Ctrl+C handler");
+    }) {
+        eprintln!("failed to install Ctrl+C handler: {err}");
+        let _ = wn.kill().await;
+        cleanup().await;
+        return ExitCode::FAILURE;
+    }
 
-    let status = wn.wait().await.unwrap();
+    let status = match wn.wait().await {
+        Ok(status) => status,
+        Err(err) => {
+            eprintln!("failed to wait for wine process: {err}");
+            cleanup().await;
+            return ExitCode::FAILURE;
+        }
+    };
 
     cleanup().await;
 

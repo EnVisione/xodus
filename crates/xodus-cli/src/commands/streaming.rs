@@ -178,6 +178,14 @@ struct StreamingRun<'a> {
     tx: &'a Sender<ProgressEvent>,
 }
 
+fn progress_style() -> ProgressStyle {
+    ProgressStyle::with_template(
+        "{msg:30!} {bytes:>12}/{total_bytes:>12} {bytes_per_sec:>12} [{bar:40.cyan/blue}] {percent:>3}%",
+    )
+    .unwrap_or_else(|_| ProgressStyle::default_bar())
+    .progress_chars("#>-")
+}
+
 pub async fn run(
     client: &reqwest::Client,
     tokens: &TokenManager,
@@ -260,22 +268,22 @@ pub async fn run(
                 eprintln!("No .msixvc file found");
                 return ExitCode::FAILURE;
             };
-            format!(
-                "{}{}",
-                file.cdn_root_paths.first().unwrap(),
-                file.relative_url
-            )
+            let Some(cdn_root) = file.cdn_root_paths.first() else {
+                eprintln!(".msixvc file has no cdn root path");
+                return ExitCode::FAILURE;
+            };
+            format!("{}{}", cdn_root, file.relative_url)
         };
         let url = &vurl;
-        let mut pos = 0;
+        let mut pos: u64 = 0;
         let http_file = streaming::HttpRead::open(
             client.clone(),
             url,
-            Some(|c, _| {
+            Some(|c: u64, _| {
                 if tx
                     .try_send(ProgressEvent::Advanced {
                         id: usize::MAX,
-                        delta: c - pos,
+                        delta: c.saturating_sub(pos),
                     })
                     .is_ok()
                 {
@@ -283,8 +291,14 @@ pub async fn run(
                 }
             }),
         )
-        .await
-        .expect("ok");
+        .await;
+        let http_file = match http_file {
+            Ok(file) => file,
+            Err(err) => {
+                eprintln!("failed to open remote package: {err}");
+                return ExitCode::FAILURE;
+            }
+        };
         let l = http_file.len();
 
         return if run_cli_reader(
@@ -322,10 +336,8 @@ where
 {
     tokio::spawn(async move {
         let multi_progress = MultiProgress::new();
-        let total_progess = multi_progress.add(ProgressBar::new(length).with_style(
-            ProgressStyle::with_template("{msg:30!} {bytes:>12}/{total_bytes:>12} {bytes_per_sec:>12} [{bar:40.cyan/blue}] {percent:>3}%").unwrap()
-            .progress_chars("#>-")
-        ));
+        let total_progess =
+            multi_progress.add(ProgressBar::new(length).with_style(progress_style()));
 
         total_progess.set_message("Initializing");
         let mut bars: HashMap<usize, ProgressBar> = HashMap::new();
@@ -333,10 +345,8 @@ where
         while let Some(event) = rx.recv().await {
             match event {
                 ProgressEvent::Started { id, name, total } => {
-                    let cur_progess = multi_progress.add(ProgressBar::new(total).with_style(
-                        ProgressStyle::with_template("{msg:30!} {bytes:>12}/{total_bytes:>12} {bytes_per_sec:>12} [{bar:40.cyan/blue}] {percent:>3}%").unwrap()
-                        .progress_chars("#>-")
-                    ));
+                    let cur_progess =
+                        multi_progress.add(ProgressBar::new(total).with_style(progress_style()));
                     cur_progess.set_message(name);
                     bars.insert(id, cur_progess);
                 }
@@ -390,23 +400,40 @@ where
     let cache_path = out.join(".xodus-streaming-tmp.msixvc");
     let final_path = out.join(".xodus-streaming.msixvc");
 
-    let mut remote_file = streaming::PrefixCacheFile::new(reader, l, cache_path.clone())
-        .await
-        .expect("no err");
-    let remote_xvd = XvdFile::parse(&mut remote_file).await.expect("no err");
+    let mut remote_file = match streaming::PrefixCacheFile::new(reader, l, cache_path.clone()).await
+    {
+        Ok(file) => file,
+        Err(err) => {
+            eprintln!("failed to create package cache: {err}");
+            return false;
+        }
+    };
+    let remote_xvd = match XvdFile::parse(&mut remote_file).await {
+        Ok(xvd) => xvd,
+        Err(err) => {
+            eprintln!("failed to parse remote package: {err}");
+            return false;
+        }
+    };
     let mut rfiles: HashMap<String, SegmentFile> = HashMap::new();
     let mut lfiles: HashMap<String, SegmentFile> = HashMap::new();
 
-    let files = remote_xvd
-        .parse_user_package_files(&mut remote_file)
-        .await
-        .expect("ok");
+    let files = match remote_xvd.parse_user_package_files(&mut remote_file).await {
+        Ok(files) => files,
+        Err(err) => {
+            eprintln!("failed to parse remote package files: {err}");
+            return false;
+        }
+    };
     for (k, v) in &files {
         if k == "SegmentMetadata.bin" {
-            let sfiles = remote_xvd
-                .parse_segment_metadata(&mut remote_file, v)
-                .await
-                .expect("ok");
+            let sfiles = match remote_xvd.parse_segment_metadata(&mut remote_file, v).await {
+                Ok(sfiles) => sfiles,
+                Err(err) => {
+                    eprintln!("failed to parse remote segment metadata: {err}");
+                    return false;
+                }
+            };
             rfiles = sfiles;
         }
     }
@@ -417,10 +444,16 @@ where
         })
         .await
         .ok();
-        let sfiles = remote_xvd
+        let sfiles = match remote_xvd
             .parse_ntfs_segment_metadata(&mut remote_file, !rfiles.is_empty())
             .await
-            .expect("ok");
+        {
+            Ok(sfiles) => sfiles,
+            Err(err) => {
+                eprintln!("failed to parse remote ntfs metadata: {err}");
+                return false;
+            }
+        };
         rfiles.extend(sfiles);
     }
 
@@ -431,21 +464,33 @@ where
         .ok();
 
     if let Some(mut file) = file {
-        let xvd = XvdFile::parse(&mut file).await.expect("no err");
+        match XvdFile::parse(&mut file).await {
+            Ok(xvd) => {
+                match xvd.parse_user_package_files(&mut file).await {
+                    Ok(files) => {
+                        for (k, v) in &files {
+                            if k == "SegmentMetadata.bin" {
+                                match xvd.parse_segment_metadata(&mut file, v).await {
+                                    Ok(sfiles) => lfiles = sfiles,
+                                    Err(err) => {
+                                        eprintln!("ignoring invalid local segment metadata: {err}");
+                                        lfiles.clear();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(err) => eprintln!("ignoring invalid local package files: {err}"),
+                }
 
-        let files = xvd.parse_user_package_files(&mut file).await.expect("ok");
-        for (k, v) in &files {
-            if k == "SegmentMetadata.bin" {
-                let sfiles = xvd.parse_segment_metadata(&mut file, v).await.expect("ok");
-                lfiles = sfiles;
+                if let Ok(sfiles) = xvd
+                    .parse_ntfs_segment_metadata(&mut file, !lfiles.is_empty())
+                    .await
+                {
+                    lfiles.extend(sfiles);
+                }
             }
-        }
-
-        if let Ok(sfiles) = xvd
-            .parse_ntfs_segment_metadata(&mut file, !lfiles.is_empty())
-            .await
-        {
-            lfiles.extend(sfiles);
+            Err(err) => eprintln!("ignoring invalid local package cache: {err}"),
         }
     }
 
@@ -460,7 +505,13 @@ where
         eprintln!("{}", err);
         return false;
     }
-    let (key, game_splicense) = license.unwrap();
+    let (key, game_splicense) = match license {
+        Ok(license) => license,
+        Err(err) => {
+            eprintln!("{}", err);
+            return false;
+        }
+    };
     if game_splicense.content_keys.len() != 1 {
         eprintln!(
             "unexpected number of content keys {}",
@@ -472,9 +523,15 @@ where
         return false;
     };
 
-    let full_key = content_key.unpack(&key).expect("failed to unpack");
+    let full_key = match content_key.unpack(&key) {
+        Ok(full_key) => full_key,
+        Err(err) => {
+            eprintln!("failed to unpack content key: {err}");
+            return false;
+        }
+    };
 
-    let total_size = rfiles
+    let Some(total_size) = rfiles
         .iter()
         .filter(|(k, v1)| {
             if let Some(v2) = lfiles.get(*k) {
@@ -483,9 +540,11 @@ where
                 true
             }
         })
-        .map(|(_, v)| v.length)
-        .reduce(|old, c| old + c)
-        .unwrap_or(0);
+        .try_fold(0_u64, |total, (_, v)| total.checked_add(v.length))
+    else {
+        eprintln!("package size exceeds supported range");
+        return false;
+    };
 
     let required_free_space = total_size;
     let available_free_space = match available_space(out) {
@@ -564,13 +623,13 @@ where
                     }
                 };
                 let mut fout = File::from_std(output);
-                let mut lp = 0;
+                let mut lp: u64 = 0;
 
-                let progress = |pos, _| {
+                let progress = |pos: u64, _| {
                     if tx
                         .try_send(ProgressEvent::Advanced {
                             id,
-                            delta: pos - lp,
+                            delta: pos.saturating_sub(lp),
                         })
                         .is_ok()
                     {
@@ -578,8 +637,9 @@ where
                     }
                 };
                 let path = job.name.to_owned();
-                let shown = if path.len() > 30 {
-                    format!("...{}", &path[path.len() - 27..])
+                let shown = if path.chars().count() > 30 {
+                    let suffix = path.chars().rev().take(27).collect::<String>();
+                    format!("...{}", suffix.chars().rev().collect::<String>())
                 } else {
                     path.clone()
                 };
@@ -592,14 +652,25 @@ where
                 .ok();
 
                 if let Some(fpath) = url.strip_prefix("file://") {
-                    let mut i = File::open(&fpath).await.unwrap();
-                    remote_xvd_ref
+                    let mut i = match File::open(&fpath).await {
+                        Ok(file) => file,
+                        Err(err) => {
+                            eprintln!("failed to open {fpath}: {err}");
+                            write_failed.store(true, Ordering::Relaxed);
+                            return;
+                        }
+                    };
+                    if let Err(err) = remote_xvd_ref
                         .extract_file(&mut i, &mut fout, &job.content, *full_key, progress)
                         .await
-                        .expect("msg");
+                    {
+                        eprintln!("failed to extract {}: {err}", job.name);
+                        write_failed.store(true, Ordering::Relaxed);
+                        return;
+                    }
                     tx.send(ProgressEvent::Finished { id }).await.ok();
                 } else {
-                    remote_xvd_ref
+                    if let Err(err) = remote_xvd_ref
                         .download_file_http(
                             &client,
                             url,
@@ -609,7 +680,11 @@ where
                             progress,
                         )
                         .await
-                        .expect("msg");
+                    {
+                        eprintln!("failed to download {}: {err}", job.name);
+                        write_failed.store(true, Ordering::Relaxed);
+                        return;
+                    }
                     tx.send(ProgressEvent::Finished { id }).await.ok();
                 }
             }
@@ -621,7 +696,10 @@ where
     }
 
     std::fs::remove_file(&final_path).ok();
-    std::fs::rename(&cache_path, &final_path).expect("ok");
+    if let Err(err) = std::fs::rename(&cache_path, &final_path) {
+        eprintln!("failed to promote package cache: {err}");
+        return false;
+    }
     true
 }
 
