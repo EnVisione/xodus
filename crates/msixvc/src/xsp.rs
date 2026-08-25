@@ -268,4 +268,42 @@ mod tests {
             }
         ));
     }
+
+    #[tokio::test]
+    async fn rejects_new_data_block_range_overflow_before_returning_entries() {
+        let mut overflowing = VALID_XSP.to_vec();
+        overflowing[860 + 8..860 + 12].copy_from_slice(&u32::MAX.to_le_bytes());
+
+        let error = parse_error(
+            parse(&overflowing).await,
+            "overflowing new data range must fail",
+        );
+
+        assert!(matches!(
+            error,
+            XspFileParseError::Record(XspPatchRecordParseError::BlockRangeOverflow {
+                start: u32::MAX,
+                count: 1,
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn rejects_copy_data_source_range_overflow_before_returning_entries() {
+        let mut overflowing = VALID_XSP.to_vec();
+        overflowing[860 + 16..860 + 20].copy_from_slice(&u32::MAX.to_le_bytes());
+
+        let error = parse_error(
+            parse(&overflowing).await,
+            "overflowing copy source range must fail",
+        );
+
+        assert!(matches!(
+            error,
+            XspFileParseError::Record(XspPatchRecordParseError::BlockRangeOverflow {
+                start: u32::MAX,
+                count: 1,
+            })
+        ));
+    }
 }

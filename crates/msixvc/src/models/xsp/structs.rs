@@ -109,6 +109,8 @@ pub enum XspPatchRecord {
 pub enum XspPatchRecordParseError {
     #[error("Unknown patch record flag {0:X}")]
     UnknownFlag(u32),
+    #[error("patch block range overflows: start {start}, count {count}")]
+    BlockRangeOverflow { start: u32, count: u32 },
 }
 
 impl BinaryTryParse for XspPatchRecord {
@@ -126,15 +128,37 @@ impl BinaryTryParse for XspPatchRecord {
 
         Ok((
             match flag {
-                0 => Self::NewData {
-                    block_number: target_offset,
-                    block_count,
-                },
-                0x88000000 => Self::CopyData {
-                    old_block_number: source_offset,
-                    new_block_number: target_offset,
-                    block_count,
-                },
+                0 => {
+                    target_offset.checked_add(block_count).ok_or(
+                        Self::Error::BlockRangeOverflow {
+                            start: target_offset,
+                            count: block_count,
+                        },
+                    )?;
+                    Self::NewData {
+                        block_number: target_offset,
+                        block_count,
+                    }
+                }
+                0x88000000 => {
+                    source_offset.checked_add(block_count).ok_or(
+                        Self::Error::BlockRangeOverflow {
+                            start: source_offset,
+                            count: block_count,
+                        },
+                    )?;
+                    target_offset.checked_add(block_count).ok_or(
+                        Self::Error::BlockRangeOverflow {
+                            start: target_offset,
+                            count: block_count,
+                        },
+                    )?;
+                    Self::CopyData {
+                        old_block_number: source_offset,
+                        new_block_number: target_offset,
+                        block_count,
+                    }
+                }
                 _ => return Err(Self::Error::UnknownFlag(flag)),
             },
             r,
