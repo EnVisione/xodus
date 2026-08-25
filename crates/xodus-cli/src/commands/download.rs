@@ -1,3 +1,4 @@
+use std::io;
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -11,6 +12,36 @@ use xodus::tokens::TokenManager;
 
 use crate::commands::streaming::open_package_output;
 use crate::package::{get_content_id, get_packages, package_download_urls};
+
+fn validate_declared_download_length(expected: u64, declared: Option<u64>) -> io::Result<()> {
+    if let Some(declared) = declared
+        && declared != expected
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("package response length {declared} does not match expected size {expected}"),
+        ));
+    }
+    Ok(())
+}
+
+fn checked_download_total(current: u64, chunk: usize, expected: u64) -> io::Result<u64> {
+    let next = current
+        .checked_add(u64::try_from(chunk).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "package chunk length is too large",
+            )
+        })?)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "package byte count overflow"))?;
+    if next > expected {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("package response exceeds expected size {expected}"),
+        ));
+    }
+    Ok(next)
+}
 
 pub async fn run(
     client: &reqwest::Client,
@@ -113,6 +144,10 @@ pub async fn run(
             eprintln!("failed to request {}: {error}", file.file_name);
             return ExitCode::FAILURE;
         };
+        if let Err(error) = validate_declared_download_length(file_size, res.content_length()) {
+            eprintln!("refusing {}: {error}", file.file_name);
+            return ExitCode::FAILURE;
+        }
         let output = match open_package_output(Path::new("."), &file.file_name) {
             Ok(file) => file,
             Err(error) => {
@@ -122,6 +157,7 @@ pub async fn run(
         };
         let mut output = tokio::fs::File::from_std(output);
         let mut stream = res.bytes_stream();
+        let mut downloaded = 0_u64;
 
         while let Some(chunk) = stream.next().await {
             let chk = match chunk {
@@ -131,11 +167,26 @@ pub async fn run(
                     return ExitCode::FAILURE;
                 }
             };
+            downloaded = match checked_download_total(downloaded, chk.len(), file_size) {
+                Ok(total) => total,
+                Err(error) => {
+                    eprintln!("refusing {}: {error}", file.file_name);
+                    return ExitCode::FAILURE;
+                }
+            };
             if let Err(error) = output.write_all(&chk).await {
                 eprintln!("failed to write {}: {error}", file.file_name);
                 return ExitCode::FAILURE;
             }
             progress_bar.inc(chk.len() as u64);
+        }
+
+        if downloaded != file_size {
+            eprintln!(
+                "refusing {}: received {downloaded} bytes, expected {file_size}",
+                file.file_name
+            );
+            return ExitCode::FAILURE;
         }
 
         progress_bar.finish();
@@ -148,6 +199,7 @@ pub async fn run(
 
 #[cfg(test)]
 mod tests {
+    use super::{checked_download_total, validate_declared_download_length};
     use crate::package::package_download_urls;
 
     #[test]
@@ -198,5 +250,19 @@ mod tests {
                 "https://third.example/file.xvd"
             ]
         );
+    }
+
+    #[test]
+    fn download_length_validation_rejects_declared_mismatch() {
+        validate_declared_download_length(10, Some(10)).expect("matching length");
+        validate_declared_download_length(10, None).expect("unknown length");
+        assert!(validate_declared_download_length(10, Some(9)).is_err());
+    }
+
+    #[test]
+    fn download_total_validation_rejects_overrun_and_overflow() {
+        assert_eq!(checked_download_total(4, 6, 10).unwrap(), 10);
+        assert!(checked_download_total(4, 7, 10).is_err());
+        assert!(checked_download_total(u64::MAX, 1, u64::MAX).is_err());
     }
 }
