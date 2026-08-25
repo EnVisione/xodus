@@ -1,7 +1,9 @@
 use msixvc_common::parse::BinaryTryParse;
 use msixvc_common::parse::structs::Version;
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, BufReader};
+use tokio::io::{
+    AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt, BufReader,
+};
 use uuid::Uuid;
 
 use crate::models::xsp::{
@@ -12,6 +14,7 @@ const XSP_HEADER_SIZE: u64 = 860;
 const XSP_PATCH_RECORD_SIZE: u64 = 16;
 const MAX_XSP_PATCH_RECORDS: u32 = 1_048_576;
 const MAX_IN_MEMORY_APPLY_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_STREAM_BLOCK_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy)]
 pub struct XspBaseState<'a> {
@@ -112,6 +115,24 @@ pub enum XspUpdateApplyError {
     BlockHashMismatch { phase: XspHashPhase, block: usize },
 }
 
+#[derive(thiserror::Error, Debug)]
+pub enum XspStreamApplyError {
+    #[error(transparent)]
+    Validation(#[from] XspUpdateValidationError),
+    #[error("XSP stream block size {size} exceeds the supported limit {limit}")]
+    BlockSizeTooLarge { size: u64, limit: u64 },
+    #[error("XSP source block {block} ended before the declared block size")]
+    SourceBlockTooShort { block: u64 },
+    #[error("XSP new data block {block} ended before the declared block size")]
+    NewDataBlockTooShort { block: u64 },
+    #[error("XSP {phase} block hash mismatch at block {block}")]
+    BlockHashMismatch { phase: XspHashPhase, block: u64 },
+    #[error("XSP stream offset cannot be represented")]
+    OffsetOverflow,
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum XspHashPhase {
     Source,
@@ -188,6 +209,164 @@ impl XspFile {
         new_data: &[u8],
     ) -> Result<Vec<u8>, XspUpdateApplyError> {
         self.apply_transition_to_bytes(base, input, base_bytes, new_data, true)
+    }
+
+    pub async fn apply_update_stream<Base, NewData, Output>(
+        &self,
+        base: &mut Base,
+        new_data: &mut NewData,
+        output: &mut Output,
+        base_state: XspBaseState<'_>,
+        input: XspUpdateInput<'_>,
+    ) -> Result<(), XspStreamApplyError>
+    where
+        Base: AsyncRead + AsyncSeek + Unpin,
+        NewData: AsyncRead + Unpin,
+        Output: AsyncWrite + Unpin,
+    {
+        self.apply_transition_stream(base, new_data, output, base_state, input, false)
+            .await
+    }
+
+    pub async fn apply_rollback_stream<Base, NewData, Output>(
+        &self,
+        base: &mut Base,
+        new_data: &mut NewData,
+        output: &mut Output,
+        base_state: XspBaseState<'_>,
+        input: XspUpdateInput<'_>,
+    ) -> Result<(), XspStreamApplyError>
+    where
+        Base: AsyncRead + AsyncSeek + Unpin,
+        NewData: AsyncRead + Unpin,
+        Output: AsyncWrite + Unpin,
+    {
+        self.apply_transition_stream(base, new_data, output, base_state, input, true)
+            .await
+    }
+
+    async fn apply_transition_stream<Base, NewData, Output>(
+        &self,
+        base: &mut Base,
+        new_data: &mut NewData,
+        output: &mut Output,
+        base_state: XspBaseState<'_>,
+        input: XspUpdateInput<'_>,
+        rollback: bool,
+    ) -> Result<(), XspStreamApplyError>
+    where
+        Base: AsyncRead + AsyncSeek + Unpin,
+        NewData: AsyncRead + Unpin,
+        Output: AsyncWrite + Unpin,
+    {
+        let validated = if rollback {
+            self.validate_rollback(base_state, input)?
+        } else {
+            self.validate_update(base_state, input)?
+        };
+        if validated.block_size > MAX_STREAM_BLOCK_BYTES {
+            return Err(XspStreamApplyError::BlockSizeTooLarge {
+                size: validated.block_size,
+                limit: MAX_STREAM_BLOCK_BYTES,
+            });
+        }
+        let block_size = usize::try_from(validated.block_size)
+            .map_err(|_| XspStreamApplyError::OffsetOverflow)?;
+        let mut block = vec![0_u8; block_size];
+
+        base.seek(std::io::SeekFrom::Start(0)).await?;
+        for (index, expected_hash) in base_state.block_hashes.iter().enumerate() {
+            let block_index =
+                u64::try_from(index).map_err(|_| XspStreamApplyError::OffsetOverflow)?;
+            read_stream_block(base, &mut block, XspHashPhase::Source, block_index).await?;
+            verify_stream_block(&block, expected_hash, XspHashPhase::Source, block_index)?;
+        }
+        base.seek(std::io::SeekFrom::Start(0)).await?;
+
+        let mut entry_index = 0_usize;
+        let mut new_data_block = 0_u64;
+        for target_block in 0..validated.target_blocks {
+            block.fill(0);
+            while let Some(entry) = self.entries.get(entry_index) {
+                let end = match entry {
+                    XspPatchRecord::NewData {
+                        block_number,
+                        block_count,
+                    } => u64::from(*block_number)
+                        .checked_add(u64::from(*block_count))
+                        .ok_or(XspStreamApplyError::OffsetOverflow)?,
+                    XspPatchRecord::CopyData {
+                        new_block_number,
+                        block_count,
+                        ..
+                    } => u64::from(*new_block_number)
+                        .checked_add(u64::from(*block_count))
+                        .ok_or(XspStreamApplyError::OffsetOverflow)?,
+                };
+                if target_block < end {
+                    break;
+                }
+                entry_index = entry_index
+                    .checked_add(1)
+                    .ok_or(XspStreamApplyError::OffsetOverflow)?;
+            }
+
+            if let Some(entry) = self.entries.get(entry_index) {
+                let (target_start, source_start) = match entry {
+                    XspPatchRecord::NewData { block_number, .. } => {
+                        (u64::from(*block_number), None)
+                    }
+                    XspPatchRecord::CopyData {
+                        old_block_number,
+                        new_block_number,
+                        ..
+                    } => (
+                        u64::from(*new_block_number),
+                        Some(u64::from(*old_block_number)),
+                    ),
+                };
+                if target_block >= target_start {
+                    let within_entry = target_block
+                        .checked_sub(target_start)
+                        .ok_or(XspStreamApplyError::OffsetOverflow)?;
+                    if let Some(source_start) = source_start {
+                        let source_block = source_start
+                            .checked_add(within_entry)
+                            .ok_or(XspStreamApplyError::OffsetOverflow)?;
+                        let source_offset = source_block
+                            .checked_mul(validated.block_size)
+                            .ok_or(XspStreamApplyError::OffsetOverflow)?;
+                        base.seek(std::io::SeekFrom::Start(source_offset)).await?;
+                        read_stream_block(base, &mut block, XspHashPhase::Source, source_block)
+                            .await?;
+                    } else {
+                        read_stream_block(
+                            new_data,
+                            &mut block,
+                            XspHashPhase::Target,
+                            new_data_block,
+                        )
+                        .await?;
+                        new_data_block = new_data_block
+                            .checked_add(1)
+                            .ok_or(XspStreamApplyError::OffsetOverflow)?;
+                    }
+                }
+            } else {
+                block.fill(0);
+            }
+
+            let target_index =
+                usize::try_from(target_block).map_err(|_| XspStreamApplyError::OffsetOverflow)?;
+            let expected_hash = input
+                .target_hashes
+                .get(target_index)
+                .ok_or(XspStreamApplyError::OffsetOverflow)?;
+            verify_stream_block(&block, expected_hash, XspHashPhase::Target, target_block)?;
+            output.write_all(&block).await?;
+        }
+        output.flush().await?;
+        Ok(())
     }
 
     fn validate_transition(
@@ -469,6 +648,45 @@ fn verify_block_hashes(
     Ok(())
 }
 
+async fn read_stream_block<Reader>(
+    reader: &mut Reader,
+    block: &mut [u8],
+    phase: XspHashPhase,
+    block_index: u64,
+) -> Result<(), XspStreamApplyError>
+where
+    Reader: AsyncRead + Unpin,
+{
+    match reader.read_exact(block).await {
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => match phase {
+            XspHashPhase::Source => {
+                Err(XspStreamApplyError::SourceBlockTooShort { block: block_index })
+            }
+            XspHashPhase::Target => {
+                Err(XspStreamApplyError::NewDataBlockTooShort { block: block_index })
+            }
+        },
+        Err(error) => Err(XspStreamApplyError::Io(error)),
+    }
+}
+
+fn verify_stream_block(
+    block: &[u8],
+    expected: &[u8; 20],
+    phase: XspHashPhase,
+    block_index: u64,
+) -> Result<(), XspStreamApplyError> {
+    let digest = Sha256::digest(block);
+    if digest[..20] != expected[..] {
+        return Err(XspStreamApplyError::BlockHashMismatch {
+            phase,
+            block: block_index,
+        });
+    }
+    Ok(())
+}
+
 impl XspFile {
     pub async fn parse_file<Reader>(file: Reader) -> Result<Self, XspFileParseError>
     where
@@ -536,11 +754,11 @@ mod tests {
         task::{Context, Poll},
     };
 
-    use tokio::io::{AsyncRead, AsyncSeek, ReadBuf};
+    use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf};
 
     use super::{
         MAX_XSP_PATCH_RECORDS, XspBaseState, XspFile, XspFileParseError, XspPatchRecord,
-        XspUpdateApplyError, XspUpdateInput,
+        XspStreamApplyError, XspUpdateApplyError, XspUpdateInput,
     };
     use crate::models::xsp::{XspHeaderParseError, XspPatchRecordParseError};
     use sha2::{Digest, Sha256};
@@ -591,6 +809,27 @@ mod tests {
             _cx: &mut Context<'_>,
         ) -> Poll<std::io::Result<u64>> {
             Poll::Ready(Ok(self.0.position()))
+        }
+    }
+
+    struct TestWriter(Vec<u8>);
+
+    impl AsyncWrite for TestWriter {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            bytes: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            self.0.extend_from_slice(bytes);
+            Poll::Ready(Ok(bytes.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
         }
     }
 
@@ -681,6 +920,118 @@ mod tests {
             .expect("valid update should apply");
 
         assert_eq!(output, b"new!base");
+    }
+
+    #[tokio::test]
+    async fn applies_stream_update_with_source_and_target_hashes() {
+        let xsp = parse(VALID_XSP).await.expect("valid synthetic XSP fixture");
+        let base_hashes = [hash20(b"base")];
+        let target_hashes = [hash20(b"new!"), hash20(b"base")];
+        let base = XspBaseState {
+            content_id: xsp.header.content_id,
+            version: xsp.header.upgrade_from_version,
+            block_hashes: &base_hashes,
+        };
+        let input = XspUpdateInput {
+            expected_source_hashes: &base_hashes,
+            target_hashes: &target_hashes,
+            available_space: u64::MAX,
+            block_size: 4,
+        };
+        let mut base_reader = TestReader::new(b"base");
+        let mut new_data_reader = TestReader::new(b"new!");
+        let mut output = TestWriter(Vec::new());
+
+        xsp.apply_update_stream(
+            &mut base_reader,
+            &mut new_data_reader,
+            &mut output,
+            base,
+            input,
+        )
+        .await
+        .expect("valid stream update should apply");
+
+        assert_eq!(output.0, b"new!base");
+    }
+
+    #[tokio::test]
+    async fn stream_update_rejects_truncated_source_before_output() {
+        let xsp = parse(VALID_XSP).await.expect("valid synthetic XSP fixture");
+        let base_hashes = [hash20(b"base")];
+        let target_hashes = [hash20(b"new!"), hash20(b"base")];
+        let base = XspBaseState {
+            content_id: xsp.header.content_id,
+            version: xsp.header.upgrade_from_version,
+            block_hashes: &base_hashes,
+        };
+        let input = XspUpdateInput {
+            expected_source_hashes: &base_hashes,
+            target_hashes: &target_hashes,
+            available_space: u64::MAX,
+            block_size: 4,
+        };
+        let mut base_reader = TestReader::new(b"bad");
+        let mut new_data_reader = TestReader::new(b"new!");
+        let mut output = TestWriter(Vec::new());
+
+        let error = xsp
+            .apply_update_stream(
+                &mut base_reader,
+                &mut new_data_reader,
+                &mut output,
+                base,
+                input,
+            )
+            .await
+            .expect_err("truncated source must fail before output");
+
+        assert!(matches!(
+            error,
+            XspStreamApplyError::SourceBlockTooShort { block: 0 }
+        ));
+        assert!(output.0.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stream_update_rejects_target_hash_mismatch_after_staging() {
+        let xsp = parse(VALID_XSP).await.expect("valid synthetic XSP fixture");
+        let base_hashes = [hash20(b"base")];
+        let wrong_target_hashes = [hash20(b"wrong"), hash20(b"base")];
+        let base = XspBaseState {
+            content_id: xsp.header.content_id,
+            version: xsp.header.upgrade_from_version,
+            block_hashes: &base_hashes,
+        };
+        let input = XspUpdateInput {
+            expected_source_hashes: &base_hashes,
+            target_hashes: &wrong_target_hashes,
+            available_space: u64::MAX,
+            block_size: 4,
+        };
+        let mut base_reader = TestReader::new(b"base");
+        let mut new_data_reader = TestReader::new(b"new!");
+        let mut output = TestWriter(Vec::new());
+
+        let error = xsp
+            .apply_update_stream(
+                &mut base_reader,
+                &mut new_data_reader,
+                &mut output,
+                base,
+                input,
+            )
+            .await
+            .expect_err("target hash mismatch must reject staged output");
+
+        assert!(matches!(
+            error,
+            XspStreamApplyError::BlockHashMismatch {
+                phase: super::XspHashPhase::Target,
+                block: 0
+            }
+        ));
+        assert!(output.0.is_empty());
     }
 
     #[tokio::test]
