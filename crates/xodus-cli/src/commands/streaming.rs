@@ -284,12 +284,24 @@ pub(crate) fn promotion_entries(specs: &[(String, String)]) -> io::Result<Vec<Pr
     promotion_entries_with_removals(specs, &[])
 }
 
+fn promotion_entry_capacity(specs_len: usize, removals_len: usize) -> io::Result<usize> {
+    specs_len
+        .checked_add(removals_len)
+        .ok_or_else(|| invalid_package_path("transaction entry count overflows"))
+}
+
 pub(crate) fn promotion_entries_with_removals(
     specs: &[(String, String)],
     removals: &[String],
 ) -> io::Result<Vec<PromotionEntry>> {
+    let capacity = promotion_entry_capacity(specs.len(), removals.len())?;
     let mut seen = HashSet::new();
-    let mut entries = Vec::with_capacity(specs.len() + removals.len());
+    seen.try_reserve(capacity)
+        .map_err(|_| invalid_package_path("transaction path index allocation failed"))?;
+    let mut entries = Vec::new();
+    entries
+        .try_reserve(capacity)
+        .map_err(|_| invalid_package_path("transaction entry allocation failed"))?;
     for (staged, final_name) in specs {
         let staged_relative = package_relative_path(staged)?;
         let final_relative = package_relative_path(final_name)?;
@@ -1364,8 +1376,8 @@ mod tests {
         acquire_transaction_lock, changed_jobs, new_transaction, open_package_input,
         open_package_output, package_path_components, promote_transaction,
         promote_transaction_with_interruption, promotion_entries, promotion_entries_with_removals,
-        read_bounded_transaction_journal, read_transaction_journal, recover_transaction_dir,
-        recover_transactions, write_transaction_journal,
+        promotion_entry_capacity, read_bounded_transaction_journal, read_transaction_journal,
+        recover_transaction_dir, recover_transactions, write_transaction_journal,
     };
 
     #[test]
@@ -1385,6 +1397,17 @@ mod tests {
         let result = read_bounded_transaction_journal(Cursor::new(b"12345"), 4);
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn transaction_entry_capacity_rejects_overflow() {
+        assert_eq!(promotion_entry_capacity(2, 3).unwrap(), 5);
+        assert_eq!(
+            promotion_entry_capacity(usize::MAX, 1)
+                .expect_err("transaction entry count overflow must fail")
+                .kind(),
+            std::io::ErrorKind::InvalidData
+        );
     }
 
     #[cfg(unix)]
