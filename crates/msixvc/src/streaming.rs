@@ -10,6 +10,7 @@ use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf};
 
 const UPSTREAM_READ_CHUNK_SIZE: usize = 64 * 1024;
+const HTTP_RETRY_LIMIT: usize = 3;
 
 type ByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>;
 type PendingHttpOpen = Pin<Box<dyn Future<Output = std::io::Result<OpenedHttpStream>> + Send>>;
@@ -131,6 +132,29 @@ fn validate_partial_http_response_extent(
     Ok(())
 }
 
+fn consume_http_retry(remaining: &mut usize) -> io::Result<()> {
+    if *remaining == 0 {
+        return Err(http_retry_budget_exhausted());
+    }
+    *remaining -= 1;
+    Ok(())
+}
+
+fn http_retry_budget_exhausted() -> io::Error {
+    Error::other("http stream retry budget exhausted")
+}
+
+fn premature_http_eof(position: u64, total: u64) -> io::Error {
+    Error::new(
+        ErrorKind::UnexpectedEof,
+        format!("http stream ended before declared total: {position} of {total} bytes"),
+    )
+}
+
+fn is_retryable_http_error(error: &io::Error) -> bool {
+    error.kind() == ErrorKind::Other
+}
+
 pub struct HttpRead<'t> {
     client: reqwest::Client,
     url: String,
@@ -140,6 +164,7 @@ pub struct HttpRead<'t> {
     active: Option<ActiveHttpStream>,
     pending_chunk: Option<Bytes>,
     pending_chunk_offset: usize,
+    retry_budget: usize,
     progress: Option<Box<dyn FnMut(u64, u64) + Send + 't>>,
 }
 
@@ -153,7 +178,16 @@ impl<'t> HttpRead<'t> {
         Progress: FnMut(u64, u64) + Send + 't,
     {
         let url = url.into();
-        let initial = open_http_stream(client.clone(), url.clone(), None).await?;
+        let mut retry_budget = HTTP_RETRY_LIMIT;
+        let initial = loop {
+            match open_http_stream(client.clone(), url.clone(), None).await {
+                Ok(initial) => break initial,
+                Err(error) if is_retryable_http_error(&error) => {
+                    consume_http_retry(&mut retry_budget)?;
+                }
+                Err(error) => return Err(error),
+            }
+        };
 
         Ok(Self {
             client,
@@ -168,6 +202,7 @@ impl<'t> HttpRead<'t> {
             }),
             pending_chunk: None,
             pending_chunk_offset: 0,
+            retry_budget,
             progress: progress.map(|v| Box::new(v) as Box<dyn FnMut(u64, u64) + Send + 't>),
         })
     }
@@ -281,6 +316,12 @@ impl<'t> AsyncRead for HttpRead<'t> {
             match self.as_mut().poll_open_if_needed(cx) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Ok(())) => {}
+                Poll::Ready(Err(err)) if is_retryable_http_error(&err) => {
+                    if consume_http_retry(&mut self.retry_budget).is_err() {
+                        return Poll::Ready(Err(http_retry_budget_exhausted()));
+                    }
+                    continue;
+                }
                 Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
             }
 
@@ -300,6 +341,12 @@ impl<'t> AsyncRead for HttpRead<'t> {
             match active.stream.as_mut().poll_next(cx) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Some(Ok(chunk))) => {
+                    if chunk.is_empty() {
+                        if consume_http_retry(&mut self.retry_budget).is_err() {
+                            return Poll::Ready(Err(premature_http_eof(self.pos, self.len)));
+                        }
+                        continue;
+                    }
                     let next_offset =
                         match checked_active_http_offset(active.next_offset, chunk.len(), total) {
                             Ok(next_offset) => next_offset,
@@ -316,12 +363,18 @@ impl<'t> AsyncRead for HttpRead<'t> {
                 }
                 Poll::Ready(Some(Err(_err))) => {
                     self.active = None;
+                    if consume_http_retry(&mut self.retry_budget).is_err() {
+                        return Poll::Ready(Err(http_retry_budget_exhausted()));
+                    }
                     continue;
                 }
                 Poll::Ready(None) => {
                     self.active = None;
                     if self.pos >= self.len {
                         return Poll::Ready(Ok(()));
+                    }
+                    if consume_http_retry(&mut self.retry_budget).is_err() {
+                        return Poll::Ready(Err(premature_http_eof(self.pos, self.len)));
                     }
                     continue;
                 }
@@ -1022,6 +1075,104 @@ mod tests {
             .expect("resumed response total and start must remain stable");
         super::validate_partial_http_response_extent(2, 3, 4, 2)
             .expect("resumed response range must remain bounded");
+    }
+
+    #[test]
+    fn http_read_retry_budget_is_bounded() {
+        let mut remaining = super::HTTP_RETRY_LIMIT;
+        for _ in 0..super::HTTP_RETRY_LIMIT {
+            super::consume_http_retry(&mut remaining).expect("retry must consume budget");
+        }
+
+        let error = super::consume_http_retry(&mut remaining)
+            .expect_err("retry budget exhaustion must fail");
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+    }
+
+    #[test]
+    fn http_read_distinguishes_retryable_and_invalid_errors() {
+        assert!(super::is_retryable_http_error(&io::Error::other(
+            "transport"
+        )));
+        assert!(!super::is_retryable_http_error(&io::Error::new(
+            io::ErrorKind::InvalidData,
+            "range mismatch",
+        )));
+    }
+
+    #[test]
+    fn http_read_reports_premature_eof() {
+        let error = super::premature_http_eof(3, 4);
+
+        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+        assert!(error.to_string().contains("3 of 4 bytes"));
+    }
+
+    #[tokio::test]
+    async fn http_read_returns_premature_eof_after_budget_exhaustion() {
+        let stream: super::ByteStream = Box::pin(futures_util::stream::iter(vec![Ok::<
+            bytes::Bytes,
+            reqwest::Error,
+        >(
+            bytes::Bytes::from_static(b"a"),
+        )]));
+        let mut reader = super::HttpRead {
+            client: reqwest::Client::new(),
+            url: "http://invalid.test/file".to_owned(),
+            len: 2,
+            pos: 0,
+            pending_open: None,
+            active: Some(super::ActiveHttpStream {
+                next_offset: 1,
+                end_offset: 2,
+                stream,
+            }),
+            pending_chunk: None,
+            pending_chunk_offset: 0,
+            retry_budget: 0,
+            progress: None,
+        };
+
+        let mut output = Vec::new();
+        let error = reader
+            .read_to_end(&mut output)
+            .await
+            .expect_err("premature eof must not retry without budget");
+
+        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+        assert_eq!(output, b"a");
+    }
+
+    #[tokio::test]
+    async fn http_read_bounds_empty_chunks_with_retry_budget() {
+        let stream: super::ByteStream = Box::pin(futures_util::stream::iter(vec![
+            Ok::<bytes::Bytes, reqwest::Error>(bytes::Bytes::new()),
+            Ok::<bytes::Bytes, reqwest::Error>(bytes::Bytes::from_static(b"a")),
+        ]));
+        let mut reader = super::HttpRead {
+            client: reqwest::Client::new(),
+            url: "http://invalid.test/file".to_owned(),
+            len: 1,
+            pos: 0,
+            pending_open: None,
+            active: Some(super::ActiveHttpStream {
+                next_offset: 0,
+                end_offset: 1,
+                stream,
+            }),
+            pending_chunk: None,
+            pending_chunk_offset: 0,
+            retry_budget: 1,
+            progress: None,
+        };
+
+        let mut output = Vec::new();
+        reader
+            .read_to_end(&mut output)
+            .await
+            .expect("a bounded empty chunk must not prevent later data");
+
+        assert_eq!(output, b"a");
     }
 
     async fn open_cached_reader<'t>(
