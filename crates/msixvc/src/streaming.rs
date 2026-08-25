@@ -1,5 +1,5 @@
 use std::future::Future;
-use std::io::{Error, ErrorKind, SeekFrom};
+use std::io::{self, Error, ErrorKind, SeekFrom};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -24,6 +24,111 @@ struct OpenedHttpStream {
     start: u64,
     len: u64,
     stream: ByteStream,
+}
+
+fn checked_pending_chunk_offset(
+    current: usize,
+    copied: usize,
+    chunk_len: usize,
+) -> io::Result<usize> {
+    let next = current
+        .checked_add(copied)
+        .ok_or_else(|| Error::new(ErrorKind::InvalidData, "pending chunk offset overflow"))?;
+    if next > chunk_len {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "pending chunk offset beyond chunk",
+        ));
+    }
+    Ok(next)
+}
+
+fn checked_http_position(current: u64, copied: usize, total: u64) -> io::Result<u64> {
+    let copied = u64::try_from(copied)
+        .map_err(|_| Error::new(ErrorKind::InvalidData, "copied length does not fit u64"))?;
+    let next = current
+        .checked_add(copied)
+        .ok_or_else(|| Error::new(ErrorKind::InvalidData, "logical position overflow"))?;
+    if next > total {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "logical position beyond declared total",
+        ));
+    }
+    Ok(next)
+}
+
+fn checked_active_http_offset(current: u64, received: usize, total: u64) -> io::Result<u64> {
+    let next = checked_http_position(current, received, total)?;
+    if next > total {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "received extent beyond declared total",
+        ));
+    }
+    Ok(next)
+}
+
+fn validate_active_http_offset(next: u64, end_offset: u64, total: u64) -> io::Result<()> {
+    if next > end_offset || next > total {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "active stream offset beyond declared extent",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_reopened_http_stream(
+    expected_start: u64,
+    expected_total: u64,
+    actual_start: u64,
+    actual_total: u64,
+) -> io::Result<()> {
+    if actual_start != expected_start {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            format!("range resume mismatch: expected {expected_start}, got {actual_start}"),
+        ));
+    }
+    if actual_total != expected_total {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            format!("range total mismatch: expected {expected_total}, got {actual_total}"),
+        ));
+    }
+    if actual_start > actual_total {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "range start beyond declared total",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_partial_http_response_extent(
+    actual_start: u64,
+    actual_end: u64,
+    total: u64,
+    content_length: u64,
+) -> io::Result<()> {
+    if actual_start > actual_end || actual_end >= total {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "response range beyond declared total",
+        ));
+    }
+    let range_length = actual_end
+        .checked_sub(actual_start)
+        .and_then(|length| length.checked_add(1))
+        .ok_or_else(|| Error::new(ErrorKind::InvalidData, "response range length overflow"))?;
+    if range_length != content_length {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "response content length does not match range",
+        ));
+    }
+    Ok(())
 }
 
 pub struct HttpRead<'t> {
@@ -102,7 +207,7 @@ impl<'t> HttpRead<'t> {
             Poll::Ready(result) => {
                 self.pending_open = None;
                 let opened = result?;
-                self.len = opened.len;
+                validate_reopened_http_stream(self.pos, self.len, opened.start, opened.len)?;
                 self.active = Some(ActiveHttpStream {
                     next_offset: opened.start,
                     end_offset: opened.len,
@@ -113,20 +218,29 @@ impl<'t> HttpRead<'t> {
         }
     }
 
-    fn copy_from_pending_chunk(&mut self, buf: &mut ReadBuf<'_>) -> usize {
+    fn copy_from_pending_chunk(&mut self, buf: &mut ReadBuf<'_>) -> io::Result<usize> {
         let Some(chunk) = self.pending_chunk.as_ref() else {
-            return 0;
+            return Ok(0);
         };
 
+        if self.pending_chunk_offset > chunk.len() {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "pending chunk offset beyond chunk",
+            ));
+        }
         let available = &chunk[self.pending_chunk_offset..];
         if available.is_empty() || buf.remaining() == 0 {
-            return 0;
+            return Ok(0);
         }
 
         let to_copy = available.len().min(buf.remaining());
+        let next_pending_offset =
+            checked_pending_chunk_offset(self.pending_chunk_offset, to_copy, chunk.len())?;
+        let next_position = checked_http_position(self.pos, to_copy, self.len)?;
         buf.put_slice(&available[..to_copy]);
-        self.pending_chunk_offset += to_copy;
-        self.pos += to_copy as u64;
+        self.pending_chunk_offset = next_pending_offset;
+        self.pos = next_position;
 
         if let Some(progress) = self.progress.as_mut() {
             progress(self.pos, self.len);
@@ -137,7 +251,7 @@ impl<'t> HttpRead<'t> {
             self.pending_chunk_offset = 0;
         }
 
-        to_copy
+        Ok(to_copy)
     }
 }
 
@@ -147,13 +261,21 @@ impl<'t> AsyncRead for HttpRead<'t> {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
-        if buf.remaining() == 0 || self.pos >= self.len {
+        if self.pos > self.len {
+            return Poll::Ready(Err(Error::new(
+                ErrorKind::InvalidData,
+                "logical position beyond declared total",
+            )));
+        }
+        if buf.remaining() == 0 || self.pos == self.len {
             return Poll::Ready(Ok(()));
         }
 
         loop {
-            if self.copy_from_pending_chunk(buf) > 0 {
-                return Poll::Ready(Ok(()));
+            match self.copy_from_pending_chunk(buf) {
+                Ok(copied) if copied > 0 => return Poll::Ready(Ok(())),
+                Ok(_) => {}
+                Err(err) => return Poll::Ready(Err(err)),
             }
 
             match self.as_mut().poll_open_if_needed(cx) {
@@ -162,23 +284,33 @@ impl<'t> AsyncRead for HttpRead<'t> {
                 Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
             }
 
+            let total = self.len;
             let Some(active) = self.active.as_mut() else {
                 return Poll::Ready(Err(Error::new(
                     ErrorKind::UnexpectedEof,
                     "missing active http stream",
                 )));
             };
+            if let Err(err) =
+                validate_active_http_offset(active.next_offset, active.end_offset, total)
+            {
+                return Poll::Ready(Err(err));
+            }
 
             match active.stream.as_mut().poll_next(cx) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Some(Ok(chunk))) => {
-                    active.next_offset += chunk.len() as u64;
-                    if active.next_offset > active.end_offset {
-                        return Poll::Ready(Err(Error::new(
-                            ErrorKind::InvalidData,
-                            "received more bytes than expected from http stream",
-                        )));
+                    let next_offset =
+                        match checked_active_http_offset(active.next_offset, chunk.len(), total) {
+                            Ok(next_offset) => next_offset,
+                            Err(err) => return Poll::Ready(Err(err)),
+                        };
+                    if let Err(err) =
+                        validate_active_http_offset(next_offset, active.end_offset, total)
+                    {
+                        return Poll::Ready(Err(err));
                     }
+                    active.next_offset = next_offset;
                     self.pending_chunk = Some(chunk);
                     self.pending_chunk_offset = 0;
                 }
@@ -617,10 +749,13 @@ async fn open_http_stream(
             let range = range.strip_prefix("bytes ").ok_or_else(|| {
                 Error::new(ErrorKind::InvalidData, "invalid Content-Range prefix")
             })?;
-            let (start_s, _) = range.split_once('-').ok_or_else(|| {
+            let (start_s, end_s) = range.split_once('-').ok_or_else(|| {
                 Error::new(ErrorKind::InvalidData, "invalid Content-Range bounds")
             })?;
             let actual_start = start_s
+                .parse::<u64>()
+                .map_err(|err| Error::new(ErrorKind::InvalidData, err))?;
+            let actual_end = end_s
                 .parse::<u64>()
                 .map_err(|err| Error::new(ErrorKind::InvalidData, err))?;
             if actual_start != expected_start {
@@ -632,6 +767,10 @@ async fn open_http_stream(
             let len = total
                 .parse::<u64>()
                 .map_err(|err| Error::new(ErrorKind::InvalidData, err))?;
+            let content_length = response
+                .content_length()
+                .ok_or_else(|| Error::new(ErrorKind::InvalidData, "missing Content-Length"))?;
+            validate_partial_http_response_extent(actual_start, actual_end, len, content_length)?;
             (actual_start, len)
         }
     };
@@ -827,6 +966,62 @@ mod tests {
 
     fn test_body() -> Vec<u8> {
         (0..16384).map(|i| (i % 251) as u8).collect()
+    }
+
+    #[test]
+    fn http_read_rejects_pending_chunk_offset_beyond_chunk() {
+        let error = super::checked_pending_chunk_offset(4, 1, 4)
+            .expect_err("pending chunk offset beyond chunk must fail");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn http_read_rejects_logical_position_beyond_total() {
+        let error = super::checked_http_position(9, 2, 10)
+            .expect_err("logical position beyond total must fail");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn http_read_rejects_active_offset_beyond_extent() {
+        let error = super::validate_active_http_offset(11, 10, 10)
+            .expect_err("active offset beyond extent must fail");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn http_read_rejects_reopened_total_length_drift() {
+        let error = super::validate_reopened_http_stream(2, 10, 2, 11)
+            .expect_err("reopened total length drift must fail");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn http_read_rejects_overlong_response_extent() {
+        let error = super::validate_partial_http_response_extent(0, 4, 4, 5)
+            .expect_err("response extent beyond total must fail");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn http_read_accepts_initial_response_extent() {
+        super::validate_reopened_http_stream(0, 4, 0, 4)
+            .expect("initial response extent must remain stable");
+        super::validate_partial_http_response_extent(0, 3, 4, 4)
+            .expect("initial response range must remain bounded");
+    }
+
+    #[test]
+    fn http_read_accepts_resumed_response_extent() {
+        super::validate_reopened_http_stream(2, 4, 2, 4)
+            .expect("resumed response total and start must remain stable");
+        super::validate_partial_http_response_extent(2, 3, 4, 2)
+            .expect("resumed response range must remain bounded");
     }
 
     async fn open_cached_reader<'t>(
