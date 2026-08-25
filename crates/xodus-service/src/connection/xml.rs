@@ -8,6 +8,21 @@ use xodus::proto::xodus::XodusMessageType;
 use crate::connection::{MAX_MESSAGE_SIZE, ProtocolError, encode_error_message, encode_message};
 use crate::simple_context::SimpleContext;
 
+const MAX_MSA_CLIENT_ID_BYTES: usize = 256;
+
+fn validate_msa_client_id(client_id: &str) -> std::io::Result<()> {
+    if client_id.is_empty()
+        || client_id.len() > MAX_MSA_CLIENT_ID_BYTES
+        || client_id.chars().any(char::is_control)
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "invalid MSA client id",
+        ));
+    }
+    Ok(())
+}
+
 pub async fn handle(
     socket: &mut tokio::net::UnixStream,
     context: &mut SimpleContext,
@@ -88,6 +103,7 @@ pub async fn parse_message(
         XodusMessageType::MsaTokenRequest => {
             let string_buf = std::str::from_utf8(&buffer)?;
             let req = quick_xml::de::from_str::<MSATokenRequest>(string_buf)?;
+            validate_msa_client_id(&req.client_id)?;
             let user_sts_token = context.tokens().get_user_sts_token()?;
             let Token::Legacy(token) = user_sts_token else {
                 return Err("stored user STS token is not a legacy token".into());
@@ -171,5 +187,22 @@ pub async fn parse_message(
             }
         }
         _ => Err("unsupported XML message type".into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_MSA_CLIENT_ID_BYTES, validate_msa_client_id};
+
+    #[test]
+    fn msa_client_id_accepts_bounded_visible_value() {
+        validate_msa_client_id("0000000040159362").expect("valid client id must pass");
+    }
+
+    #[test]
+    fn msa_client_id_rejects_empty_control_and_oversized_values() {
+        assert!(validate_msa_client_id("").is_err());
+        assert!(validate_msa_client_id("client\nvalue").is_err());
+        assert!(validate_msa_client_id(&"x".repeat(MAX_MSA_CLIENT_ID_BYTES + 1)).is_err());
     }
 }
