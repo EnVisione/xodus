@@ -1548,6 +1548,39 @@ mod tests {
     }
 
     #[test]
+    fn transaction_recovery_restores_interrupted_update_state() {
+        let temporary = tempfile::tempdir().unwrap();
+        let output = temporary.path().join("output");
+        std::fs::create_dir(&output).unwrap();
+        std::fs::create_dir(output.join("Boxes")).unwrap();
+
+        let stale = output.join("Boxes/old.box");
+        let promoted = output.join("Boxes/new.box");
+        std::fs::write(&stale, b"old package").unwrap();
+        let (transaction, _) = new_transaction(&output).unwrap();
+        let stale_backup = transaction
+            .path()
+            .join(".xodus-streaming-backup/Boxes/old.box");
+        std::fs::create_dir_all(stale_backup.parent().unwrap()).unwrap();
+        std::fs::rename(&stale, &stale_backup).unwrap();
+        std::fs::write(&promoted, b"new package").unwrap();
+
+        let specs = vec![("Boxes/new.box".to_owned(), "Boxes/new.box".to_owned())];
+        let removals = vec!["Boxes/old.box".to_owned()];
+        let mut entries = promotion_entries_with_removals(&specs, &removals).unwrap();
+        entries[0].state = PromotionState::Promoted;
+        entries[1].state = PromotionState::Promoted;
+        entries[1].had_previous = true;
+        write_transaction_journal(transaction.path(), &entries, false).unwrap();
+
+        recover_transaction_dir(transaction.path(), &output).unwrap();
+
+        assert_eq!(std::fs::read(stale).unwrap(), b"old package");
+        assert!(!promoted.exists());
+        assert!(!transaction.path().exists());
+    }
+
+    #[test]
     fn transaction_journal_reads_legacy_entries_without_removal_flag() {
         let temporary = tempfile::tempdir().unwrap();
         let output = temporary.path().join("output");
