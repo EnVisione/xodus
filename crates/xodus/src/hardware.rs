@@ -2,6 +2,8 @@
 
 use std::io;
 #[cfg(target_os = "linux")]
+use std::io::Read;
+#[cfg(target_os = "linux")]
 use std::process::{Command, Stdio};
 
 use base64::prelude::*;
@@ -12,6 +14,9 @@ use smbioslib::{SMBiosSystemInformation, SystemUuidData, table_load_from_device}
 
 use crate::clep;
 use crate::models::devicecredential::Component;
+
+#[cfg(target_os = "linux")]
+const MAX_SMBIOS_BYTES: usize = 64 * 1024;
 
 pub fn probe_provision_components() -> Vec<Component> {
     let mut components = Vec::with_capacity(16);
@@ -183,7 +188,9 @@ fn load_raw_smbios() -> io::Result<Vec<u8>> {
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
-    use super::parse_smbios;
+    use std::io::Cursor;
+
+    use super::{MAX_SMBIOS_BYTES, parse_smbios, read_bounded_smbios};
 
     #[test]
     fn parse_smbios_rejects_truncated_header() {
@@ -220,24 +227,67 @@ mod tests {
         assert_eq!(serial, b"serial");
         assert_eq!(uuid, [0; 16]);
     }
+
+    #[test]
+    fn bounded_smbios_reader_rejects_oversized_output() {
+        let result = read_bounded_smbios(Cursor::new(vec![0; MAX_SMBIOS_BYTES + 1]));
+
+        assert_eq!(
+            result
+                .expect_err("oversized SMBIOS output must fail")
+                .kind(),
+            std::io::ErrorKind::InvalidData
+        );
+    }
 }
 
 #[cfg(target_os = "linux")]
 fn load_raw_smbios() -> io::Result<Vec<u8>> {
-    let cmd = Command::new("pkexec")
+    let mut child = Command::new("pkexec")
         .args(["cat", "/sys/firmware/dmi/entries/1-0/raw"])
         .stdout(Stdio::piped())
         .spawn()?;
-    let output = cmd.wait_with_output()?;
+    let mut stdout = match child.stdout.take() {
+        Some(stdout) => stdout,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "SMBIOS probe did not provide stdout",
+            ));
+        }
+    };
+    let output = read_bounded_smbios(&mut stdout);
+    if output.is_err() {
+        let _ = child.kill();
+    }
+    let status = child.wait()?;
+    let output = output?;
 
-    if output.status.success() {
-        Ok(output.stdout)
+    if status.success() {
+        Ok(output)
     } else {
         Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "unable to probe SMBIOS data",
         ))
     }
+}
+
+#[cfg(target_os = "linux")]
+fn read_bounded_smbios<R: Read>(reader: R) -> io::Result<Vec<u8>> {
+    let mut output = Vec::new();
+    reader
+        .take((MAX_SMBIOS_BYTES as u64).saturating_add(1))
+        .read_to_end(&mut output)?;
+    if output.len() > MAX_SMBIOS_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "SMBIOS data exceeds the supported limit",
+        ));
+    }
+    Ok(output)
 }
 
 #[cfg(not(any(
