@@ -49,6 +49,8 @@ The in-memory token backend now reports poisoned mutex state as a typed storage 
 
 License acquisition and CIK export now propagate token, exchange, entitlement, SPLicense, key derivation, directory, file, and flush failures with nonzero command results. CIK paths are joined beneath the requested export directory and existing files are truncated before replacement.
 
+Content license responses now require a successful HTTP status, a nonempty key list, valid base64, valid UTF-8, and valid license XML. Malformed or incomplete service data returns typed `LicenseContentError` variants instead of indexing or decoding through unchecked operations.
+
 The legacy package download command now rejects missing CDN roots and invalid sizes, checks HTTP status, and returns failure for output creation, stream, and write errors instead of reporting success after a partial operation or panicking on service data.
 
 The CLI run and streaming commands now report path, parser, cache, license, key-unpack, extraction, descriptor, process, and promotion failures as nonzero results. Endpoint selection rejects malformed globs and hostless URLs without panicking. The streaming path also rejects missing CDN roots, overflowing package totals, unsafe path shortening, and invalid local cache metadata.
