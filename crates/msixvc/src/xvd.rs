@@ -506,6 +506,10 @@ pub enum UserPackageFilesParseError {
         file_count: u32,
         max_file_count: u32,
     },
+    #[error("package files entry count {file_count} cannot fit in memory")]
+    FileCountCannotFit { file_count: u32 },
+    #[error("unable to reserve {file_count} package file entries")]
+    FileAllocationFailed { file_count: u32 },
     #[error(
         "package file payload end overflows for entry offset {payload_offset} and length {payload_length}"
     )]
@@ -556,6 +560,8 @@ pub enum SegmentMetadataParseError {
     SegmentCountTooLarge { segment_count: u32 },
     #[error("unable to reserve {segment_count} segment metadata entries")]
     SegmentAllocationFailed { segment_count: u32 },
+    #[error("unable to reserve a segment metadata file entry")]
+    FileMapAllocationFailed,
     #[error(
         "segment path end overflows for paths offset {paths_offset}, path offset {path_offset}, and path length {path_length}"
     )]
@@ -2385,6 +2391,17 @@ impl XvdFile {
                     max_file_count: MAX_USER_PACKAGE_FILES,
                 });
             }
+            let file_count =
+                usize::try_from(user_data_package_files_header.file_count).map_err(|_| {
+                    UserPackageFilesParseError::FileCountCannotFit {
+                        file_count: user_data_package_files_header.file_count,
+                    }
+                })?;
+            files.try_reserve(file_count).map_err(|_| {
+                UserPackageFilesParseError::FileAllocationFailed {
+                    file_count: user_data_package_files_header.file_count,
+                }
+            })?;
             let table_end = validate_package_files_table_end(
                 user_data_offset,
                 user_data_header.length,
@@ -2485,6 +2502,9 @@ impl XvdFile {
                     section.data_hashs.len(),
                 )?;
                 let data_hashs: Vec<[u8; 20]> = section.data_hashs[hash_slice].into();
+                files
+                    .try_reserve(1)
+                    .map_err(|_| SegmentMetadataParseError::FileMapAllocationFailed)?;
                 files.insert(
                     file_name,
                     SegmentFile {
