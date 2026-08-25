@@ -59,7 +59,7 @@ The login command now reports missing or wrong device token state, webview start
 
 The CLI startup now reports HTTP client, credential-store, and device-credential setup failures through a nonzero exit code instead of dispatching a command after failed initialization or panicking. It does not enable reqwest connection-verbose logging, so authorization headers and response bodies are not emitted through transport tracing.
 
-Linux SMBIOS probing now validates the raw header length, UUID extent, string-table bounds, and version or serial indexes. Malformed firmware data falls back to the existing component error markers instead of panicking during device provisioning.
+Linux SMBIOS probing now reads the kernel firmware file directly without an interactive or unbounded `pkexec` subprocess, validates the raw header length, UUID extent, string-table bounds, and version or serial indexes, and bounds collection before parsing. Missing permission or malformed firmware data falls back to typed component error markers. Disk serial component 4113 is reported unavailable instead of using the fabricated `AA==` value, while the CLEP challenge retains zero-filled input for that unavailable field.
 
 The in-memory token backend now reports poisoned mutex state as a typed storage error. Expired entries are removed on read, and neither expiry handling nor lock poisoning uses an unchecked mutex operation.
 

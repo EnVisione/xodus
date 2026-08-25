@@ -3,8 +3,6 @@
 use std::io;
 #[cfg(target_os = "linux")]
 use std::io::Read;
-#[cfg(target_os = "linux")]
-use std::process::{Command, Stdio};
 
 use base64::prelude::*;
 #[cfg(any(target_os = "macos", target_os = "ios", target_family = "windows"))]
@@ -20,17 +18,12 @@ const MAX_SMBIOS_BYTES: usize = 64 * 1024;
 
 pub fn probe_provision_components() -> Vec<Component> {
     let mut components = Vec::with_capacity(16);
-    let drive_serial = [0u8];
     let mut smbios_buf = [0; 256];
-    let mut drive_buf = [0; 64];
+    let drive_buf = [0; 64];
 
     let smbios = load_raw_smbios().ok();
     let parsed_smbios = load_smbios_fields(smbios.as_deref()).ok();
 
-    drive_buf
-        .iter_mut()
-        .zip(drive_serial.iter())
-        .for_each(|(place, data)| *place = *data);
     if let Some(smbios) = smbios.as_ref() {
         smbios_buf
             .iter_mut()
@@ -39,7 +32,7 @@ pub fn probe_provision_components() -> Vec<Component> {
     }
     let (clepv2, clepv4) = clep::challenge::get_license_challange(smbios_buf, drive_buf);
 
-    components.push(Component::new(4113, "AA==".to_string()));
+    components.push(Component::error(4113));
     components.push(Component::error(4101));
     components.push(Component::new(8196, BASE64_STANDARD.encode(clepv2)));
     components.push(Component::new(8197, BASE64_STANDARD.encode(clepv4)));
@@ -239,40 +232,23 @@ mod tests {
             std::io::ErrorKind::InvalidData
         );
     }
+
+    #[test]
+    fn provisioning_does_not_fabricate_a_disk_serial() {
+        let component = super::probe_provision_components()
+            .into_iter()
+            .find(|component| component.name == 4113)
+            .expect("disk serial component must remain present");
+
+        assert!(component.value.is_none());
+        assert_eq!(component.error.as_deref(), Some("-2147024894"));
+    }
 }
 
 #[cfg(target_os = "linux")]
 fn load_raw_smbios() -> io::Result<Vec<u8>> {
-    let mut child = Command::new("pkexec")
-        .args(["cat", "/sys/firmware/dmi/entries/1-0/raw"])
-        .stdout(Stdio::piped())
-        .spawn()?;
-    let mut stdout = match child.stdout.take() {
-        Some(stdout) => stdout,
-        None => {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "SMBIOS probe did not provide stdout",
-            ));
-        }
-    };
-    let output = read_bounded_smbios(&mut stdout);
-    if output.is_err() {
-        let _ = child.kill();
-    }
-    let status = child.wait()?;
-    let output = output?;
-
-    if status.success() {
-        Ok(output)
-    } else {
-        Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "unable to probe SMBIOS data",
-        ))
-    }
+    let file = std::fs::File::open("/sys/firmware/dmi/entries/1-0/raw")?;
+    read_bounded_smbios(file)
 }
 
 #[cfg(target_os = "linux")]
