@@ -139,22 +139,31 @@ pub fn verify_all<R>(reader: R, max_uncompressed_size: u64) -> Result<(), Msixvc
 where
     R: Read + Seek,
 {
+    visit_entries(reader, max_uncompressed_size, |_entry, _file| Ok(()))
+}
+
+pub fn visit_entries<R, Visitor>(
+    reader: R,
+    max_uncompressed_size: u64,
+    mut visitor: Visitor,
+) -> Result<(), Msixvc2ParseError>
+where
+    R: Read + Seek,
+    Visitor: FnMut(&Msixvc2Entry, &mut dyn Read) -> std::io::Result<()>,
+{
     let mut reader = reader;
-    inspect_reader(&mut reader)?;
+    let metadata = inspect_reader(&mut reader)?;
+    if metadata.uncompressed_size > max_uncompressed_size {
+        return Err(Msixvc2ParseError::VerificationSizeTooLarge {
+            required: metadata.uncompressed_size,
+            limit: max_uncompressed_size,
+        });
+    }
     reader.seek(SeekFrom::Start(0))?;
     let mut archive = ZipArchive::new(reader)?;
-    let mut total = 0_u64;
     for index in 0..archive.len() {
         let mut file = archive.by_index(index)?;
-        total = total
-            .checked_add(file.size())
-            .ok_or(Msixvc2ParseError::ArchiveSizeOverflow)?;
-        if total > max_uncompressed_size {
-            return Err(Msixvc2ParseError::VerificationSizeTooLarge {
-                required: total,
-                limit: max_uncompressed_size,
-            });
-        }
+        visitor(&metadata.entries[index], &mut file)?;
         let mut sink = std::io::sink();
         std::io::copy(&mut file, &mut sink)?;
     }
@@ -186,7 +195,7 @@ fn validate_entry_name(name: &str) -> Result<(), Msixvc2ParseError> {
 mod tests {
     use std::io::Cursor;
 
-    use super::{Msixvc2ParseError, inspect, verify_all};
+    use super::{Msixvc2ParseError, inspect, verify_all, visit_entries};
 
     const VALID: &[u8] = include_bytes!("../testdata/msixvc2/xodus-fixture-base.msixvc");
     const TRUNCATED: &[u8] = include_bytes!("../testdata/msixvc2/xodus-fixture-truncated.msixvc");
@@ -236,5 +245,22 @@ mod tests {
             verify_all(Cursor::new(ADVERSARIAL_PATH), 1_000_000),
             Err(Msixvc2ParseError::UnsafeEntryPath { .. })
         ));
+    }
+
+    #[test]
+    fn visitor_receives_safe_entries_and_crc_scan_drains_each_entry() {
+        let mut metadata_seen = false;
+        visit_entries(Cursor::new(VALID), 1_000_000, |entry, file| {
+            if entry.name == "XboxPackage.cbor" {
+                let mut bytes = Vec::new();
+                file.read_to_end(&mut bytes)?;
+                assert!(!bytes.is_empty());
+                metadata_seen = true;
+            }
+            Ok(())
+        })
+        .expect("valid entries should be visited");
+
+        assert!(metadata_seen);
     }
 }
