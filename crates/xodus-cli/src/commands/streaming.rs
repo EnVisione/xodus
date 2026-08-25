@@ -665,7 +665,11 @@ pub async fn run(
                 eprintln!("No .msixvc file found");
                 return ExitCode::FAILURE;
             };
-            match package_download_urls(&file.cdn_root_paths, &file.relative_url) {
+            match package_download_urls(
+                &file.cdn_root_paths,
+                &file.background_cdn_root_paths,
+                &file.relative_url,
+            ) {
                 Ok(urls) => urls,
                 Err(error) => {
                     eprintln!("could not construct package URL: {error}");

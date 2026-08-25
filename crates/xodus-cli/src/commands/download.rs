@@ -57,7 +57,11 @@ pub async fn run(
     };
     println!();
     for file in files {
-        let urls = match package_download_urls(&file.cdn_root_paths, &file.relative_url) {
+        let urls = match package_download_urls(
+            &file.cdn_root_paths,
+            &file.background_cdn_root_paths,
+            &file.relative_url,
+        ) {
             Ok(urls) => urls,
             Err(error) => {
                 eprintln!(
@@ -148,7 +152,7 @@ mod tests {
 
     #[test]
     fn package_download_urls_reject_missing_cdn_root() {
-        let error = package_download_urls(&[], "/file.xvd")
+        let error = package_download_urls(&[], &[], "/file.xvd")
             .expect_err("a package without a CDN root must fail before HTTP");
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     }
@@ -157,7 +161,7 @@ mod tests {
     fn package_download_urls_preserve_the_relative_url() {
         let root = vec!["https://cdn.example/".to_owned()];
         assert_eq!(
-            package_download_urls(&root, "file.xvd").expect("valid package URL"),
+            package_download_urls(&root, &[], "file.xvd").expect("valid package URL"),
             vec!["https://cdn.example/file.xvd"]
         );
     }
@@ -172,7 +176,7 @@ mod tests {
         ] {
             let roots = vec![root.to_owned()];
             assert!(
-                package_download_urls(&roots, "file.xvd").is_err(),
+                package_download_urls(&roots, &[], "file.xvd").is_err(),
                 "unsafe package URL accepted: {root}"
             );
         }
@@ -185,11 +189,13 @@ mod tests {
             "https://second.example/".to_owned(),
             "https://first.example/".to_owned(),
         ];
+        let background = vec!["https://third.example/".to_owned()];
         assert_eq!(
-            package_download_urls(&roots, "file.xvd").expect("valid package URLs"),
+            package_download_urls(&roots, &background, "file.xvd").expect("valid package URLs"),
             vec![
                 "https://first.example/file.xvd",
-                "https://second.example/file.xvd"
+                "https://second.example/file.xvd",
+                "https://third.example/file.xvd"
             ]
         );
     }

@@ -9,17 +9,18 @@ use xodus::tokens::TokenManager;
 
 pub(crate) fn package_download_urls(
     cdn_root_paths: &[String],
+    background_cdn_root_paths: &[String],
     relative_url: &str,
 ) -> Result<Vec<String>, io::Error> {
-    if cdn_root_paths.is_empty() {
+    if cdn_root_paths.is_empty() && background_cdn_root_paths.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "package has no CDN root",
         ));
     }
 
-    let mut urls = Vec::with_capacity(cdn_root_paths.len());
-    for root in cdn_root_paths {
+    let mut urls = Vec::with_capacity(cdn_root_paths.len() + background_cdn_root_paths.len());
+    for root in cdn_root_paths.iter().chain(background_cdn_root_paths) {
         let url = format!("{root}{relative_url}");
         let parsed = reqwest::Url::parse(&url).map_err(|_| {
             io::Error::new(io::ErrorKind::InvalidData, "package CDN URL is invalid")
