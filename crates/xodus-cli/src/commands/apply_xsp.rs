@@ -259,6 +259,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rejects_interrupted_descriptor_without_mutating_existing_state() {
+        let temporary = tempfile::tempdir().expect("temporary directory must exist");
+        let destination = temporary.path().join("install");
+        std::fs::create_dir(&destination).expect("destination must exist");
+        std::fs::write(destination.join("updated.bin"), b"previous")
+            .expect("existing output must be writable");
+
+        assert_eq!(
+            run(ApplyXspRequest {
+                descriptor: fixture("xodus-fixture-recovery-interrupted.xsp")
+                    .to_string_lossy()
+                    .into_owned(),
+                base: "missing-base".to_owned(),
+                new_data: "missing-new-data".to_owned(),
+                source_hashes: "missing-source-hashes".to_owned(),
+                target_hashes: "missing-target-hashes".to_owned(),
+                destination: destination.to_string_lossy().into_owned(),
+                output: "updated.bin".to_owned(),
+                block_size: 4,
+                rollback: false,
+            })
+            .await,
+            std::process::ExitCode::FAILURE
+        );
+        assert_eq!(
+            std::fs::read(destination.join("updated.bin")).expect("existing output must remain"),
+            b"previous"
+        );
+        assert!(
+            !destination
+                .read_dir()
+                .expect("destination must be readable")
+                .any(|entry| entry
+                    .expect("directory entry must be readable")
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".xodus-streaming-txn-"))
+        );
+    }
+
+    #[tokio::test]
     async fn applies_valid_fixture_transactionally_without_credentials() {
         let temporary = tempfile::tempdir().expect("temporary directory must exist");
         let base = temporary.path().join("base.bin");
