@@ -33,6 +33,7 @@ use thiserror::Error;
 use zerocopy::{FromBytes, IntoBytes, transmute};
 
 const MAX_SPLICENSE_TLV_BYTES: usize = 64 * 1024 * 1024;
+const PACKED_CONTENT_KEY_BYTES: usize = 40;
 
 // pub struct Block<'a> {
 //     pub block_id: BlockId,
@@ -209,6 +210,9 @@ pub enum SPLicenseDecodeError {
     #[error("PackedContentKey id_len {id_len} is less than 16")]
     InvalidPackedContentKeyIdLength { id_len: usize },
 
+    #[error("PackedContentKey key_len {key_len} does not equal {expected}")]
+    InvalidPackedContentKeyLength { key_len: usize, expected: usize },
+
     #[error("SPLicense signature block payload is {size} bytes, less than the four byte header")]
     InvalidSignatureBlockLength { size: usize },
 
@@ -302,8 +306,14 @@ impl SPLicense {
 
                 while offset < size {
                     let id_len = read_u16(&mut reader)? as usize;
-                    // key_len is always 40
-                    let _key_len = read_u16(&mut reader)? as usize;
+                    let key_len = read_u16(&mut reader)? as usize;
+
+                    if key_len != PACKED_CONTENT_KEY_BYTES {
+                        return Err(SPLicenseDecodeError::InvalidPackedContentKeyLength {
+                            key_len,
+                            expected: PACKED_CONTENT_KEY_BYTES,
+                        });
+                    }
 
                     if id_len < 16 {
                         return Err(SPLicenseDecodeError::InvalidPackedContentKeyIdLength {
@@ -561,6 +571,27 @@ mod tests {
         assert!(matches!(
             result,
             Err(SPLicenseDecodeError::InvalidPackedContentKeyIdLength { id_len: 8 })
+        ));
+    }
+
+    #[test]
+    fn test_packed_content_keys_reject_invalid_key_length() {
+        let mut data = make_test_header();
+        data.extend_from_slice(&(BlockId::PackedContentKeys as u32).to_le_bytes());
+        let block_size = 4 + 16 + PACKED_CONTENT_KEY_BYTES;
+        data.extend_from_slice(&(block_size as u32).to_le_bytes());
+        data.extend_from_slice(&16_u16.to_le_bytes());
+        data.extend_from_slice(&39_u16.to_le_bytes());
+        data.extend_from_slice(&[0u8; 16]);
+        data.extend_from_slice(&[0u8; PACKED_CONTENT_KEY_BYTES]);
+
+        let result = SPLicense::decode(Cursor::new(data));
+        assert!(matches!(
+            result,
+            Err(SPLicenseDecodeError::InvalidPackedContentKeyLength {
+                key_len: 39,
+                expected: PACKED_CONTENT_KEY_BYTES
+            })
         ));
     }
 
