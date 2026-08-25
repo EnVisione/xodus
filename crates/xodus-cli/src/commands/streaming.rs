@@ -429,6 +429,16 @@ fn remove_file_if_present(path: &Path) -> io::Result<()> {
     }
 }
 
+fn sync_parent_directory(path: &Path) -> io::Result<()> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    if parent.as_os_str().is_empty() || !parent.exists() {
+        return Ok(());
+    }
+    std::fs::File::open(parent)?.sync_all()
+}
+
 fn rollback_transaction(
     transaction_root: &Path,
     output_root: &Path,
@@ -440,12 +450,15 @@ fn rollback_transaction(
         let backup_path = transaction_root.join(&entry.backup_relative);
         let result = if entry.had_previous {
             remove_file_if_present(&final_path)
+                .and_then(|()| sync_parent_directory(&final_path))
                 .and_then(|()| std::fs::rename(&backup_path, &final_path))
+                .and_then(|()| sync_parent_directory(&backup_path))
+                .and_then(|()| sync_parent_directory(&final_path))
         } else if matches!(
             entry.state,
             PromotionState::BackedUp | PromotionState::Promoted
         ) {
-            remove_file_if_present(&final_path)
+            remove_file_if_present(&final_path).and_then(|()| sync_parent_directory(&final_path))
         } else {
             Ok(())
         };
@@ -511,6 +524,12 @@ pub(crate) fn promote_transaction(
                 return Err(error);
             }
             entries[index].had_previous = true;
+            if let Err(error) = sync_parent_directory(&final_path)
+                .and_then(|()| sync_parent_directory(&backup_path))
+            {
+                let _ = rollback_transaction(transaction_root, output_root, entries);
+                return Err(error);
+            }
         }
         entries[index].state = PromotionState::BackedUp;
         if let Err(error) = write_transaction_journal(transaction_root, entries, false) {
@@ -520,6 +539,13 @@ pub(crate) fn promote_transaction(
 
         if !entries[index].remove_final
             && let Err(error) = std::fs::rename(&staged_path, &final_path)
+        {
+            let _ = rollback_transaction(transaction_root, output_root, entries);
+            return Err(error);
+        }
+        if !entries[index].remove_final
+            && let Err(error) = sync_parent_directory(&staged_path)
+                .and_then(|()| sync_parent_directory(&final_path))
         {
             let _ = rollback_transaction(transaction_root, output_root, entries);
             return Err(error);
