@@ -31,7 +31,7 @@ The result contains no `TODO`, `todo!`, or `unimplemented!` match in the current
 | Account and licensing responses | Typed HTTP, schema, empty collection, token conversion, key, license, and UTF 8 failures. Test-only assertions remain outside production paths. | `crates/xodus/src/api`, `crates/xodus/src/models`, `crates/xodus/src/licensing` |
 | SPLicense binary decoding | Base64 input and TLV payloads are bounded before allocation, short signature blocks fail without subtraction underflow, packed content key identifiers and 40 byte key lengths are validated, and malformed SOAP token fragment references fail instead of indexing. | `crates/xodus/src/licensing/splicense.rs`, `crates/xodus/src/api/live/rst/request.rs` |
 | RST request construction | Empty scope policy input returns a typed builder error before token removal, so malformed or incomplete callers cannot trigger an empty vector panic. | `crates/xodus/src/api/live/rst/builder.rs`, `RSTBuilderError::MissingScopePolicy` |
-| Service IPC | Bounded payloads, deadlines, connection and rate limits, peer identity checks, explicit unsupported operations, and escaped machine-readable errors. | `crates/xodus-service/src/connection` and startup code |
+| Service IPC | Bounded payloads, deadlines, connection and rate limits, peer identity checks, absolute private runtime directory validation, explicit unsupported operations, and escaped machine-readable errors. | `crates/xodus-service/src/connection`, `crates/xodus-service/src/main.rs`, and startup code |
 
 ## Test-only matches
 

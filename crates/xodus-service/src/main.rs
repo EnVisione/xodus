@@ -26,6 +26,12 @@ enum ServiceError {
     UnsupportedDeviceToken,
     #[error("runtime directory is unavailable: {0}")]
     RuntimeDirectory(#[from] std::env::VarError),
+    #[error("runtime directory is not absolute: {path}")]
+    RuntimeDirectoryNotAbsolute { path: String },
+    #[error("runtime directory is not a directory: {path}")]
+    RuntimeDirectoryNotDirectory { path: String },
+    #[error("runtime directory is group or world writable: {path}")]
+    RuntimeDirectoryWritable { path: String },
     #[error("service socket operation failed: {0}")]
     Io(#[from] std::io::Error),
     #[error("service socket path is not a Unix socket: {path}")]
@@ -55,6 +61,23 @@ fn prepare_socket(path: &Path, runtime_uid: u32) -> Result<(), ServiceError> {
     Ok(())
 }
 
+fn validate_runtime_dir(path: &Path) -> Result<std::fs::Metadata, ServiceError> {
+    let path_display = path.display().to_string();
+    if !path.is_absolute() {
+        return Err(ServiceError::RuntimeDirectoryNotAbsolute { path: path_display });
+    }
+
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_dir() {
+        return Err(ServiceError::RuntimeDirectoryNotDirectory { path: path_display });
+    }
+    if metadata.mode() & 0o022 != 0 {
+        return Err(ServiceError::RuntimeDirectoryWritable { path: path_display });
+    }
+
+    Ok(metadata)
+}
+
 #[tokio::main]
 async fn main() -> Result<(), ServiceError> {
     xodus::secrets::init_secrets().map_err(|error| ServiceError::Secrets(error.to_string()))?;
@@ -68,12 +91,13 @@ async fn main() -> Result<(), ServiceError> {
     };
 
     env_logger::init_from_env("XODUS_LOG");
-    let runtime_dir = utils::get_runtime_dir()?;
-    let runtime_uid = std::fs::metadata(&runtime_dir)?.uid();
+    let runtime_dir = std::path::PathBuf::from(utils::get_runtime_dir()?);
+    let runtime_metadata = validate_runtime_dir(&runtime_dir)?;
+    let runtime_uid = runtime_metadata.uid();
     let cancellation = CancellationToken::new();
     let connection_limit = Arc::new(Semaphore::new(MAX_CONNECTIONS));
-    let socket_path = format!("{runtime_dir}/xodus.sock");
-    prepare_socket(Path::new(&socket_path), runtime_uid)?;
+    let socket_path = runtime_dir.join("xodus.sock");
+    prepare_socket(&socket_path, runtime_uid)?;
     let trigger = cancellation.clone();
     tokio::spawn(async move {
         if let Err(error) = tokio::signal::ctrl_c().await {
@@ -121,7 +145,22 @@ async fn main() -> Result<(), ServiceError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ServiceError, prepare_socket};
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+
+    use super::{ServiceError, prepare_socket, validate_runtime_dir};
+
+    fn runtime_test_dir(name: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "xodus-service-runtime-{name}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir(&path);
+        std::fs::create_dir(&path).expect("runtime test directory must be created");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+            .expect("runtime test directory must be private");
+        path
+    }
 
     #[test]
     fn prepare_socket_refuses_to_remove_a_regular_file() {
@@ -144,5 +183,58 @@ mod tests {
         let _ = std::fs::remove_file(&path);
 
         prepare_socket(&path, 0).expect("absent socket path must be accepted");
+    }
+
+    #[test]
+    fn runtime_directory_rejects_relative_paths() {
+        let result = validate_runtime_dir(Path::new("relative"));
+
+        assert!(matches!(
+            result,
+            Err(ServiceError::RuntimeDirectoryNotAbsolute { .. })
+        ));
+    }
+
+    #[test]
+    fn runtime_directory_accepts_private_absolute_directory() {
+        let path = runtime_test_dir("private");
+
+        assert!(validate_runtime_dir(&path).is_ok());
+        std::fs::remove_dir(path).expect("runtime test directory must be removed");
+    }
+
+    #[test]
+    fn runtime_directory_rejects_group_writable_directory() {
+        let path = runtime_test_dir("writable");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o770))
+            .expect("runtime test directory must become group writable");
+
+        let result = validate_runtime_dir(&path);
+
+        assert!(matches!(
+            result,
+            Err(ServiceError::RuntimeDirectoryWritable { .. })
+        ));
+        std::fs::remove_dir(path).expect("runtime test directory must be removed");
+    }
+
+    #[test]
+    fn runtime_directory_rejects_symlink_path() {
+        let target = runtime_test_dir("symlink-target");
+        let link = std::env::temp_dir().join(format!(
+            "xodus-service-runtime-symlink-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&target, &link).expect("runtime test symlink must be created");
+
+        let result = validate_runtime_dir(&link);
+
+        assert!(matches!(
+            result,
+            Err(ServiceError::RuntimeDirectoryNotDirectory { .. })
+        ));
+        std::fs::remove_file(link).expect("runtime test symlink must be removed");
+        std::fs::remove_dir(target).expect("runtime test directory must be removed");
     }
 }
