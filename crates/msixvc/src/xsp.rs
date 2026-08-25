@@ -949,6 +949,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn applies_a_bounded_rollback_to_bytes() {
+        let mut xsp = parse(ROLLBACK_XSP)
+            .await
+            .expect("valid synthetic rollback fixture");
+        xsp.entries = vec![XspPatchRecord::NewData {
+            block_number: 0,
+            block_count: 1,
+        }];
+        let base_bytes = b"new!base";
+        let base_hashes = [hash20(b"new!"), hash20(b"base")];
+        let target_hashes = [hash20(b"base")];
+        let base = XspBaseState {
+            content_id: xsp.header.content_id,
+            version: xsp.header.upgrade_from_version,
+            block_hashes: &base_hashes,
+        };
+        let input = XspUpdateInput {
+            expected_source_hashes: &base_hashes,
+            target_hashes: &target_hashes,
+            available_space: u64::MAX,
+            block_size: 4,
+        };
+
+        let output = xsp
+            .apply_rollback_to_bytes(base, input, base_bytes, b"base")
+            .expect("bounded rollback should apply");
+
+        assert_eq!(output, b"base");
+    }
+
+    #[tokio::test]
     async fn applies_stream_update_with_source_and_target_hashes() {
         let xsp = parse(VALID_XSP).await.expect("valid synthetic XSP fixture");
         let base_hashes = [hash20(b"base")];
