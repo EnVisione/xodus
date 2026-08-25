@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::io::{self, ErrorKind, Write};
+use std::io::{self, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -35,6 +35,7 @@ const TRANSACTION_PAYLOAD_DIRECTORY: &str = ".xodus-streaming-payload";
 const TRANSACTION_BACKUP_DIRECTORY: &str = ".xodus-streaming-backup";
 const TRANSACTION_JOURNAL: &str = ".xodus-streaming-journal";
 const TRANSACTION_LOCK_FILE: &str = ".xodus-streaming.lock";
+const MAX_TRANSACTION_JOURNAL_BYTES: usize = 64 * 1024 * 1024;
 
 fn invalid_package_path(message: impl Into<String>) -> io::Error {
     io::Error::new(ErrorKind::InvalidData, message.into())
@@ -367,7 +368,10 @@ fn write_transaction_journal(
 }
 
 fn read_transaction_journal(root: &Path) -> io::Result<Option<Vec<PromotionEntry>>> {
-    let contents = std::fs::read_to_string(journal_path(root))?;
+    let contents = read_bounded_transaction_journal(
+        std::fs::File::open(journal_path(root))?,
+        MAX_TRANSACTION_JOURNAL_BYTES,
+    )?;
     if contents.trim() == "complete" {
         return Ok(None);
     }
@@ -421,6 +425,22 @@ fn read_transaction_journal(root: &Path) -> io::Result<Option<Vec<PromotionEntry
         return Err(invalid_package_path("transaction journal has no entries"));
     }
     Ok(Some(entries))
+}
+
+fn read_bounded_transaction_journal<R: Read>(reader: R, max_bytes: usize) -> io::Result<String> {
+    let read_limit = u64::try_from(max_bytes)
+        .map_err(|_| invalid_package_path("transaction journal size limit is invalid"))?
+        .checked_add(1)
+        .ok_or_else(|| invalid_package_path("transaction journal size limit overflows"))?;
+    let mut contents = Vec::new();
+    reader.take(read_limit).read_to_end(&mut contents)?;
+    if contents.len() > max_bytes {
+        return Err(invalid_package_path(
+            "transaction journal exceeds the supported size",
+        ));
+    }
+    String::from_utf8(contents)
+        .map_err(|_| invalid_package_path("transaction journal is not valid UTF-8"))
 }
 
 fn remove_file_if_present(path: &Path) -> io::Result<()> {
@@ -1312,14 +1332,15 @@ where
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::io::Write;
+    use std::io::{Cursor, Write};
 
     use super::{
         PromotionState, SegmentFile, TRANSACTION_JOURNAL, acquire_transaction_lock, changed_jobs,
         new_transaction, open_package_input, open_package_output, package_path_components,
         promote_transaction, promote_transaction_with_interruption, promotion_entries,
-        promotion_entries_with_removals, read_transaction_journal, recover_transaction_dir,
-        recover_transactions, write_transaction_journal,
+        promotion_entries_with_removals, read_bounded_transaction_journal,
+        read_transaction_journal, recover_transaction_dir, recover_transactions,
+        write_transaction_journal,
     };
 
     #[test]
@@ -1332,6 +1353,13 @@ mod tests {
             package_path_components("content/textures/terrain.bin").unwrap(),
             vec!["content", "textures", "terrain.bin"]
         );
+    }
+
+    #[test]
+    fn transaction_journal_reader_rejects_oversized_input() {
+        let result = read_bounded_transaction_journal(Cursor::new(b"12345"), 4);
+
+        assert!(result.is_err());
     }
 
     #[test]
