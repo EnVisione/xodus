@@ -1141,6 +1141,23 @@ fn validate_package_files_table_end(
     )
 }
 
+fn next_package_files_table_offset(
+    current: u64,
+    user_data_offset: u64,
+    header_length: u32,
+    file_count: u32,
+) -> Result<u64, UserPackageFilesParseError> {
+    current
+        .checked_add(XvdUserDataPackageFileEntry::SIZE as u64)
+        .ok_or(
+            UserPackageFilesParseError::PackageFilesTableOffsetOverflow {
+                user_data_offset,
+                header_length,
+                file_count,
+            },
+        )
+}
+
 fn package_file_payload(
     user_data_offset: u64,
     user_data_length: u64,
@@ -2371,7 +2388,12 @@ impl XvdFile {
                 file.seek(SeekFrom::Start(off)).await?;
                 file.read_exact(&mut buf).await?;
                 let user_data_package_file_entry = XvdUserDataPackageFileEntry::from_array(&buf);
-                off += XvdUserDataPackageFileEntry::SIZE as u64;
+                off = next_package_files_table_offset(
+                    off,
+                    user_data_offset,
+                    user_data_header.length,
+                    user_data_package_files_header.file_count,
+                )?;
                 let o = user_data_package_file_entry.offset;
                 let s: u32 = user_data_package_file_entry.size;
                 let package_file = package_file_payload(user_data_offset, user_data_length, o, s)?;
@@ -2976,10 +2998,10 @@ mod tests {
         extract_page_loop_end, extract_page_plan, extract_progress_bytes, extract_write_length,
         hash_entry_read_offset, hash_page_index, is_retryable_download_error,
         is_retryable_output_error, next_download_page, next_download_received_byte_count,
-        next_segment_page_offset, non_encrypted_prefix_len, ntfs_drive_extents,
-        ntfs_partition_extents, package_file_name, required_gpt_partition_length,
-        required_gpt_partition_start, reserve_xvc_region_entries, segment_file_name,
-        segment_metadata_reader_capacity, sync_substream_absolute_target,
+        next_package_files_table_offset, next_segment_page_offset, non_encrypted_prefix_len,
+        ntfs_drive_extents, ntfs_partition_extents, package_file_name,
+        required_gpt_partition_length, required_gpt_partition_start, reserve_xvc_region_entries,
+        segment_file_name, segment_metadata_reader_capacity, sync_substream_absolute_target,
         validate_download_response_extent, validate_segment_metadata_table_extent,
         validate_xvc_region_hash_entry_addresses, verify_page_hash, write_all_with_retry,
         xvd_stream_absolute_seek_target,
@@ -5020,6 +5042,21 @@ mod tests {
             USER_DATA_HEADER_SIZE,
             "an invalid package files header offset must not read table entries or insert records"
         );
+    }
+
+    #[test]
+    fn package_files_table_offset_rejects_advance_overflow() {
+        let error = next_package_files_table_offset(u64::MAX, 7, 8, 9)
+            .expect_err("package table cursor overflow must be typed");
+
+        assert!(matches!(
+            error,
+            UserPackageFilesParseError::PackageFilesTableOffsetOverflow {
+                user_data_offset: 7,
+                header_length: 8,
+                file_count: 9,
+            }
+        ));
     }
 
     #[tokio::test]
