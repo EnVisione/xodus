@@ -330,7 +330,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn applies_valid_fixture_transactionally_without_credentials() {
+    async fn applies_valid_fixture_and_preserves_active_state_after_failed_update() {
         let temporary = tempfile::tempdir().expect("temporary directory must exist");
         let base = temporary.path().join("base.bin");
         let new_data = temporary.path().join("new.bin");
@@ -367,6 +367,46 @@ mod tests {
         assert_eq!(
             std::fs::read(destination.join("updated.bin")).expect("updated output must exist"),
             b"new!base"
+        );
+
+        std::fs::write(
+            &target_hashes,
+            format!("{}\n{}\n", hash_line(b"wrong"), hash_line(b"base")),
+        )
+        .expect("failed update hash manifest must be writable");
+        assert_eq!(
+            run(ApplyXspRequest {
+                descriptor: fixture("xodus-fixture-valid.xsp")
+                    .to_string_lossy()
+                    .into_owned(),
+                base: base.to_string_lossy().into_owned(),
+                new_data: new_data.to_string_lossy().into_owned(),
+                source_hashes: source_hashes.to_string_lossy().into_owned(),
+                target_hashes: target_hashes.to_string_lossy().into_owned(),
+                destination: destination.to_string_lossy().into_owned(),
+                output: "updated.bin".to_owned(),
+                block_size: 4,
+                rollback: false,
+            })
+            .await,
+            std::process::ExitCode::FAILURE
+        );
+        assert_eq!(
+            std::fs::read(destination.join("updated.bin"))
+                .expect("failed update must preserve active output"),
+            b"new!base"
+        );
+        assert!(
+            std::fs::read_dir(&destination)
+                .expect("destination must remain readable")
+                .all(|entry| {
+                    !entry
+                        .expect("destination entry must be readable")
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".xodus-streaming-txn-")
+                }),
+            "failed update must not leave a staging transaction"
         );
     }
 
