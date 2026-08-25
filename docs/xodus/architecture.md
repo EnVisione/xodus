@@ -13,4 +13,6 @@ Package segment paths are untrusted input. Before the streaming writer creates a
 
 The Phase 2 XSP parser slice accepts only tables that begin after the fixed 860-byte header, end within the seekable input length, and declare no more than 1,048,576 fixed-size records. It returns typed header, record, I/O, count, offset, overflow, and bounds errors before allocating records or writing a filesystem path. Synthetic in-memory tests cover valid and rollback descriptors plus invalid-magic, invalid-record, truncated, interrupted-recovery, oversized-count, and before-header-offset cases.
 
+The XVD parser returns a typed I/O failure when a metadata-directed seek to XVC information fails. Its regression test uses an in-memory synthetic 4,096-byte header and a reader that fails the seek, so it proves propagation without inspecting a package or mutating the filesystem.
+
 MSIXVC parser hardening, complete integrity validation, atomic promotion, rollback policy, and transaction recovery remain Phase 2 work. The account backed Xbox Live development token test is not part of ordinary offline verification and currently requires an explicit bounded opt in.

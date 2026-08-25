@@ -24,9 +24,10 @@ use crate::math::{
     page_number_to_offset,
 };
 use crate::models::xvd::{
-    PAGE_SIZE, PAGES_PER_BLOCK, XvcInfo, XvcRegionHeader, XvcRegionId, XvdHashEntry, XvdHeader,
-    XvdSegmentMetadataHeader, XvdSegmentMetadataSegment, XvdSegmentMetadataSegmentFlags,
-    XvdUserDataHeader, XvdUserDataPackageFileEntry, XvdUserDataPackageFilesHeader,
+    PAGE_SIZE, PAGES_PER_BLOCK, XvcInfo, XvcRegionHeader, XvcRegionHeaderParseError, XvcRegionId,
+    XvdHashEntry, XvdHeader, XvdHeaderParseError, XvdSegmentMetadataHeader,
+    XvdSegmentMetadataSegment, XvdSegmentMetadataSegmentFlags, XvdUserDataHeader,
+    XvdUserDataPackageFileEntry, XvdUserDataPackageFilesHeader,
 };
 use crate::streaming_ntfs::collect_ntfs_stream_layouts;
 
@@ -278,6 +279,16 @@ pub struct XvdFile {
     user_data_offset: u64,
 }
 
+#[derive(thiserror::Error, Debug)]
+pub enum XvdFileParseError {
+    #[error(transparent)]
+    Header(#[from] XvdHeaderParseError),
+    #[error(transparent)]
+    RegionHeader(#[from] XvcRegionHeaderParseError),
+    #[error(transparent)]
+    Io(#[from] io::Error),
+}
+
 #[derive(Debug)]
 pub struct EncryptedSectionInfo {
     section_offset: u64,
@@ -335,12 +346,12 @@ impl XvdFile {
         prefix_len
     }
 
-    pub async fn parse_file(path: String) -> Result<Self, Box<dyn std::error::Error>> {
+    pub async fn parse_file(path: String) -> Result<Self, XvdFileParseError> {
         let mut file = OpenOptions::new().read(true).open(path.clone()).await?;
         Self::parse(&mut file).await
     }
 
-    pub async fn parse<Reader>(mut file: Reader) -> Result<Self, Box<dyn std::error::Error>>
+    pub async fn parse<Reader>(mut file: Reader) -> Result<Self, XvdFileParseError>
     where
         Reader: AsyncRead + AsyncSeek + Unpin,
     {
@@ -358,9 +369,7 @@ impl XvdFile {
 
         // TODO: Check if we have proper content type
         if xvd_header.xvc_data_length > 0 {
-            file.seek(std::io::SeekFrom::Start(xvc_info_offset))
-                .await
-                .expect("Unable to seek");
+            file.seek(std::io::SeekFrom::Start(xvc_info_offset)).await?;
 
             let xvc_info = {
                 let mut buf = XvcInfo::buffer();
@@ -1061,5 +1070,80 @@ impl XvdFile {
     {
         self.extract_file_ex(i, out, sfile, full_key, progress, true)
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        io::{Cursor, Error, ErrorKind},
+        pin::Pin,
+        task::{Context, Poll},
+    };
+
+    use tokio::io::{AsyncRead, AsyncSeek, ReadBuf};
+
+    use super::{XvdFile, XvdFileParseError};
+
+    const XVD_HEADER_SIZE: usize = 4096;
+    const FILETIME_OFFSET: usize = 0x210;
+    const XVC_DATA_LENGTH_OFFSET: usize = 0x290;
+    const WINDOWS_TO_UNIX_FILETIME: i64 = 116_444_736_000_000_000;
+
+    struct SeekFailureReader(Cursor<Vec<u8>>);
+
+    impl SeekFailureReader {
+        fn synthetic_xvd_header() -> Self {
+            let mut header = vec![0; XVD_HEADER_SIZE];
+            header[0x200..0x208].copy_from_slice(b"msft-xvd");
+            header[FILETIME_OFFSET..FILETIME_OFFSET + 8]
+                .copy_from_slice(&WINDOWS_TO_UNIX_FILETIME.to_le_bytes());
+            header[XVC_DATA_LENGTH_OFFSET..XVC_DATA_LENGTH_OFFSET + 4]
+                .copy_from_slice(&1_u32.to_le_bytes());
+
+            Self(Cursor::new(header))
+        }
+    }
+
+    impl AsyncRead for SeekFailureReader {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            let position = self.0.position() as usize;
+            let bytes = &self.0.get_ref()[position..];
+            let read_len = bytes.len().min(buf.remaining());
+            buf.put_slice(&bytes[..read_len]);
+            self.0.set_position((position + read_len) as u64);
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl AsyncSeek for SeekFailureReader {
+        fn start_seek(self: Pin<&mut Self>, _position: std::io::SeekFrom) -> std::io::Result<()> {
+            Err(Error::other("synthetic XVD seek failure"))
+        }
+
+        fn poll_complete(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<std::io::Result<u64>> {
+            Poll::Ready(Ok(self.0.position()))
+        }
+    }
+
+    #[tokio::test]
+    async fn parse_returns_xvc_info_seek_failure() {
+        let result = XvdFile::parse(SeekFailureReader::synthetic_xvd_header()).await;
+        let error = match result {
+            Ok(_) => panic!("synthetic seek failure must not parse an XVD"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            XvdFileParseError::Io(error) if error.kind() == ErrorKind::Other
+        ));
     }
 }
