@@ -36,6 +36,14 @@ fn fatal_download_error(error: io::Error) -> DownloadAttemptError {
     }
 }
 
+fn retryable_download_error(error: io::Error) -> DownloadAttemptError {
+    DownloadAttemptError {
+        error,
+        retryable: true,
+        try_next_url: true,
+    }
+}
+
 fn request_download_error(error: reqwest::Error) -> DownloadAttemptError {
     let retryable = match error.status() {
         Some(status) => {
@@ -172,7 +180,7 @@ async fn download_file_attempt(
     }
 
     if downloaded != file_size {
-        return Err(fatal_download_error(io::Error::new(
+        return Err(retryable_download_error(io::Error::new(
             io::ErrorKind::UnexpectedEof,
             format!("received {downloaded} bytes, expected {file_size}"),
         )));
@@ -335,11 +343,13 @@ pub async fn run(
 #[cfg(test)]
 mod tests {
     use base64::Engine;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     use super::{
         DOWNLOAD_RETRY_LIMIT, MAX_FILE_HASH_BASE64_CHARS, checked_download_total,
-        consume_download_retry, decode_file_hash, validate_declared_download_length,
-        validate_file_hash,
+        consume_download_retry, decode_file_hash, download_file_attempt,
+        validate_declared_download_length, validate_file_hash,
     };
     use crate::package::package_download_urls;
 
@@ -414,6 +424,70 @@ mod tests {
             consume_download_retry(&mut remaining).expect("retry must consume budget");
         }
         assert!(consume_download_retry(&mut remaining).is_err());
+    }
+
+    #[tokio::test]
+    async fn short_download_retries_before_atomic_promotion() {
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("test server must bind");
+        let address = listener
+            .local_addr()
+            .expect("test server address must exist");
+        let server = tokio::spawn(async move {
+            for response in [
+                b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nno".as_slice(),
+                b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\ngood".as_slice(),
+            ] {
+                let (mut stream, _) = listener.accept().await.expect("request must connect");
+                let mut request = [0_u8; 1024];
+                let received = stream
+                    .read(&mut request)
+                    .await
+                    .expect("request must be readable");
+                assert!(received > 0, "request must contain bytes");
+                stream
+                    .write_all(response)
+                    .await
+                    .expect("response must be writable");
+            }
+        });
+
+        let directory = tempfile::tempdir().expect("temporary output must exist");
+        let progress = indicatif::ProgressBar::hidden();
+        let url = format!("http://{address}/package");
+        let client = reqwest::Client::new();
+        let first = download_file_attempt(
+            &client,
+            &url,
+            "package.bin",
+            4,
+            None,
+            directory.path(),
+            &progress,
+        )
+        .await
+        .expect_err("short response must be returned as retryable");
+        assert!(first.retryable);
+        assert!(first.try_next_url);
+
+        download_file_attempt(
+            &client,
+            &url,
+            "package.bin",
+            4,
+            None,
+            directory.path(),
+            &progress,
+        )
+        .await
+        .expect("the next bounded attempt should promote the complete response");
+
+        assert_eq!(
+            std::fs::read(directory.path().join("package.bin")).expect("promoted file exists"),
+            b"good"
+        );
+        server.await.expect("test server must exit");
     }
 
     #[test]
