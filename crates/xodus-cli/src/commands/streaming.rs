@@ -1,10 +1,9 @@
-use std::collections::HashMap;
-use std::io::{self, ErrorKind};
-use std::path::Path;
+use std::collections::{HashMap, HashSet};
+use std::io::{self, ErrorKind, Write};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::vec;
 
 use fs2::available_space;
 use futures_util::{StreamExt, stream};
@@ -13,6 +12,7 @@ use msixvc::streaming;
 use msixvc::xvd::{SegmentFile, XvdFile};
 use rustix::fs::{Mode, OFlags, ResolveFlags, mkdirat, openat2};
 use rustix::io::Errno;
+use tempfile::{Builder as TempDirBuilder, TempDir};
 use tokio::fs::{File, OpenOptions};
 use tokio::io::AsyncRead;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -30,6 +30,10 @@ struct Job {
 const OUTPUT_RESOLVE_FLAGS: ResolveFlags = ResolveFlags::BENEATH
     .union(ResolveFlags::NO_MAGICLINKS)
     .union(ResolveFlags::NO_SYMLINKS);
+const TRANSACTION_DIRECTORY_PREFIX: &str = ".xodus-streaming-txn-";
+const TRANSACTION_PAYLOAD_DIRECTORY: &str = ".xodus-streaming-payload";
+const TRANSACTION_BACKUP_DIRECTORY: &str = ".xodus-streaming-backup";
+const TRANSACTION_JOURNAL: &str = ".xodus-streaming-journal";
 
 fn invalid_package_path(message: impl Into<String>) -> io::Error {
     io::Error::new(ErrorKind::InvalidData, message.into())
@@ -159,31 +163,359 @@ fn open_package_output(root: &Path, package_path: &str) -> io::Result<std::fs::F
     ))
 }
 
-fn promote_cache(cache_path: &Path, final_path: &Path) -> io::Result<()> {
-    match std::fs::rename(cache_path, final_path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
-            let backup_path = final_path.with_file_name(".xodus-streaming-previous.msixvc");
-            match std::fs::remove_file(&backup_path) {
-                Ok(()) => {}
-                Err(remove_error) if remove_error.kind() == ErrorKind::NotFound => {}
-                Err(remove_error) => return Err(remove_error),
-            }
-            std::fs::rename(final_path, &backup_path)?;
-            match std::fs::rename(cache_path, final_path) {
-                Ok(()) => std::fs::remove_file(backup_path),
-                Err(error) => {
-                    if let Err(restore_error) = std::fs::rename(&backup_path, final_path) {
-                        return Err(io::Error::other(format!(
-                            "cache promotion failed: {error}; restoring the previous package failed: {restore_error}"
-                        )));
-                    }
-                    Err(error)
-                }
-            }
+fn package_relative_path(package_path: &str) -> io::Result<PathBuf> {
+    let mut relative = PathBuf::new();
+    for component in package_path_components(package_path)? {
+        relative.push(component);
+    }
+    Ok(relative)
+}
+
+fn ensure_package_parent(root: &Path, package_path: &Path) -> io::Result<()> {
+    let mut directory = std::fs::File::open(root)?;
+    let components = package_path
+        .parent()
+        .into_iter()
+        .flat_map(Path::components)
+        .filter_map(|component| match component {
+            std::path::Component::Normal(component) => component.to_str(),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    for component in components {
+        match mkdirat(&directory, component, Mode::RWXU) {
+            Ok(()) | Err(Errno::EXIST) => {}
+            Err(error) => return Err(error.into()),
         }
+        directory = std::fs::File::from(
+            openat2(
+                &directory,
+                component,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+                Mode::empty(),
+                OUTPUT_RESOLVE_FLAGS,
+            )
+            .map_err(io::Error::from)?,
+        );
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PromotionState {
+    Pending,
+    BackedUp,
+    Promoted,
+}
+
+impl PromotionState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::BackedUp => "backed_up",
+            Self::Promoted => "promoted",
+        }
+    }
+
+    fn parse(value: &str) -> io::Result<Self> {
+        match value {
+            "pending" => Ok(Self::Pending),
+            "backed_up" => Ok(Self::BackedUp),
+            "promoted" => Ok(Self::Promoted),
+            _ => Err(invalid_package_path(
+                "transaction journal has an invalid state",
+            )),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct PromotionEntry {
+    staged_relative: PathBuf,
+    final_relative: PathBuf,
+    backup_relative: PathBuf,
+    had_previous: bool,
+    state: PromotionState,
+}
+
+fn promotion_entries(specs: &[(String, String)]) -> io::Result<Vec<PromotionEntry>> {
+    let mut seen = HashSet::new();
+    let mut entries = Vec::with_capacity(specs.len());
+    for (staged, final_name) in specs {
+        let staged_relative = package_relative_path(staged)?;
+        let final_relative = package_relative_path(final_name)?;
+        let key = final_relative.to_string_lossy().into_owned();
+        if !seen.insert(key) {
+            return Err(invalid_package_path(
+                "transaction contains a duplicate package path",
+            ));
+        }
+        entries.push(PromotionEntry {
+            staged_relative,
+            backup_relative: PathBuf::from(TRANSACTION_BACKUP_DIRECTORY).join(&final_relative),
+            final_relative,
+            had_previous: false,
+            state: PromotionState::Pending,
+        });
+    }
+    Ok(entries)
+}
+
+fn journal_path(root: &Path) -> PathBuf {
+    root.join(TRANSACTION_JOURNAL)
+}
+
+fn relative_path_text(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+fn write_transaction_journal(
+    root: &Path,
+    entries: &[PromotionEntry],
+    complete: bool,
+) -> io::Result<()> {
+    let mut journal = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(journal_path(root))?;
+    if complete {
+        writeln!(journal, "complete")?;
+    } else {
+        for entry in entries {
+            writeln!(
+                journal,
+                "{}\t{}\t{}\t{}\t{}",
+                entry.state.as_str(),
+                relative_path_text(&entry.staged_relative),
+                relative_path_text(&entry.final_relative),
+                relative_path_text(&entry.backup_relative),
+                u8::from(entry.had_previous),
+            )?;
+        }
+    }
+    journal.sync_all()
+}
+
+fn read_transaction_journal(root: &Path) -> io::Result<Option<Vec<PromotionEntry>>> {
+    let contents = std::fs::read_to_string(journal_path(root))?;
+    if contents.trim() == "complete" {
+        return Ok(None);
+    }
+
+    let mut entries = Vec::new();
+    for line in contents.lines() {
+        let mut fields = line.split('\t');
+        let state = PromotionState::parse(fields.next().unwrap_or_default())?;
+        let staged_text = fields.next().ok_or_else(|| {
+            invalid_package_path("transaction journal is missing its staged path")
+        })?;
+        let final_text = fields
+            .next()
+            .ok_or_else(|| invalid_package_path("transaction journal is missing its final path"))?;
+        let backup_text = fields.next().ok_or_else(|| {
+            invalid_package_path("transaction journal is missing its backup path")
+        })?;
+        let had_previous = match fields.next() {
+            Some("0") => false,
+            Some("1") => true,
+            _ => {
+                return Err(invalid_package_path(
+                    "transaction journal has invalid backup state",
+                ));
+            }
+        };
+        if fields.next().is_some() {
+            return Err(invalid_package_path(
+                "transaction journal has too many fields",
+            ));
+        }
+        entries.push(PromotionEntry {
+            staged_relative: package_relative_path(staged_text)?,
+            final_relative: package_relative_path(final_text)?,
+            backup_relative: package_relative_path(backup_text)?,
+            had_previous,
+            state,
+        });
+    }
+    if entries.is_empty() {
+        return Err(invalid_package_path("transaction journal has no entries"));
+    }
+    Ok(Some(entries))
+}
+
+fn remove_file_if_present(path: &Path) -> io::Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
     }
+}
+
+fn rollback_transaction(
+    transaction_root: &Path,
+    output_root: &Path,
+    entries: &mut [PromotionEntry],
+) -> io::Result<()> {
+    let mut rollback_error = None;
+    for entry in entries.iter_mut().rev() {
+        let final_path = output_root.join(&entry.final_relative);
+        let backup_path = transaction_root.join(&entry.backup_relative);
+        let result = if entry.had_previous {
+            remove_file_if_present(&final_path)
+                .and_then(|()| std::fs::rename(&backup_path, &final_path))
+        } else if matches!(
+            entry.state,
+            PromotionState::BackedUp | PromotionState::Promoted
+        ) {
+            remove_file_if_present(&final_path)
+        } else {
+            Ok(())
+        };
+        if let Err(error) = result {
+            rollback_error.get_or_insert(error);
+        } else {
+            entry.state = PromotionState::Pending;
+            entry.had_previous = false;
+        }
+    }
+
+    if let Err(error) = write_transaction_journal(transaction_root, entries, false) {
+        rollback_error.get_or_insert(error);
+    }
+    if let Some(error) = rollback_error {
+        Err(error)
+    } else {
+        Ok(())
+    }
+}
+
+fn promote_transaction(
+    transaction_root: &Path,
+    output_root: &Path,
+    entries: &mut [PromotionEntry],
+) -> io::Result<()> {
+    write_transaction_journal(transaction_root, entries, false)?;
+
+    for index in 0..entries.len() {
+        let (staged_path, final_path, backup_path) = {
+            let entry = &entries[index];
+            (
+                transaction_root
+                    .join(TRANSACTION_PAYLOAD_DIRECTORY)
+                    .join(&entry.staged_relative),
+                output_root.join(&entry.final_relative),
+                transaction_root.join(&entry.backup_relative),
+            )
+        };
+        if !staged_path.is_file() {
+            let error = io::Error::new(
+                ErrorKind::NotFound,
+                format!("staged package file is missing: {}", staged_path.display()),
+            );
+            let _ = rollback_transaction(transaction_root, output_root, entries);
+            return Err(error);
+        }
+        if let Err(error) = ensure_package_parent(output_root, &entries[index].final_relative) {
+            let _ = rollback_transaction(transaction_root, output_root, entries);
+            return Err(error);
+        }
+        if let Some(parent) = backup_path.parent()
+            && let Err(error) = std::fs::create_dir_all(parent)
+        {
+            let _ = rollback_transaction(transaction_root, output_root, entries);
+            return Err(error);
+        }
+        if std::fs::symlink_metadata(&final_path).is_ok() {
+            if let Err(error) = std::fs::rename(&final_path, &backup_path) {
+                let _ = rollback_transaction(transaction_root, output_root, entries);
+                return Err(error);
+            }
+            entries[index].had_previous = true;
+        }
+        entries[index].state = PromotionState::BackedUp;
+        if let Err(error) = write_transaction_journal(transaction_root, entries, false) {
+            let _ = rollback_transaction(transaction_root, output_root, entries);
+            return Err(error);
+        }
+
+        if let Err(error) = std::fs::rename(&staged_path, &final_path) {
+            let _ = rollback_transaction(transaction_root, output_root, entries);
+            return Err(error);
+        }
+        entries[index].state = PromotionState::Promoted;
+        if let Err(error) = write_transaction_journal(transaction_root, entries, false) {
+            let _ = rollback_transaction(transaction_root, output_root, entries);
+            return Err(error);
+        }
+    }
+
+    write_transaction_journal(transaction_root, entries, true)
+}
+
+fn recover_transaction_dir(transaction_root: &Path, output_root: &Path) -> io::Result<()> {
+    let journal = journal_path(transaction_root);
+    if !journal.exists() {
+        return std::fs::remove_dir_all(transaction_root);
+    }
+    let Some(mut entries) = read_transaction_journal(transaction_root)? else {
+        return std::fs::remove_dir_all(transaction_root);
+    };
+    rollback_transaction(transaction_root, output_root, &mut entries)?;
+    std::fs::remove_dir_all(transaction_root)
+}
+
+fn recover_transactions(output_root: &Path) -> io::Result<()> {
+    let mut transactions = Vec::new();
+    for entry in std::fs::read_dir(output_root)? {
+        let entry = entry?;
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if name.starts_with(TRANSACTION_DIRECTORY_PREFIX) && path.is_dir() {
+            transactions.push(path);
+        }
+    }
+    for transaction in transactions {
+        recover_transaction_dir(&transaction, output_root)?;
+    }
+    Ok(())
+}
+
+fn new_transaction(output_root: &Path) -> io::Result<(TempDir, PathBuf)> {
+    let transaction = TempDirBuilder::new()
+        .prefix(TRANSACTION_DIRECTORY_PREFIX)
+        .tempdir_in(output_root)?;
+    let payload_root = transaction.path().join(TRANSACTION_PAYLOAD_DIRECTORY);
+    std::fs::create_dir(&payload_root)?;
+    Ok((transaction, payload_root))
+}
+
+fn changed_jobs(
+    remote_files: &HashMap<String, SegmentFile>,
+    local_files: &HashMap<String, SegmentFile>,
+) -> Vec<Job> {
+    remote_files
+        .iter()
+        .filter(|(name, remote)| {
+            if let Some(local) = local_files.get(*name) {
+                remote.data_hashs != local.data_hashs || remote.data_hashs.is_empty()
+            } else {
+                true
+            }
+        })
+        .map(|(name, remote)| Job {
+            name: name.clone(),
+            content: SegmentFile {
+                offset: remote.offset,
+                length: remote.length,
+                data_hashs: remote.data_hashs.clone(),
+                keep_encrypted: remote.keep_encrypted,
+            },
+        })
+        .collect()
 }
 
 enum ProgressEvent {
@@ -424,7 +756,19 @@ where
         return false;
     }
 
-    let cache_path = out.join(".xodus-streaming-tmp.msixvc");
+    if let Err(err) = recover_transactions(out) {
+        eprintln!("failed to recover a previous package transaction: {err}");
+        return false;
+    }
+    let (transaction, transaction_payload) = match new_transaction(out) {
+        Ok(transaction) => transaction,
+        Err(err) => {
+            eprintln!("failed to create package transaction staging: {err}");
+            return false;
+        }
+    };
+    let transaction_root = transaction.path().to_path_buf();
+    let cache_path = transaction_payload.join(".xodus-streaming-tmp.msixvc");
     let final_path = out.join(".xodus-streaming.msixvc");
 
     let mut remote_file = match streaming::PrefixCacheFile::new(reader, l, cache_path.clone()).await
@@ -605,25 +949,7 @@ where
     .ok();
 
     let remote_xvd_ref = &remote_xvd;
-    let jobs = rfiles
-        .iter()
-        .filter(|(k, v1)| {
-            if let Some(v2) = lfiles.get(*k) {
-                v1.data_hashs != v2.data_hashs || v1.data_hashs.is_empty()
-            } else {
-                true
-            }
-        })
-        .map(|(n, v)| Job {
-            name: n.clone(),
-            content: SegmentFile {
-                offset: v.offset,
-                length: v.length,
-                data_hashs: vec![],
-                keep_encrypted: v.keep_encrypted,
-            },
-        })
-        .collect::<Vec<_>>();
+    let jobs = changed_jobs(&rfiles, &lfiles);
     if let Some(err) = jobs
         .iter()
         .find_map(|job| package_path_components(&job.name).err())
@@ -632,16 +958,17 @@ where
         return false;
     }
 
+    let job_names = jobs.iter().map(|job| job.name.clone()).collect::<Vec<_>>();
     let write_failed = Arc::new(AtomicBool::new(false));
-    let transaction_root = out.to_path_buf();
+    let transaction_payload = transaction_payload.clone();
     stream::iter(jobs.into_iter().enumerate())
         .for_each_concurrent(parallel.unwrap_or(4), |(id, job)| {
             let tx = tx.clone();
             let client = client.clone();
-            let transaction_root = transaction_root.clone();
+            let transaction_payload = transaction_payload.clone();
             let write_failed = write_failed.clone();
             async move {
-                let output = match open_package_output(&transaction_root, &job.name) {
+                let output = match open_package_output(&transaction_payload, &job.name) {
                     Ok(output) => output,
                     Err(err) => {
                         eprintln!("refusing package output path: {err}");
@@ -743,8 +1070,25 @@ where
         eprintln!("failed to sync package cache: {err}");
         return false;
     }
-    if let Err(err) = promote_cache(&cache_path, &final_path) {
+    let mut promotion_specs = Vec::with_capacity(job_names.len() + 1);
+    promotion_specs.push((
+        ".xodus-streaming-tmp.msixvc".to_owned(),
+        ".xodus-streaming.msixvc".to_owned(),
+    ));
+    promotion_specs.extend(job_names.into_iter().map(|name| (name.clone(), name)));
+    let mut entries = match promotion_entries(&promotion_specs) {
+        Ok(entries) => entries,
+        Err(err) => {
+            eprintln!("failed to prepare package transaction journal: {err}");
+            return false;
+        }
+    };
+    if let Err(err) = promote_transaction(&transaction_root, out, &mut entries) {
         eprintln!("failed to promote package cache: {err}");
+        return false;
+    }
+    if let Err(err) = transaction.close() {
+        eprintln!("failed to remove completed package transaction staging: {err}");
         return false;
     }
     true
@@ -752,9 +1096,14 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::io::Write;
 
-    use super::{open_package_output, package_path_components, promote_cache};
+    use super::{
+        PromotionState, SegmentFile, changed_jobs, new_transaction, open_package_output,
+        package_path_components, promote_transaction, promotion_entries, recover_transaction_dir,
+        write_transaction_journal,
+    };
 
     #[test]
     fn package_paths_accept_one_relative_separator_style() {
@@ -803,6 +1152,25 @@ mod tests {
         assert!(!temporary.path().join("data.bin").exists());
     }
 
+    #[test]
+    fn changed_jobs_preserve_remote_page_hashes_for_integrity_validation() {
+        let mut remote = HashMap::new();
+        remote.insert(
+            "content/game.bin".to_owned(),
+            SegmentFile {
+                offset: 7,
+                length: 4096,
+                data_hashs: vec![[0x11; 20]],
+                keep_encrypted: true,
+            },
+        );
+
+        let jobs = changed_jobs(&remote, &HashMap::new());
+
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].content.data_hashs, vec![[0x11; 20]]);
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn package_output_refuses_symlink_escape() {
@@ -820,16 +1188,97 @@ mod tests {
     }
 
     #[test]
-    fn cache_promotion_replaces_the_current_package_without_predelete() {
+    fn transaction_promotion_replaces_multiple_files_without_predelete() {
         let temporary = tempfile::tempdir().unwrap();
-        let cache = temporary.path().join("cache.msixvc");
-        let current = temporary.path().join("current.msixvc");
-        std::fs::write(&cache, b"new").unwrap();
-        std::fs::write(&current, b"old").unwrap();
+        let output = temporary.path().join("output");
+        std::fs::create_dir(&output).unwrap();
+        std::fs::write(output.join(".xodus-streaming.msixvc"), b"old package").unwrap();
+        std::fs::create_dir(output.join("content")).unwrap();
+        std::fs::write(output.join("content/game.bin"), b"old sidecar").unwrap();
+        let (transaction, payload) = new_transaction(&output).unwrap();
+        std::fs::write(payload.join(".xodus-streaming-tmp.msixvc"), b"new package").unwrap();
+        let mut output_file = open_package_output(&payload, "content/game.bin").unwrap();
+        output_file.write_all(b"new sidecar").unwrap();
+        output_file.sync_all().unwrap();
 
-        promote_cache(&cache, &current).unwrap();
+        let specs = vec![
+            (
+                ".xodus-streaming-tmp.msixvc".to_owned(),
+                ".xodus-streaming.msixvc".to_owned(),
+            ),
+            ("content/game.bin".to_owned(), "content/game.bin".to_owned()),
+        ];
+        let mut entries = promotion_entries(&specs).unwrap();
+        promote_transaction(transaction.path(), &output, &mut entries).unwrap();
 
-        assert_eq!(std::fs::read(&current).unwrap(), b"new");
-        assert!(!cache.exists());
+        assert_eq!(
+            std::fs::read(output.join(".xodus-streaming.msixvc")).unwrap(),
+            b"new package"
+        );
+        assert_eq!(
+            std::fs::read(output.join("content/game.bin")).unwrap(),
+            b"new sidecar"
+        );
+    }
+
+    #[test]
+    fn transaction_promotion_rolls_back_all_files_when_one_stage_is_missing() {
+        let temporary = tempfile::tempdir().unwrap();
+        let output = temporary.path().join("output");
+        std::fs::create_dir(&output).unwrap();
+        std::fs::write(output.join(".xodus-streaming.msixvc"), b"old package").unwrap();
+        std::fs::create_dir(output.join("content")).unwrap();
+        std::fs::write(output.join("content/game.bin"), b"old sidecar").unwrap();
+        let (transaction, payload) = new_transaction(&output).unwrap();
+        std::fs::write(payload.join(".xodus-streaming-tmp.msixvc"), b"new package").unwrap();
+
+        let specs = vec![
+            (
+                ".xodus-streaming-tmp.msixvc".to_owned(),
+                ".xodus-streaming.msixvc".to_owned(),
+            ),
+            ("content/game.bin".to_owned(), "content/game.bin".to_owned()),
+        ];
+        let mut entries = promotion_entries(&specs).unwrap();
+        assert!(promote_transaction(transaction.path(), &output, &mut entries).is_err());
+
+        assert_eq!(
+            std::fs::read(output.join(".xodus-streaming.msixvc")).unwrap(),
+            b"old package"
+        );
+        assert_eq!(
+            std::fs::read(output.join("content/game.bin")).unwrap(),
+            b"old sidecar"
+        );
+    }
+
+    #[test]
+    fn transaction_recovery_restores_a_promoted_file_from_its_journal() {
+        let temporary = tempfile::tempdir().unwrap();
+        let output = temporary.path().join("output");
+        std::fs::create_dir(&output).unwrap();
+        let (transaction, payload) = new_transaction(&output).unwrap();
+        let final_path = output.join(".xodus-streaming.msixvc");
+        let backup_path = transaction
+            .path()
+            .join(".xodus-streaming-backup/.xodus-streaming.msixvc");
+        std::fs::write(&final_path, b"old package").unwrap();
+        std::fs::create_dir_all(backup_path.parent().unwrap()).unwrap();
+        std::fs::rename(&final_path, &backup_path).unwrap();
+        std::fs::write(payload.join(".xodus-streaming-tmp.msixvc"), b"new package").unwrap();
+        std::fs::rename(payload.join(".xodus-streaming-tmp.msixvc"), &final_path).unwrap();
+        let specs = vec![(
+            ".xodus-streaming-tmp.msixvc".to_owned(),
+            ".xodus-streaming.msixvc".to_owned(),
+        )];
+        let mut entries = promotion_entries(&specs).unwrap();
+        entries[0].had_previous = true;
+        entries[0].state = PromotionState::Promoted;
+        write_transaction_journal(transaction.path(), &entries, false).unwrap();
+
+        recover_transaction_dir(transaction.path(), &output).unwrap();
+
+        assert_eq!(std::fs::read(final_path).unwrap(), b"old package");
+        assert!(!transaction.path().exists());
     }
 }
