@@ -280,6 +280,7 @@ pub struct XvdFile {
 }
 
 const MAX_XVC_REGION_HEADERS: u32 = 4_096;
+const SEGMENT_METADATA_READER_CAPACITY: usize = PAGE_SIZE;
 
 #[derive(thiserror::Error, Debug)]
 pub enum XvdFileParseError {
@@ -417,6 +418,14 @@ fn package_file_name(fullname: &[u16]) -> Result<String, UserPackageFilesParseEr
 
 fn segment_file_name(fullname: &[u16]) -> Result<String, SegmentMetadataParseError> {
     String::from_utf16(fullname).map_err(SegmentMetadataParseError::InvalidFileName)
+}
+
+fn segment_metadata_reader_capacity() -> usize {
+    SEGMENT_METADATA_READER_CAPACITY
+}
+
+fn segment_metadata_reader<Reader: AsyncRead>(file: Reader) -> BufReader<Reader> {
+    BufReader::with_capacity(segment_metadata_reader_capacity(), file)
 }
 
 fn validate_xvc_region_hash_entry_addresses(
@@ -716,7 +725,7 @@ impl XvdFile {
     where
         Reader: AsyncRead + AsyncSeek + Unpin,
     {
-        let mut file = BufReader::with_capacity(segment_metadata.length as usize, file);
+        let mut file = segment_metadata_reader(file);
         file.seek(SeekFrom::Start(segment_metadata.offset)).await?;
         let segment_header = {
             let mut buf = XvdSegmentMetadataHeader::buffer();
@@ -1273,9 +1282,11 @@ mod tests {
     use tokio::io::{AsyncRead, AsyncSeek, ReadBuf};
 
     use super::{
-        MAX_XVC_REGION_HEADERS, SegmentMetadataParseError, UserPackageFilesParseError, XvdFile,
-        XvdFileParseError, hash_entry_read_offset, hash_page_index, package_file_name,
-        reserve_xvc_region_entries, segment_file_name, validate_xvc_region_hash_entry_addresses,
+        MAX_XVC_REGION_HEADERS, SEGMENT_METADATA_READER_CAPACITY, SegmentMetadataParseError,
+        UserPackageFile, UserPackageFilesParseError, XvdFile, XvdFileParseError,
+        hash_entry_read_offset, hash_page_index, package_file_name, reserve_xvc_region_entries,
+        segment_file_name, segment_metadata_reader_capacity,
+        validate_xvc_region_hash_entry_addresses,
     };
 
     const XVD_HEADER_SIZE: usize = 4096;
@@ -1588,6 +1599,38 @@ mod tests {
             error,
             SegmentMetadataParseError::InvalidFileName(_)
         ));
+    }
+
+    #[test]
+    fn segment_metadata_reader_capacity_is_independent_of_declared_length() {
+        let maximum_declared_length = u64::MAX;
+        let reader_capacity = segment_metadata_reader_capacity();
+
+        assert_eq!(reader_capacity, SEGMENT_METADATA_READER_CAPACITY);
+        assert_ne!(reader_capacity as u64, maximum_declared_length);
+    }
+
+    #[tokio::test]
+    async fn parse_segment_metadata_uses_fixed_capacity_for_maximum_declared_length() {
+        let xvd = XvdFile::parse(SyntheticXvdReader::synthetic_xvd_with_region_count(0))
+            .await
+            .expect("synthetic XVD must parse");
+        let segment_metadata = UserPackageFile {
+            offset: 0,
+            length: u64::MAX,
+        };
+        let error = match xvd
+            .parse_segment_metadata(
+                SyntheticXvdReader::synthetic_xvd_header(true),
+                &segment_metadata,
+            )
+            .await
+        {
+            Ok(_) => panic!("maximum declared metadata length must reach the synthetic seek"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(error, SegmentMetadataParseError::Io(_)));
     }
 
     #[tokio::test]
