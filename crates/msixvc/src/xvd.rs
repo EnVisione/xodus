@@ -423,6 +423,12 @@ pub enum XvdFileParseError {
         region_count: u32,
         max_region_count: u32,
     },
+    #[error("XVC region count {region_count} cannot fit in memory")]
+    RegionCountCannotFit { region_count: u32 },
+    #[error("unable to reserve {region_count} XVC region headers")]
+    RegionHeaderAllocationFailed { region_count: u32 },
+    #[error("unable to reserve {region_count} XVC encrypted sections")]
+    RegionSectionAllocationFailed { region_count: u32 },
     #[error("XVC information version {version} exceeds the supported maximum of {max_version}")]
     UnsupportedXvcInfoVersion { version: u32, max_version: u32 },
     #[error("XVC key ID {key_id} is not supported")]
@@ -2213,6 +2219,7 @@ impl XvdFile {
         let xvc_info_offset = layout.xvc_info_offset;
 
         let mut region_headers: Vec<XvcRegionHeader> = Vec::new();
+        let mut enc_sections: Vec<EncryptedSectionInfo> = Vec::new();
 
         // XvdHeader::try_from_array validates the content type before metadata access.
         if xvd_header.xvc_data_length > 0 {
@@ -2238,6 +2245,14 @@ impl XvdFile {
                     max_region_count: MAX_XVC_REGION_HEADERS,
                 });
             }
+            let region_capacity = usize::try_from(region_count)
+                .map_err(|_| XvdFileParseError::RegionCountCannotFit { region_count })?;
+            region_headers
+                .try_reserve_exact(region_capacity)
+                .map_err(|_| XvdFileParseError::RegionHeaderAllocationFailed { region_count })?;
+            enc_sections
+                .try_reserve_exact(region_capacity)
+                .map_err(|_| XvdFileParseError::RegionSectionAllocationFailed { region_count })?;
 
             if xvc_info.version >= 1 {
                 let mut buf = XvcRegionHeader::buffer();
@@ -2260,7 +2275,6 @@ impl XvdFile {
             },
         )?;
 
-        let mut enc_sections: Vec<EncryptedSectionInfo> = vec![];
         let mut reader = BufReader::with_capacity(PAGES_PER_BLOCK * XvdHashEntry::SIZE, file);
         for h in region_headers {
             let key_id = h.key_id;
