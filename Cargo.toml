@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+exclude = ["fuzz"]
 
 [workspace.dependencies]
 chrono = "0.4.45"
