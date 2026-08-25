@@ -50,13 +50,15 @@ impl<R> Debug for SyncSubstream<R> {
 }
 
 impl<R> SyncSubstream<R> {
-    pub fn new(inner: R, start: u64, len: u64) -> Self {
-        Self {
+    pub fn new(inner: R, start: u64, len: u64) -> Result<Self, NtfsSegmentMetadataParseError> {
+        sync_substream_end(start, len)?;
+
+        Ok(Self {
             inner,
             start,
             len,
             pos: 0,
-        }
+        })
     }
 
     pub fn len(&self) -> u64 {
@@ -80,6 +82,39 @@ impl<R> SyncSubstream<R> {
     }
 }
 
+fn sync_substream_end(start: u64, len: u64) -> Result<u64, NtfsSegmentMetadataParseError> {
+    start
+        .checked_add(len)
+        .ok_or(NtfsSegmentMetadataParseError::SyncSubstreamEndOverflow { start, len })
+}
+
+fn sync_substream_absolute_target(start: u64, pos: u64) -> io::Result<u64> {
+    start.checked_add(pos).ok_or_else(|| {
+        Error::new(
+            ErrorKind::InvalidInput,
+            "substream absolute target overflow",
+        )
+    })
+}
+
+fn sync_substream_advanced_position(
+    pos: u64,
+    returned_count: usize,
+    requested_count: usize,
+) -> io::Result<u64> {
+    if returned_count > requested_count {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "substream inner I/O returned more bytes than requested",
+        ));
+    }
+    let returned_count = u64::try_from(returned_count)
+        .map_err(|_| Error::new(ErrorKind::InvalidData, "substream returned count too large"))?;
+
+    pos.checked_add(returned_count)
+        .ok_or_else(|| Error::new(ErrorKind::InvalidData, "substream position overflow"))
+}
+
 impl<R: Read + Seek> Read for SyncSubstream<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if self.pos >= self.len {
@@ -90,9 +125,10 @@ impl<R: Read + Seek> Read for SyncSubstream<R> {
             .map_err(|_| Error::new(ErrorKind::InvalidData, "remaining range too large"))?;
         let to_read = remaining.min(buf.len());
 
-        self.inner.seek(SeekFrom::Start(self.start + self.pos))?;
+        let absolute_target = sync_substream_absolute_target(self.start, self.pos)?;
+        self.inner.seek(SeekFrom::Start(absolute_target))?;
         let read = self.inner.read(&mut buf[..to_read])?;
-        self.pos += read as u64;
+        self.pos = sync_substream_advanced_position(self.pos, read, to_read)?;
         Ok(read)
     }
 }
@@ -147,9 +183,10 @@ impl<R: Write + Seek> Write for SyncSubstream<R> {
             .map_err(|_| Error::new(ErrorKind::InvalidData, "remaining range too large"))?;
         let to_write = remaining.min(buf.len());
 
-        self.inner.seek(SeekFrom::Start(self.start + self.pos))?;
+        let absolute_target = sync_substream_absolute_target(self.start, self.pos)?;
+        self.inner.seek(SeekFrom::Start(absolute_target))?;
         let written = self.inner.write(&buf[..to_write])?;
-        self.pos += written as u64;
+        self.pos = sync_substream_advanced_position(self.pos, written, to_write)?;
         Ok(written)
     }
 
@@ -573,6 +610,8 @@ pub enum NtfsSegmentMetadataParseError {
     },
     #[error("XVD stream end {end_offset} is before virtual offset {offset}")]
     XvdStreamEndBeforeOffset { offset: u64, end_offset: u64 },
+    #[error("substream end overflows for start {start} and length {len}")]
+    SyncSubstreamEndOverflow { start: u64, len: u64 },
     #[error("declared drive end overflows for offset {drive_data_offset} and size {drive_size}")]
     DriveEndOverflow {
         drive_data_offset: u64,
@@ -2173,7 +2212,7 @@ impl XvdFile {
                 )?,
                 0,
                 drive_plain_len,
-            );
+            )?;
 
             let gp = gpt::GptConfig::new()
                 .writable(false)
@@ -2217,7 +2256,7 @@ impl XvdFile {
                 XvdStream::new(bridge, partition.offset, partition.plain_end, None)?,
                 0,
                 partition_plain_len,
-            );
+            )?;
 
             let reports = collect_ntfs_stream_layouts(&mut fs)
                 .map_err(|error| NtfsSegmentMetadataParseError::Ntfs(Box::new(error)))?;
@@ -2515,7 +2554,7 @@ impl XvdFile {
 mod tests {
     use std::{
         collections::HashMap,
-        io::{Cursor, Error, ErrorKind, Seek},
+        io::{Cursor, Error, ErrorKind, Read, Seek, Write},
         pin::Pin,
         sync::{
             Arc,
@@ -2531,17 +2570,18 @@ mod tests {
     use super::{
         DownloadFileHttpError, EncryptedSectionInfo, ExtractFileError, MAX_XVC_REGION_HEADERS,
         NtfsSegmentMetadataParseError, PAGE_SIZE, PopulateSegmentHashesError,
-        SEGMENT_METADATA_READER_CAPACITY, SegmentFile, SegmentMetadataParseError, UserPackageFile,
-        UserPackageFilesParseError, XvcRegionId, XvdFile, XvdFileParseError, XvdStream,
-        collect_ntfs_segment_files, download_encrypted_section, download_file_end,
+        SEGMENT_METADATA_READER_CAPACITY, SegmentFile, SegmentMetadataParseError, SyncSubstream,
+        UserPackageFile, UserPackageFilesParseError, XvcRegionId, XvdFile, XvdFileParseError,
+        XvdStream, collect_ntfs_segment_files, download_encrypted_section, download_file_end,
         download_page_plan, download_request_range, extract_data_unit_index,
         extract_encrypted_section, extract_file_end, extract_page_loop_end, extract_page_plan,
         extract_progress_bytes, extract_write_length, hash_entry_read_offset, hash_page_index,
         next_download_page, next_segment_page_offset, non_encrypted_prefix_len, ntfs_drive_extents,
         ntfs_partition_extents, package_file_name, required_gpt_partition_length,
         required_gpt_partition_start, reserve_xvc_region_entries, segment_file_name,
-        segment_metadata_reader_capacity, validate_segment_metadata_table_extent,
-        validate_xvc_region_hash_entry_addresses, xvd_stream_absolute_seek_target,
+        segment_metadata_reader_capacity, sync_substream_absolute_target,
+        validate_segment_metadata_table_extent, validate_xvc_region_hash_entry_addresses,
+        xvd_stream_absolute_seek_target,
     };
 
     const XVD_HEADER_SIZE: usize = 4096;
@@ -2571,6 +2611,30 @@ mod tests {
     const SYNTHETIC_DRIVE_DATA_OFFSET: u64 = 0x5000;
     const SYNTHETIC_DRIVE_DATA_END: u64 = SYNTHETIC_DRIVE_DATA_OFFSET + SYNTHETIC_DRIVE_SIZE;
     const WINDOWS_TO_UNIX_FILETIME: i64 = 116_444_736_000_000_000;
+
+    struct OverReportingIo;
+
+    impl Read for OverReportingIo {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            Ok(buf.len() + 1)
+        }
+    }
+
+    impl Seek for OverReportingIo {
+        fn seek(&mut self, _pos: std::io::SeekFrom) -> std::io::Result<u64> {
+            Ok(0)
+        }
+    }
+
+    impl Write for OverReportingIo {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            Ok(buf.len() + 1)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
 
     struct SyntheticXvdReader {
         inner: Cursor<Vec<u8>>,
@@ -3538,6 +3602,71 @@ mod tests {
         assert_eq!(stream.seek(std::io::SeekFrom::Current(2)).unwrap(), 2);
         assert_eq!(stream.seek(std::io::SeekFrom::End(-1)).unwrap(), 3);
         assert_eq!(stream.into_inner().position(), 103);
+    }
+
+    #[test]
+    fn sync_substream_rejects_overflowing_extent_before_exposure() {
+        let error = match SyncSubstream::new(Cursor::new(Vec::<u8>::new()), u64::MAX, 1) {
+            Ok(_) => panic!("overflowing substream extent must fail before exposure"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            NtfsSegmentMetadataParseError::SyncSubstreamEndOverflow {
+                start: u64::MAX,
+                len: 1,
+            }
+        ));
+    }
+
+    #[test]
+    fn sync_substream_rejects_absolute_target_overflow_before_inner_io() {
+        let error = sync_substream_absolute_target(u64::MAX, 1)
+            .expect_err("overflowing substream target must fail before inner I/O");
+
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn sync_substream_rejects_adversarial_counts_without_position_mutation() {
+        let mut read_stream = SyncSubstream::new(OverReportingIo, 0, 1)
+            .expect("valid substream extent must construct");
+        let mut buf = [0; 1];
+        let read_error = read_stream
+            .read(&mut buf)
+            .expect_err("overreported read count must fail");
+
+        let mut write_stream = SyncSubstream::new(OverReportingIo, 0, 1)
+            .expect("valid substream extent must construct");
+        let write_error = write_stream
+            .write(&[0])
+            .expect_err("overreported write count must fail");
+
+        assert_eq!(read_error.kind(), ErrorKind::InvalidData);
+        assert_eq!(write_error.kind(), ErrorKind::InvalidData);
+        assert_eq!(read_stream.pos, 0);
+        assert_eq!(write_stream.pos, 0);
+    }
+
+    #[test]
+    fn sync_substream_preserves_valid_bounded_read_write_and_seek_behavior() {
+        let mut reader = SyncSubstream::new(Cursor::new(vec![0, 1, 2, 3, 4]), 1, 3)
+            .expect("valid read substream extent must construct");
+        let mut buf = [0; 4];
+
+        assert_eq!(reader.read(&mut buf).unwrap(), 3);
+        assert_eq!(&buf[..3], &[1, 2, 3]);
+        assert_eq!(reader.pos, 3);
+        assert_eq!(reader.seek(std::io::SeekFrom::Start(0)).unwrap(), 0);
+        assert_eq!(reader.seek(std::io::SeekFrom::Current(1)).unwrap(), 1);
+        assert_eq!(reader.seek(std::io::SeekFrom::End(-1)).unwrap(), 2);
+
+        let mut writer = SyncSubstream::new(Cursor::new(vec![0; 5]), 1, 3)
+            .expect("valid write substream extent must construct");
+        assert_eq!(writer.write(&[9, 8, 7, 6]).unwrap(), 3);
+        assert_eq!(writer.pos, 3);
+        assert_eq!(writer.into_inner().into_inner(), vec![0, 9, 8, 7, 0]);
     }
 
     #[test]
