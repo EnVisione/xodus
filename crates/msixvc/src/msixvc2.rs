@@ -1,6 +1,6 @@
 use std::{
     collections::HashSet,
-    io::{Read, Seek},
+    io::{Read, Seek, SeekFrom},
 };
 
 use zip::{CompressionMethod, ZipArchive, result::ZipError};
@@ -56,6 +56,14 @@ pub enum Msixvc2ParseError {
 }
 
 pub fn inspect<R>(reader: R) -> Result<Msixvc2Archive, Msixvc2ParseError>
+where
+    R: Read + Seek,
+{
+    let mut reader = reader;
+    inspect_reader(&mut reader)
+}
+
+fn inspect_reader<R>(reader: &mut R) -> Result<Msixvc2Archive, Msixvc2ParseError>
 where
     R: Read + Seek,
 {
@@ -131,6 +139,9 @@ pub fn verify_all<R>(reader: R, max_uncompressed_size: u64) -> Result<(), Msixvc
 where
     R: Read + Seek,
 {
+    let mut reader = reader;
+    inspect_reader(&mut reader)?;
+    reader.seek(SeekFrom::Start(0))?;
     let mut archive = ZipArchive::new(reader)?;
     let mut total = 0_u64;
     for index in 0..archive.len() {
@@ -217,5 +228,13 @@ mod tests {
     fn verifies_crc_for_every_msixvc2_entry() {
         verify_all(Cursor::new(VALID), 1_000_000).expect("valid fixture CRCs should verify");
         assert!(verify_all(Cursor::new(INTEGRITY_MISMATCH), 1_000_000).is_err());
+    }
+
+    #[test]
+    fn full_verification_rejects_unsafe_structure_before_crc_scan() {
+        assert!(matches!(
+            verify_all(Cursor::new(ADVERSARIAL_PATH), 1_000_000),
+            Err(Msixvc2ParseError::UnsafeEntryPath { .. })
+        ));
     }
 }
