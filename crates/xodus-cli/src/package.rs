@@ -9,6 +9,7 @@ use xodus::models::secrets::Token;
 use xodus::tokens::TokenManager;
 
 const MAX_CONTENT_ID_REDIRECTS: usize = 8;
+const MAX_PACKAGE_ID_BYTES: usize = 512;
 
 fn package_download_url_capacity(
     cdn_root_count: usize,
@@ -56,6 +57,10 @@ fn package_endpoint_url(content_id: &str, version_id: Option<&str>) -> io::Resul
     } else {
         "GetBasePackage"
     };
+    validate_package_id(content_id, "package content ID")?;
+    if let Some(version_id) = version_id {
+        validate_package_id(version_id, "package version ID")?;
+    }
     let mut segments = url.path_segments_mut().map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidData,
@@ -63,24 +68,23 @@ fn package_endpoint_url(content_id: &str, version_id: Option<&str>) -> io::Resul
         )
     })?;
     segments.push(endpoint);
-    if content_id.is_empty() || content_id.chars().any(char::is_control) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "package content ID is empty or contains control characters",
-        ));
-    }
     segments.push(content_id);
     if let Some(version_id) = version_id {
-        if version_id.is_empty() || version_id.chars().any(char::is_control) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "package version ID is empty or contains control characters",
-            ));
-        }
         segments.push(version_id);
     }
     drop(segments);
     Ok(url)
+}
+
+fn validate_package_id(value: &str, name: &str) -> io::Result<()> {
+    if value.is_empty() || value.len() > MAX_PACKAGE_ID_BYTES || value.chars().any(char::is_control)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{name} is empty, oversized, or contains control characters"),
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn package_download_urls(
@@ -272,8 +276,8 @@ async fn get_packages_at_endpoint(
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_CONTENT_ID_REDIRECTS, package_download_url_capacity, package_endpoint_url,
-        register_content_id_redirect,
+        MAX_CONTENT_ID_REDIRECTS, MAX_PACKAGE_ID_BYTES, package_download_url_capacity,
+        package_endpoint_url, register_content_id_redirect,
     };
 
     #[test]
@@ -299,6 +303,14 @@ mod tests {
         }
         assert!(package_endpoint_url("content\n", None).is_err());
         assert!(package_endpoint_url("content", Some("version\r")).is_err());
+    }
+
+    #[test]
+    fn package_endpoint_url_rejects_oversized_ids() {
+        assert!(package_endpoint_url(&"x".repeat(MAX_PACKAGE_ID_BYTES + 1), None).is_err());
+        assert!(
+            package_endpoint_url("content", Some(&"x".repeat(MAX_PACKAGE_ID_BYTES + 1))).is_err()
+        );
     }
 
     #[test]
