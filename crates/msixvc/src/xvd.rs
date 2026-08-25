@@ -599,6 +599,87 @@ pub enum NtfsSegmentMetadataParseError {
     FileBeyondPartition { file_end: u64, partition_end: u64 },
 }
 
+#[derive(thiserror::Error, Debug)]
+pub enum DownloadFileHttpError {
+    #[error(transparent)]
+    Io(#[from] io::Error),
+    #[error(
+        "download file end overflows for file offset {file_offset} and file length {file_length}"
+    )]
+    FileEndOverflow { file_offset: u64, file_length: u64 },
+    #[error(
+        "download encrypted section end overflows for section offset {section_offset} and section length {section_length}"
+    )]
+    SectionEndOverflow {
+        section_offset: u64,
+        section_length: u64,
+    },
+    #[error("download file end {file_end} exceeds encrypted section end {section_end}")]
+    FileBeyondSection { file_end: u64, section_end: u64 },
+    #[error(
+        "download file offset {file_offset} is before encrypted section offset {section_offset}"
+    )]
+    FileOffsetBeforeSection {
+        file_offset: u64,
+        section_offset: u64,
+    },
+    #[error("download decryption state requires an encrypted section")]
+    MissingEncryptedSection,
+    #[error("download aligned page length overflows for page count {page_count}")]
+    AlignedPageLengthOverflow { page_count: u64 },
+    #[error("download page loop end overflows for start {page_start} and count {page_count}")]
+    PageLoopEndOverflow { page_start: u64, page_count: u64 },
+    #[error(
+        "download HTTP range end overflows for request start {request_start} and length {page_length}"
+    )]
+    RequestRangeEndOverflow {
+        request_start: u64,
+        page_length: u64,
+    },
+    #[error(
+        "download resume range start overflows for file offset {file_offset} and received bytes {received_bytes}"
+    )]
+    ResumeRangeStartOverflow {
+        file_offset: u64,
+        received_bytes: u64,
+    },
+    #[error("download resume offset {received_bytes} exceeds aligned page length {page_length}")]
+    ResumeRangeBeyondPageSpan {
+        received_bytes: u64,
+        page_length: u64,
+    },
+    #[error("download page index {page_in_section} cannot fit in usize")]
+    PageIndexTooLarge { page_in_section: u64 },
+    #[error(
+        "download data-unit index {page_in_section} is missing from {data_unit_count} section entries"
+    )]
+    DataUnitMissing {
+        page_in_section: u64,
+        data_unit_count: usize,
+    },
+    #[error("download data-unit index {page_in_section} cannot fit in u32")]
+    DataUnitIndexTooLarge { page_in_section: u64 },
+    #[error("download page advancement overflows for page {page_in_section}")]
+    PageAdvanceOverflow { page_in_section: u64 },
+    #[error("download received chunk length cannot fit in u64: {chunk_length}")]
+    ReceivedChunkLengthTooLarge { chunk_length: usize },
+    #[error(
+        "download received byte count overflows for current {received_bytes} and chunk length {chunk_length}"
+    )]
+    ReceivedByteCountOverflow {
+        received_bytes: u64,
+        chunk_length: u64,
+    },
+    #[error(
+        "download is incomplete: {remaining} of {file_length} bytes remain after {received_bytes} bytes"
+    )]
+    IncompleteTransfer {
+        remaining: u64,
+        file_length: u64,
+        received_bytes: u64,
+    },
+}
+
 fn reserve_xvc_region_entries(
     num_pages: u64,
 ) -> Result<(Vec<u32>, Vec<[u8; 20]>), XvdFileParseError> {
@@ -1187,6 +1268,158 @@ fn collect_ntfs_segment_files(
     Ok(files)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DownloadRequestRange {
+    start: u64,
+    end: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DownloadPagePlan {
+    page_start: u64,
+    page_count: u64,
+    page_loop_end: u64,
+    page_length: u64,
+    initial_request: DownloadRequestRange,
+}
+
+fn download_file_end(file_offset: u64, file_length: u64) -> Result<u64, DownloadFileHttpError> {
+    file_offset
+        .checked_add(file_length)
+        .ok_or(DownloadFileHttpError::FileEndOverflow {
+            file_offset,
+            file_length,
+        })
+}
+
+fn download_encrypted_section(
+    sections: &[EncryptedSectionInfo],
+    file_offset: u64,
+    file_end: u64,
+) -> Result<Option<&EncryptedSectionInfo>, DownloadFileHttpError> {
+    for section in sections {
+        let section_end = section
+            .section_offset
+            .checked_add(section.section_length)
+            .ok_or(DownloadFileHttpError::SectionEndOverflow {
+                section_offset: section.section_offset,
+                section_length: section.section_length,
+            })?;
+        if file_offset >= section.section_offset && file_offset < section_end {
+            if file_end > section_end {
+                return Err(DownloadFileHttpError::FileBeyondSection {
+                    file_end,
+                    section_end,
+                });
+            }
+            return Ok(Some(section));
+        }
+    }
+
+    Ok(None)
+}
+
+fn download_file_offset_in_section(
+    file_offset: u64,
+    section: Option<&EncryptedSectionInfo>,
+) -> Result<u64, DownloadFileHttpError> {
+    let Some(section) = section else {
+        return Ok(file_offset);
+    };
+
+    file_offset.checked_sub(section.section_offset).ok_or(
+        DownloadFileHttpError::FileOffsetBeforeSection {
+            file_offset,
+            section_offset: section.section_offset,
+        },
+    )
+}
+
+fn download_request_range(
+    file_offset: u64,
+    page_length: u64,
+    received_bytes: u64,
+) -> Result<DownloadRequestRange, DownloadFileHttpError> {
+    if received_bytes >= page_length {
+        return Err(DownloadFileHttpError::ResumeRangeBeyondPageSpan {
+            received_bytes,
+            page_length,
+        });
+    }
+    let start = file_offset.checked_add(received_bytes).ok_or(
+        DownloadFileHttpError::ResumeRangeStartOverflow {
+            file_offset,
+            received_bytes,
+        },
+    )?;
+    let end = file_offset.checked_add(page_length - 1).ok_or(
+        DownloadFileHttpError::RequestRangeEndOverflow {
+            request_start: file_offset,
+            page_length,
+        },
+    )?;
+
+    Ok(DownloadRequestRange { start, end })
+}
+
+fn download_page_plan(
+    file_offset_in_section: u64,
+    file_offset: u64,
+    file_length: u64,
+) -> Result<DownloadPagePlan, DownloadFileHttpError> {
+    let page_start = file_offset_in_section / PAGE_SIZE as u64;
+    let page_count = file_length.div_ceil(PAGE_SIZE as u64);
+    let page_length = page_count
+        .checked_mul(PAGE_SIZE as u64)
+        .ok_or(DownloadFileHttpError::AlignedPageLengthOverflow { page_count })?;
+    let page_loop_end =
+        page_start
+            .checked_add(page_count)
+            .ok_or(DownloadFileHttpError::PageLoopEndOverflow {
+                page_start,
+                page_count,
+            })?;
+    let initial_request = download_request_range(file_offset, page_length, 0)?;
+
+    Ok(DownloadPagePlan {
+        page_start,
+        page_count,
+        page_loop_end,
+        page_length,
+        initial_request,
+    })
+}
+
+fn download_page_index(page_in_section: u64) -> Result<usize, DownloadFileHttpError> {
+    usize::try_from(page_in_section)
+        .map_err(|_| DownloadFileHttpError::PageIndexTooLarge { page_in_section })
+}
+
+fn download_data_unit_index(page_in_section: u64) -> Result<u32, DownloadFileHttpError> {
+    u32::try_from(page_in_section)
+        .map_err(|_| DownloadFileHttpError::DataUnitIndexTooLarge { page_in_section })
+}
+
+fn next_download_page(page_in_section: u64) -> Result<u64, DownloadFileHttpError> {
+    page_in_section
+        .checked_add(1)
+        .ok_or(DownloadFileHttpError::PageAdvanceOverflow { page_in_section })
+}
+
+fn next_download_received_byte_count(
+    received_bytes: u64,
+    chunk_length: usize,
+) -> Result<u64, DownloadFileHttpError> {
+    let chunk_length = u64::try_from(chunk_length)
+        .map_err(|_| DownloadFileHttpError::ReceivedChunkLengthTooLarge { chunk_length })?;
+    received_bytes.checked_add(chunk_length).ok_or(
+        DownloadFileHttpError::ReceivedByteCountOverflow {
+            received_bytes,
+            chunk_length,
+        },
+    )
+}
+
 fn segment_section_end(
     section_offset: u64,
     section_length: u64,
@@ -1741,7 +1974,7 @@ impl XvdFile {
         sfile: &SegmentFile,
         full_key: [u8; 32],
         mut progress: Progress,
-    ) -> Result<(), Box<dyn std::error::Error>>
+    ) -> Result<(), DownloadFileHttpError>
     where
         Writer: AsyncWrite + Unpin,
         Progress: FnMut(u64, u64),
@@ -1750,15 +1983,14 @@ impl XvdFile {
             return Ok(());
         }
 
-        let s = &self.encrypted_section_infos.iter().find(|s| {
-            sfile.offset >= s.section_offset && sfile.offset < s.section_offset + s.section_length
-        });
+        let file_end = download_file_end(sfile.offset, sfile.length)?;
+        let s = download_encrypted_section(&self.encrypted_section_infos, sfile.offset, file_end)?;
 
         let mut tweak = None;
         let mut tweak_cipher = None;
         let mut data_cipher = None;
 
-        let file_offset_in_section;
+        let file_offset_in_section = download_file_offset_in_section(sfile.offset, s)?;
 
         if let Some(s) = s
             && !sfile.keep_encrypted
@@ -1771,18 +2003,12 @@ impl XvdFile {
             tweak = Some(Tweak::new(0, s.header_id, s.vduid));
             tweak_cipher = Some(Aes128::new((&tweak_key).into()));
             data_cipher = Some(Aes128::new((&data_key).into()));
-            file_offset_in_section = sfile.offset - s.section_offset;
-        } else {
-            // TODO for data integrity we need a section for unencrypted sections...
-            file_offset_in_section = sfile.offset;
         }
-        let page_start = file_offset_in_section / PAGE_SIZE as u64;
-        let page_count = sfile.length.div_ceil(PAGE_SIZE as u64);
+        let page_plan = download_page_plan(file_offset_in_section, sfile.offset, sfile.length)?;
 
         let mut page = [0u8; PAGE_SIZE];
         let mut remaining = sfile.length;
-        let mut page_in_section = page_start;
-        let page_length = sfile.length.div_ceil(PAGE_SIZE as u64) * PAGE_SIZE as u64;
+        let mut page_in_section = page_plan.page_start;
         let mut stream = None;
         let mut pending = bytes::BytesMut::new();
         let mut v: u64 = 0;
@@ -1796,8 +2022,7 @@ impl XvdFile {
                     RANGE,
                     format!(
                         "bytes={}-{}",
-                        sfile.offset + v,
-                        sfile.offset + page_length - 1
+                        page_plan.initial_request.start, page_plan.initial_request.end
                     ),
                 )
                 .send(),
@@ -1809,7 +2034,7 @@ impl XvdFile {
             stream = Some(response.bytes_stream());
         }
         loop {
-            if page_in_section >= page_start + page_count || remaining == 0 {
+            if page_in_section >= page_plan.page_loop_end || remaining == 0 {
                 break;
             }
             let next = if let Some(s) = stream.as_mut() {
@@ -1822,17 +2047,15 @@ impl XvdFile {
                 data = b;
             } else {
                 // error
+                let resume_request =
+                    download_request_range(sfile.offset, page_plan.page_length, v)?;
                 if let Ok(Ok(Ok(response))) = timeout(
                     stall_timeout,
                     client
                         .get(url)
                         .header(
                             RANGE,
-                            format!(
-                                "bytes={}-{}",
-                                sfile.offset + v,
-                                sfile.offset + page_length - 1
-                            ),
+                            format!("bytes={}-{}", resume_request.start, resume_request.end),
                         )
                         .send(),
                 )
@@ -1846,35 +2069,33 @@ impl XvdFile {
                 continue;
             }
 
-            v += data.len() as u64;
+            v = next_download_received_byte_count(v, data.len())?;
             progress(min(v, sfile.length), sfile.length);
 
             pending.extend_from_slice(&data);
 
             while pending.len() >= 4096 {
-                if page_in_section >= page_start + page_count || remaining == 0 {
+                if page_in_section >= page_plan.page_loop_end || remaining == 0 {
                     break;
                 }
                 let chunk = pending.split_to(4096);
                 page.copy_from_slice(&chunk);
                 let to_write_remaining = remaining.min(PAGE_SIZE as u64) as usize;
                 let to_write = if let Some(tweak) = tweak.as_mut() {
-                    tweak.update_data_unit(match &s.unwrap().data_units {
-                        Some(units) => *units.get(page_in_section as usize).ok_or_else(|| {
-                            io::Error::new(
-                                io::ErrorKind::InvalidInput,
-                                format!(
-                                    "{} units {} page_in_section {} ({}+{})",
-                                    "missing data unit",
-                                    (*units).len(),
+                    let s = s.ok_or(DownloadFileHttpError::MissingEncryptedSection)?;
+                    let data_unit = match &s.data_units {
+                        Some(units) => {
+                            let page_index = download_page_index(page_in_section)?;
+                            *units.get(page_index).ok_or(
+                                DownloadFileHttpError::DataUnitMissing {
                                     page_in_section,
-                                    page_start,
-                                    page_count
-                                ),
-                            )
-                        })?,
-                        None => page_in_section as u32,
-                    });
+                                    data_unit_count: units.len(),
+                                },
+                            )?
+                        }
+                        None => download_data_unit_index(page_in_section)?,
+                    };
+                    tweak.update_data_unit(data_unit);
                     decrypt_page_xts(
                         &mut page,
                         *tweak,
@@ -1895,14 +2116,15 @@ impl XvdFile {
                 }
                 remaining -= to_write_remaining as u64;
 
-                page_in_section += 1;
+                page_in_section = next_download_page(page_in_section)?;
             }
         }
         if remaining > 0 {
-            return Err(Box::new(std::io::Error::other(format!(
-                "{} of {} missing have {}",
-                remaining, sfile.length, v
-            ))));
+            return Err(DownloadFileHttpError::IncompleteTransfer {
+                remaining,
+                file_length: sfile.length,
+                received_bytes: v,
+            });
         }
         Ok(())
     }
@@ -2065,11 +2287,13 @@ mod tests {
     use crate::streaming_ntfs::{NtfsDataRunReport, NtfsStreamLayoutReport};
 
     use super::{
-        EncryptedSectionInfo, MAX_XVC_REGION_HEADERS, NtfsSegmentMetadataParseError, PAGE_SIZE,
-        PopulateSegmentHashesError, SEGMENT_METADATA_READER_CAPACITY, SegmentFile,
-        SegmentMetadataParseError, UserPackageFile, UserPackageFilesParseError, XvcRegionId,
-        XvdFile, XvdFileParseError, collect_ntfs_segment_files, hash_entry_read_offset,
-        hash_page_index, next_segment_page_offset, ntfs_drive_extents, ntfs_partition_extents,
+        DownloadFileHttpError, EncryptedSectionInfo, MAX_XVC_REGION_HEADERS,
+        NtfsSegmentMetadataParseError, PAGE_SIZE, PopulateSegmentHashesError,
+        SEGMENT_METADATA_READER_CAPACITY, SegmentFile, SegmentMetadataParseError, UserPackageFile,
+        UserPackageFilesParseError, XvcRegionId, XvdFile, XvdFileParseError,
+        collect_ntfs_segment_files, download_encrypted_section, download_file_end,
+        download_page_plan, download_request_range, hash_entry_read_offset, hash_page_index,
+        next_download_page, next_segment_page_offset, ntfs_drive_extents, ntfs_partition_extents,
         package_file_name, required_gpt_partition_length, required_gpt_partition_start,
         reserve_xvc_region_entries, segment_file_name, segment_metadata_reader_capacity,
         validate_segment_metadata_table_extent, validate_xvc_region_hash_entry_addresses,
@@ -3171,6 +3395,122 @@ mod tests {
         assert_eq!(file.offset, 510);
         assert_eq!(file.length, 20);
         assert!(file.keep_encrypted);
+    }
+
+    #[test]
+    fn download_preflight_rejects_file_end_overflow_before_request_or_write() {
+        let error = download_file_end(u64::MAX, 1)
+            .expect_err("overflowing download file extent must fail before request creation");
+
+        assert!(matches!(
+            error,
+            DownloadFileHttpError::FileEndOverflow {
+                file_offset: u64::MAX,
+                file_length: 1,
+            }
+        ));
+    }
+
+    #[test]
+    fn download_preflight_rejects_overflowing_section_before_request_or_write() {
+        let sections = [EncryptedSectionInfo {
+            section_offset: u64::MAX,
+            section_length: 1,
+            header_id: XvcRegionId::Unknown,
+            vduid: [0; 8],
+            data_units: None,
+            first_segment_index: 0,
+            data_hashs: vec![],
+        }];
+        let error = download_encrypted_section(&sections, u64::MAX, u64::MAX)
+            .expect_err("overflowing section extent must fail before request creation");
+
+        assert!(matches!(
+            error,
+            DownloadFileHttpError::SectionEndOverflow {
+                section_offset: u64::MAX,
+                section_length: 1,
+            }
+        ));
+    }
+
+    #[test]
+    fn download_preflight_rejects_file_beyond_section_before_request_or_write() {
+        let sections = [EncryptedSectionInfo {
+            section_offset: 0,
+            section_length: PAGE_SIZE as u64,
+            header_id: XvcRegionId::Unknown,
+            vduid: [0; 8],
+            data_units: None,
+            first_segment_index: 0,
+            data_hashs: vec![],
+        }];
+        let error =
+            download_encrypted_section(&sections, (PAGE_SIZE - 1) as u64, PAGE_SIZE as u64 + 1)
+                .expect_err("file beyond section must fail before request creation");
+
+        assert!(matches!(
+            error,
+            DownloadFileHttpError::FileBeyondSection {
+                file_end,
+                section_end,
+            } if file_end == PAGE_SIZE as u64 + 1 && section_end == PAGE_SIZE as u64
+        ));
+    }
+
+    #[test]
+    fn download_preflight_rejects_overflowing_page_or_http_range_before_request_or_write() {
+        let page_error = download_page_plan(0, 0, u64::MAX)
+            .expect_err("overflowing aligned page length must fail before request creation");
+        let range_error = download_page_plan(0, u64::MAX - 4_094, 1)
+            .expect_err("overflowing HTTP range must fail before request creation");
+
+        assert!(matches!(
+            page_error,
+            DownloadFileHttpError::AlignedPageLengthOverflow { .. }
+        ));
+        assert!(matches!(
+            range_error,
+            DownloadFileHttpError::RequestRangeEndOverflow {
+                request_start: value,
+                page_length,
+            } if value == u64::MAX - 4_094 && page_length == PAGE_SIZE as u64
+        ));
+    }
+
+    #[test]
+    fn download_preflight_rejects_invalid_resume_and_page_advancement_before_write() {
+        let resume_error = download_request_range(0, PAGE_SIZE as u64, PAGE_SIZE as u64)
+            .expect_err("resume beyond page span must fail before request creation");
+        let advance_error = next_download_page(u64::MAX)
+            .expect_err("overflowing page advancement must fail before write");
+
+        assert!(matches!(
+            resume_error,
+            DownloadFileHttpError::ResumeRangeBeyondPageSpan {
+                received_bytes: value,
+                page_length,
+            } if value == PAGE_SIZE as u64 && page_length == PAGE_SIZE as u64
+        ));
+        assert!(matches!(
+            advance_error,
+            DownloadFileHttpError::PageAdvanceOverflow {
+                page_in_section: u64::MAX,
+            }
+        ));
+    }
+
+    #[test]
+    fn download_preflight_preserves_a_valid_single_page_range() {
+        let plan = download_page_plan(0, 64, 1)
+            .expect("valid single-page download must produce a request range");
+
+        assert_eq!(plan.page_start, 0);
+        assert_eq!(plan.page_count, 1);
+        assert_eq!(plan.page_loop_end, 1);
+        assert_eq!(plan.page_length, PAGE_SIZE as u64);
+        assert_eq!(plan.initial_request.start, 64);
+        assert_eq!(plan.initial_request.end, 64 + PAGE_SIZE as u64 - 1);
     }
 
     #[tokio::test]
