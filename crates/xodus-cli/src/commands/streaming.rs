@@ -1337,7 +1337,18 @@ where
         eprintln!("failed to sync package cache: {err}");
         return false;
     }
-    let mut promotion_specs = Vec::with_capacity(job_names.len() + 1);
+    let promotion_capacity = match promotion_entry_capacity(1, job_names.len()) {
+        Ok(capacity) => capacity,
+        Err(error) => {
+            eprintln!("failed to size package promotion entries: {error}");
+            return false;
+        }
+    };
+    let mut promotion_specs = Vec::new();
+    if let Err(error) = promotion_specs.try_reserve(promotion_capacity) {
+        eprintln!("failed to allocate package promotion entries: {error}");
+        return false;
+    }
     promotion_specs.push((
         ".xodus-streaming-tmp.msixvc".to_owned(),
         ".xodus-streaming.msixvc".to_owned(),
