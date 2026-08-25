@@ -4,7 +4,7 @@
 
 This inventory covers Rust production sources under `crates/` and supports the Phase 2 requirement that remotely influenced parser, package, service, and environment paths do not contain placeholder macros or unconditional process aborts.
 
-The inventory was refreshed on August 25, 2026 after the parser hardening checkpoints `070eb42`, `658beef`, `e9eab1a`, `7f9d68e`, `65b9274`, `59b37c5`, `c7e6347`, `d474620`, and `d002e3e`.
+The inventory was refreshed on August 25, 2026 after the parser and service hardening checkpoints `070eb42`, `658beef`, `e9eab1a`, `7f9d68e`, `65b9274`, `59b37c5`, `c7e6347`, `d474620`, `d002e3e`, and `b8a998e`.
 
 ## Scan
 
@@ -34,7 +34,7 @@ The result contains no `TODO`, `todo!`, or `unimplemented!` match in the current
 | SPLicense binary decoding | Base64 input and TLV payloads are bounded before allocation, short signature blocks fail without subtraction underflow, packed content key identifiers and 40 byte key lengths are validated, malformed SOAP token fragment references fail instead of indexing, and SOAP response bodies are bounded before XML decoding. | `crates/xodus/src/licensing/splicense.rs`, `crates/xodus/src/api/live/rst/request.rs` |
 | RST request construction | Empty scope policy input returns a typed builder error before token removal, so malformed or incomplete callers cannot trigger an empty vector panic. | `crates/xodus/src/api/live/rst/builder.rs`, `RSTBuilderError::MissingScopePolicy` |
 | Hardware probing | Linux reads the kernel SMBIOS file directly without an interactive privilege subprocess, bounds collection before parsing, rejects malformed headers, string indexes, and UUID ranges with typed I/O errors, and reports unavailable disk serial identity instead of a fabricated constant. | `crates/xodus/src/hardware.rs`, `read_bounded_smbios`, `parse_smbios`, `provisioning_does_not_fabricate_a_disk_serial` |
-| Service IPC | Bounded payloads, deadlines, connection and rate limits, peer identity checks, absolute private runtime directory validation, explicit unsupported operations, and escaped machine-readable errors. | `crates/xodus-service/src/connection`, `crates/xodus-service/src/main.rs`, and startup code |
+| Service IPC | Bounded payloads, deadlines, connection and rate limits, peer identity checks, absolute private runtime directory validation, explicit unsupported operations, escaped machine-readable errors, and bounded control-free MSA client identifiers validated before account-state or token access. | `crates/xodus-service/src/connection`, `crates/xodus-service/src/main.rs`, `validate_msa_client_id`, and `invalid_msa_client_id_fails_before_account_state_access` |
 
 ## Test-only matches
 

@@ -192,7 +192,13 @@ pub async fn parse_message(
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_MSA_CLIENT_ID_BYTES, validate_msa_client_id};
+    use std::sync::Arc;
+
+    use xodus::models::secrets::LegacyToken;
+    use xodus::models::soap::Timestamp;
+    use xodus::tokens::TokenManager;
+
+    use super::{MAX_MSA_CLIENT_ID_BYTES, SimpleContext, validate_msa_client_id};
 
     #[test]
     fn msa_client_id_accepts_bounded_visible_value() {
@@ -204,5 +210,33 @@ mod tests {
         assert!(validate_msa_client_id("").is_err());
         assert!(validate_msa_client_id("client\nvalue").is_err());
         assert!(validate_msa_client_id(&"x".repeat(MAX_MSA_CLIENT_ID_BYTES + 1)).is_err());
+    }
+
+    #[tokio::test]
+    async fn invalid_msa_client_id_fails_before_account_state_access() {
+        let device_token = LegacyToken {
+            key_name: None,
+            token: String::new(),
+            binary_secret: None,
+            tpm_key: None,
+            lifetime: Timestamp {
+                id: None,
+                created: String::new(),
+                expires: String::new(),
+            },
+        };
+        let mut context = SimpleContext::new(device_token, Arc::new(TokenManager::with_memory()))
+            .expect("test client must build");
+        let request = b"<MSATokenRequest><ClientId></ClientId></MSATokenRequest>".to_vec();
+
+        let error = super::parse_message(
+            &mut context,
+            xodus::proto::xodus::XodusMessageType::MsaTokenRequest,
+            request,
+        )
+        .await
+        .expect_err("empty client id must fail before reading account state");
+
+        assert!(error.to_string().contains("invalid MSA client id"));
     }
 }
