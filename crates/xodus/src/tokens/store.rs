@@ -25,4 +25,6 @@ pub enum TokenStoreError {
     Serde(#[from] serde_json::Error),
     #[error("entry not found")]
     NotFound,
+    #[error("token memory backend lock is poisoned")]
+    Poisoned,
 }
