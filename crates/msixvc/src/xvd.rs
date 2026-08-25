@@ -30,7 +30,7 @@ use crate::models::xvd::{
     XvdSegmentMetadataHeaderParseError, XvdSegmentMetadataSegment, XvdSegmentMetadataSegmentFlags,
     XvdUserDataHeader, XvdUserDataPackageFileEntry, XvdUserDataPackageFilesHeader,
 };
-use crate::streaming_ntfs::collect_ntfs_stream_layouts;
+use crate::streaming_ntfs::{NtfsStreamLayoutReport, collect_ntfs_stream_layouts};
 
 pub struct SyncSubstream<R> {
     inner: R,
@@ -510,6 +510,95 @@ pub enum PopulateSegmentHashesError {
     HashSliceBeyondAvailableHashes { end: usize, data_hash_count: usize },
 }
 
+#[derive(thiserror::Error, Debug)]
+pub enum NtfsSegmentMetadataParseError {
+    #[error("GPT metadata parsing failed: {0}")]
+    Gpt(#[source] Box<dyn std::error::Error>),
+    #[error("NTFS metadata parsing failed: {0}")]
+    Ntfs(#[source] Box<dyn std::error::Error>),
+    #[error(transparent)]
+    SegmentHashes(#[from] PopulateSegmentHashesError),
+    #[error("no used GPT partition was found")]
+    NoUsedGptPartition,
+    #[error("declared drive end overflows for offset {drive_data_offset} and size {drive_size}")]
+    DriveEndOverflow {
+        drive_data_offset: u64,
+        drive_size: u64,
+    },
+    #[error(
+        "plaintext drive end overflows for offset {drive_data_offset} and length {drive_plain_len}"
+    )]
+    PlaintextDriveEndOverflow {
+        drive_data_offset: u64,
+        drive_plain_len: u64,
+    },
+    #[error("plaintext drive end {drive_plain_end} exceeds declared drive end {drive_data_end}")]
+    PlaintextDriveBeyondDeclared {
+        drive_plain_end: u64,
+        drive_data_end: u64,
+    },
+    #[error("used GPT partition start is unavailable: {0}")]
+    GptPartitionStartUnavailable(#[source] io::Error),
+    #[error("used GPT partition length is unavailable: {0}")]
+    GptPartitionLengthUnavailable(#[source] io::Error),
+    #[error(
+        "GPT partition end overflows for partition start {partition_start} and length {partition_length}"
+    )]
+    PartitionRelativeEndOverflow {
+        partition_start: u64,
+        partition_length: u64,
+    },
+    #[error("GPT partition end {partition_end} exceeds declared drive size {drive_size}")]
+    PartitionBeyondDeclaredDrive { partition_end: u64, drive_size: u64 },
+    #[error(
+        "absolute partition offset overflows for drive offset {drive_data_offset} and partition start {partition_start}"
+    )]
+    PartitionOffsetOverflow {
+        drive_data_offset: u64,
+        partition_start: u64,
+    },
+    #[error(
+        "absolute partition end overflows for partition offset {partition_offset} and length {partition_length}"
+    )]
+    PartitionEndOverflow {
+        partition_offset: u64,
+        partition_length: u64,
+    },
+    #[error(
+        "plaintext partition end overflows for partition offset {partition_offset} and length {partition_plain_len}"
+    )]
+    PlaintextPartitionEndOverflow {
+        partition_offset: u64,
+        partition_plain_len: u64,
+    },
+    #[error("plaintext partition end {partition_plain_end} exceeds partition end {partition_end}")]
+    PlaintextPartitionBeyondPartition {
+        partition_plain_end: u64,
+        partition_end: u64,
+    },
+    #[error("NTFS data run end overflows for start {data_run_start} and length {data_run_length}")]
+    DataRunEndOverflow {
+        data_run_start: u64,
+        data_run_length: u64,
+    },
+    #[error("NTFS data run end {data_run_end} exceeds partition length {partition_length}")]
+    DataRunBeyondPartition {
+        data_run_end: u64,
+        partition_length: u64,
+    },
+    #[error(
+        "absolute NTFS file offset overflows for partition offset {partition_offset} and data run start {data_run_start}"
+    )]
+    FileOffsetOverflow {
+        partition_offset: u64,
+        data_run_start: u64,
+    },
+    #[error("NTFS file end overflows for file offset {file_offset} and length {file_length}")]
+    FileEndOverflow { file_offset: u64, file_length: u64 },
+    #[error("NTFS file end {file_end} exceeds partition end {partition_end}")]
+    FileBeyondPartition { file_end: u64, partition_end: u64 },
+}
+
 fn reserve_xvc_region_entries(
     num_pages: u64,
 ) -> Result<(Vec<u32>, Vec<[u8; 20]>), XvdFileParseError> {
@@ -893,6 +982,209 @@ fn populate_segment_hash_slice_bounds(
     }
 
     Ok(start..end)
+}
+
+#[derive(Clone, Copy)]
+struct NtfsDriveExtents {
+    end: u64,
+    plain_end: u64,
+}
+
+#[derive(Clone, Copy)]
+struct NtfsPartitionExtents {
+    offset: u64,
+    end: u64,
+    length: u64,
+    plain_end: u64,
+}
+
+fn ntfs_drive_extents(
+    drive_data_offset: u64,
+    drive_size: u64,
+    drive_plain_len: u64,
+) -> Result<NtfsDriveExtents, NtfsSegmentMetadataParseError> {
+    let end = drive_data_offset.checked_add(drive_size).ok_or(
+        NtfsSegmentMetadataParseError::DriveEndOverflow {
+            drive_data_offset,
+            drive_size,
+        },
+    )?;
+    let plain_end = drive_data_offset.checked_add(drive_plain_len).ok_or(
+        NtfsSegmentMetadataParseError::PlaintextDriveEndOverflow {
+            drive_data_offset,
+            drive_plain_len,
+        },
+    )?;
+    if plain_end > end {
+        return Err(
+            NtfsSegmentMetadataParseError::PlaintextDriveBeyondDeclared {
+                drive_plain_end: plain_end,
+                drive_data_end: end,
+            },
+        );
+    }
+
+    Ok(NtfsDriveExtents { end, plain_end })
+}
+
+fn required_gpt_partition_start(
+    partition_start: io::Result<u64>,
+) -> Result<u64, NtfsSegmentMetadataParseError> {
+    partition_start.map_err(NtfsSegmentMetadataParseError::GptPartitionStartUnavailable)
+}
+
+fn required_gpt_partition_length(
+    partition_length: io::Result<u64>,
+) -> Result<u64, NtfsSegmentMetadataParseError> {
+    partition_length.map_err(NtfsSegmentMetadataParseError::GptPartitionLengthUnavailable)
+}
+
+fn ntfs_partition_extents(
+    drive_data_offset: u64,
+    drive_size: u64,
+    drive_extents: NtfsDriveExtents,
+    partition_start: u64,
+    partition_length: u64,
+    partition_plain_len: u64,
+) -> Result<NtfsPartitionExtents, NtfsSegmentMetadataParseError> {
+    let partition_relative_end = partition_start.checked_add(partition_length).ok_or(
+        NtfsSegmentMetadataParseError::PartitionRelativeEndOverflow {
+            partition_start,
+            partition_length,
+        },
+    )?;
+    if partition_relative_end > drive_size {
+        return Err(
+            NtfsSegmentMetadataParseError::PartitionBeyondDeclaredDrive {
+                partition_end: partition_relative_end,
+                drive_size,
+            },
+        );
+    }
+
+    let offset = drive_data_offset.checked_add(partition_start).ok_or(
+        NtfsSegmentMetadataParseError::PartitionOffsetOverflow {
+            drive_data_offset,
+            partition_start,
+        },
+    )?;
+    let end = offset.checked_add(partition_length).ok_or(
+        NtfsSegmentMetadataParseError::PartitionEndOverflow {
+            partition_offset: offset,
+            partition_length,
+        },
+    )?;
+    if end > drive_extents.end {
+        return Err(
+            NtfsSegmentMetadataParseError::PartitionBeyondDeclaredDrive {
+                partition_end: partition_relative_end,
+                drive_size,
+            },
+        );
+    }
+
+    let plain_end = offset.checked_add(partition_plain_len).ok_or(
+        NtfsSegmentMetadataParseError::PlaintextPartitionEndOverflow {
+            partition_offset: offset,
+            partition_plain_len,
+        },
+    )?;
+    if plain_end > end {
+        return Err(
+            NtfsSegmentMetadataParseError::PlaintextPartitionBeyondPartition {
+                partition_plain_end: plain_end,
+                partition_end: end,
+            },
+        );
+    }
+
+    Ok(NtfsPartitionExtents {
+        offset,
+        end,
+        length: partition_length,
+        plain_end,
+    })
+}
+
+fn segment_file_from_ntfs_report(
+    report: &NtfsStreamLayoutReport,
+    partition: NtfsPartitionExtents,
+    only_plain: bool,
+) -> Result<Option<(String, SegmentFile)>, NtfsSegmentMetadataParseError> {
+    if report.path.starts_with('$') || report.path.contains(':') {
+        return Ok(None);
+    }
+    if report.resident_data || report.data_runs.len() != 1 {
+        return Ok(None);
+    }
+
+    let Some(data_run) = report.data_runs.first() else {
+        return Ok(None);
+    };
+    let Some(data_run_start) = data_run.start else {
+        return Ok(None);
+    };
+    let data_run_end = data_run_start.checked_add(data_run.length).ok_or(
+        NtfsSegmentMetadataParseError::DataRunEndOverflow {
+            data_run_start,
+            data_run_length: data_run.length,
+        },
+    )?;
+    if data_run_end > partition.length {
+        return Err(NtfsSegmentMetadataParseError::DataRunBeyondPartition {
+            data_run_end,
+            partition_length: partition.length,
+        });
+    }
+
+    let file_offset = partition.offset.checked_add(data_run_start).ok_or(
+        NtfsSegmentMetadataParseError::FileOffsetOverflow {
+            partition_offset: partition.offset,
+            data_run_start,
+        },
+    )?;
+    let file_end = file_offset.checked_add(report.value_length).ok_or(
+        NtfsSegmentMetadataParseError::FileEndOverflow {
+            file_offset,
+            file_length: report.value_length,
+        },
+    )?;
+    if file_end > partition.end {
+        return Err(NtfsSegmentMetadataParseError::FileBeyondPartition {
+            file_end,
+            partition_end: partition.end,
+        });
+    }
+    if only_plain && file_offset >= partition.plain_end {
+        return Ok(None);
+    }
+
+    Ok(Some((
+        report.path.replace('/', "\\"),
+        SegmentFile {
+            offset: file_offset,
+            length: report.value_length,
+            data_hashs: vec![],
+            keep_encrypted: !only_plain && report.path.to_ascii_lowercase().ends_with(".exe"),
+        },
+    )))
+}
+
+fn collect_ntfs_segment_files(
+    reports: impl IntoIterator<Item = NtfsStreamLayoutReport>,
+    partition: NtfsPartitionExtents,
+    only_plain: bool,
+) -> Result<HashMap<String, SegmentFile>, NtfsSegmentMetadataParseError> {
+    let mut files = HashMap::new();
+    for report in reports {
+        if let Some((path, segment_file)) =
+            segment_file_from_ntfs_report(&report, partition, only_plain)?
+        {
+            files.insert(path, segment_file);
+        }
+    }
+
+    Ok(files)
 }
 
 fn segment_section_end(
@@ -1360,13 +1652,14 @@ impl XvdFile {
         &self,
         file: Reader,
         only_plain: bool,
-    ) -> Result<HashMap<String, SegmentFile>, Box<dyn std::error::Error>>
+    ) -> Result<HashMap<String, SegmentFile>, NtfsSegmentMetadataParseError>
     where
         Reader: AsyncRead + AsyncSeek + Unpin,
     {
         let drive_data_offset = self.drive_data_offset;
         let drive_size = self.header.drive_size;
         let drive_plain_len = self.non_encrypted_prefix_len(drive_data_offset, drive_size);
+        let drive_extents = ntfs_drive_extents(drive_data_offset, drive_size, drive_plain_len)?;
 
         block_in_place(|| {
             let block_size = 4096;
@@ -1374,7 +1667,7 @@ impl XvdFile {
                 XvdStream {
                     inner: SyncIoBridge::new(file),
                     offset: drive_data_offset,
-                    end_offset: drive_data_offset + drive_plain_len,
+                    end_offset: drive_extents.plain_end,
                     encryption_info: None,
                 },
                 0,
@@ -1390,66 +1683,49 @@ impl XvdFile {
                 } else {
                     todo!("unsupported block_size: {}", block_size)
                 })
-                .open_from_device(drive)?;
+                .open_from_device(drive)
+                .map_err(|error| NtfsSegmentMetadataParseError::Gpt(Box::new(error)))?;
 
             let (_, part) = gp
                 .partitions()
                 .iter()
                 .find(|(_, part)| part.is_used())
-                .ok_or_else(|| {
-                    io::Error::new(ErrorKind::NotFound, "no used GPT partition found")
-                })?;
+                .ok_or(NtfsSegmentMetadataParseError::NoUsedGptPartition)?;
 
-            let part_start = part.bytes_start(*gp.logical_block_size()).unwrap();
-            let part_len = part.bytes_len(*gp.logical_block_size()).unwrap();
+            let part_start =
+                required_gpt_partition_start(part.bytes_start(*gp.logical_block_size()))?;
+            let part_len = required_gpt_partition_length(part.bytes_len(*gp.logical_block_size()))?;
 
             let bridge = gp.take_device().into_inner().into_inner();
-            let partition_offset = drive_data_offset + part_start;
+            let partition_offset = drive_data_offset.checked_add(part_start).ok_or(
+                NtfsSegmentMetadataParseError::PartitionOffsetOverflow {
+                    drive_data_offset,
+                    partition_start: part_start,
+                },
+            )?;
             let partition_plain_len = self.non_encrypted_prefix_len(partition_offset, part_len);
+            let partition = ntfs_partition_extents(
+                drive_data_offset,
+                drive_size,
+                drive_extents,
+                part_start,
+                part_len,
+                partition_plain_len,
+            )?;
             let mut fs = SyncSubstream::new(
                 XvdStream {
                     inner: bridge,
-                    offset: partition_offset,
-                    end_offset: partition_offset + partition_plain_len,
+                    offset: partition.offset,
+                    end_offset: partition.plain_end,
                     encryption_info: None,
                 },
                 0,
                 partition_plain_len,
             );
 
-            let reports = collect_ntfs_stream_layouts(&mut fs)?;
-            let mut files = HashMap::new();
-
-            for report in reports {
-                if report.path.starts_with('$') || report.path.contains(':') {
-                    continue;
-                }
-                if report.resident_data || report.data_runs.len() != 1 {
-                    continue;
-                }
-
-                let Some(data_run) = report.data_runs.first() else {
-                    continue;
-                };
-                let Some(start) = data_run.start else {
-                    continue;
-                };
-
-                if only_plain && partition_offset + start >= drive_data_offset + drive_plain_len {
-                    continue;
-                }
-
-                files.insert(
-                    report.path.replace("/", "\\"),
-                    SegmentFile {
-                        offset: partition_offset + start,
-                        length: report.value_length,
-                        data_hashs: vec![],
-                        keep_encrypted: !only_plain
-                            && report.path.to_ascii_lowercase().ends_with(".exe"),
-                    },
-                );
-            }
+            let reports = collect_ntfs_stream_layouts(&mut fs)
+                .map_err(|error| NtfsSegmentMetadataParseError::Ntfs(Box::new(error)))?;
+            let mut files = collect_ntfs_segment_files(reports, partition, only_plain)?;
 
             self.populate_segment_hashes(&mut files)?;
 
@@ -1786,11 +2062,15 @@ mod tests {
 
     use tokio::io::{AsyncRead, AsyncSeek, ReadBuf};
 
+    use crate::streaming_ntfs::{NtfsDataRunReport, NtfsStreamLayoutReport};
+
     use super::{
-        EncryptedSectionInfo, MAX_XVC_REGION_HEADERS, PAGE_SIZE, PopulateSegmentHashesError,
-        SEGMENT_METADATA_READER_CAPACITY, SegmentFile, SegmentMetadataParseError, UserPackageFile,
-        UserPackageFilesParseError, XvcRegionId, XvdFile, XvdFileParseError,
-        hash_entry_read_offset, hash_page_index, next_segment_page_offset, package_file_name,
+        EncryptedSectionInfo, MAX_XVC_REGION_HEADERS, NtfsSegmentMetadataParseError, PAGE_SIZE,
+        PopulateSegmentHashesError, SEGMENT_METADATA_READER_CAPACITY, SegmentFile,
+        SegmentMetadataParseError, UserPackageFile, UserPackageFilesParseError, XvcRegionId,
+        XvdFile, XvdFileParseError, collect_ntfs_segment_files, hash_entry_read_offset,
+        hash_page_index, next_segment_page_offset, ntfs_drive_extents, ntfs_partition_extents,
+        package_file_name, required_gpt_partition_length, required_gpt_partition_start,
         reserve_xvc_region_entries, segment_file_name, segment_metadata_reader_capacity,
         validate_segment_metadata_table_extent, validate_xvc_region_hash_entry_addresses,
     };
@@ -2754,6 +3034,143 @@ mod tests {
             .expect("valid section hashes must populate");
 
         assert_eq!(files["valid-hash"].data_hashs, vec![[7; 20]]);
+    }
+
+    #[test]
+    fn ntfs_drive_extents_reject_declared_drive_overflow_before_gpt_parsing() {
+        let error = match ntfs_drive_extents(u64::MAX, 1, 0) {
+            Ok(_) => panic!("overflowing declared drive extent must fail"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            NtfsSegmentMetadataParseError::DriveEndOverflow {
+                drive_data_offset: u64::MAX,
+                drive_size: 1,
+            }
+        ));
+    }
+
+    #[test]
+    fn ntfs_gpt_geometry_failures_are_typed() {
+        let start_error = required_gpt_partition_start(Err(Error::other("missing start")))
+            .expect_err("missing GPT partition start must fail");
+        let length_error = required_gpt_partition_length(Err(Error::other("missing length")))
+            .expect_err("missing GPT partition length must fail");
+
+        assert!(matches!(
+            start_error,
+            NtfsSegmentMetadataParseError::GptPartitionStartUnavailable(_)
+        ));
+        assert!(matches!(
+            length_error,
+            NtfsSegmentMetadataParseError::GptPartitionLengthUnavailable(_)
+        ));
+    }
+
+    #[test]
+    fn ntfs_partition_extent_rejects_a_partition_beyond_the_drive() {
+        let drive = ntfs_drive_extents(0, 100, 100).unwrap();
+        let error = match ntfs_partition_extents(0, 100, drive, 99, 2, 0) {
+            Ok(_) => panic!("partition beyond declared drive must fail"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            NtfsSegmentMetadataParseError::PartitionBeyondDeclaredDrive {
+                partition_end: 101,
+                drive_size: 100,
+            }
+        ));
+    }
+
+    #[test]
+    fn ntfs_segment_files_reject_an_invalid_data_run_before_insertion() {
+        let drive = ntfs_drive_extents(500, 100, 100).unwrap();
+        let partition = ntfs_partition_extents(500, 100, drive, 0, 100, 100).unwrap();
+        let report = NtfsStreamLayoutReport {
+            file_record_number: 1,
+            path: "invalid.bin".to_string(),
+            resident_data: false,
+            resident_data_length: 0,
+            value_length: 1,
+            data_runs: vec![NtfsDataRunReport {
+                start: Some(99),
+                length: 2,
+            }],
+        };
+
+        let error = match collect_ntfs_segment_files(vec![report], partition, false) {
+            Ok(_) => panic!("data run beyond partition must fail before insertion"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            NtfsSegmentMetadataParseError::DataRunBeyondPartition {
+                data_run_end: 101,
+                partition_length: 100,
+            }
+        ));
+    }
+
+    #[test]
+    fn ntfs_segment_files_reject_a_file_beyond_partition_before_insertion() {
+        let drive = ntfs_drive_extents(500, 100, 100).unwrap();
+        let partition = ntfs_partition_extents(500, 100, drive, 0, 100, 100).unwrap();
+        let report = NtfsStreamLayoutReport {
+            file_record_number: 1,
+            path: "spanning.bin".to_string(),
+            resident_data: false,
+            resident_data_length: 0,
+            value_length: 11,
+            data_runs: vec![NtfsDataRunReport {
+                start: Some(90),
+                length: 10,
+            }],
+        };
+
+        let error = match collect_ntfs_segment_files(vec![report], partition, false) {
+            Ok(_) => panic!("file beyond partition must fail before insertion"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            NtfsSegmentMetadataParseError::FileBeyondPartition {
+                file_end: 601,
+                partition_end: 600,
+            }
+        ));
+    }
+
+    #[test]
+    fn ntfs_segment_files_preserve_a_valid_single_file() {
+        let drive = ntfs_drive_extents(500, 100, 100).unwrap();
+        let partition = ntfs_partition_extents(500, 100, drive, 0, 100, 100).unwrap();
+        let report = NtfsStreamLayoutReport {
+            file_record_number: 1,
+            path: "games/app.exe".to_string(),
+            resident_data: false,
+            resident_data_length: 0,
+            value_length: 20,
+            data_runs: vec![NtfsDataRunReport {
+                start: Some(10),
+                length: 20,
+            }],
+        };
+
+        let files = collect_ntfs_segment_files(vec![report], partition, false)
+            .expect("valid NTFS file must be preserved");
+        let file = files
+            .get("games\\app.exe")
+            .expect("valid NTFS file must be inserted");
+
+        assert_eq!(file.offset, 510);
+        assert_eq!(file.length, 20);
+        assert!(file.keep_encrypted);
     }
 
     #[tokio::test]
