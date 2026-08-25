@@ -822,5 +822,6 @@ mod tests {
                 .windows(9)
                 .any(|window| { window == [0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01] })
         );
+        assert_eq!(format!("{key:?}"), "RsaPrivateKeyDer { length: 53 }");
     }
 }

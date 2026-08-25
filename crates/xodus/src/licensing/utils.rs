@@ -1,6 +1,7 @@
 use num_bigint_dig::{BigUint as NbBigUint, ModInverse};
 use num_integer::Integer;
 use rand::distr::{Alphanumeric, SampleString};
+use std::fmt;
 use thiserror::Error;
 use zeroize::Zeroizing;
 
@@ -24,8 +25,17 @@ pub enum BcryptRsaPrivateError {
     NonInvertibleCoefficient,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 pub struct RsaPrivateKeyDer(Zeroizing<Vec<u8>>);
+
+impl fmt::Debug for RsaPrivateKeyDer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RsaPrivateKeyDer")
+            .field("length", &self.0.len())
+            .finish()
+    }
+}
 
 impl RsaPrivateKeyDer {
     pub fn as_bytes(&self) -> &[u8] {
@@ -84,7 +94,7 @@ pub fn parse_bcrypt_rsa_private(
         Ok((NbBigUint::from_bytes_be(bytes), bytes.to_vec()))
     };
 
-    // use nb_* names for internal arithmetic BigUints and store raw bytes for conversion back
+    // use nb_* names for internal arithmetic BigUints and retain raw bytes for DER encoding
     let (e_nb, _e_bytes) = take(cb_pub_exp)?;
     let (_n_nb, n_bytes) = take(cb_mod)?;
     let (p_nb, _p_bytes) = take(cb_p1)?;
