@@ -70,6 +70,20 @@ fn checked_active_http_offset(current: u64, received: usize, total: u64) -> io::
     Ok(next)
 }
 
+fn checked_cache_position(current: u64, advanced: usize, limit: u64) -> io::Result<u64> {
+    let next = u64::try_from(advanced)
+        .ok()
+        .and_then(|advanced| current.checked_add(advanced))
+        .ok_or_else(|| Error::new(ErrorKind::InvalidData, "cache position overflow"))?;
+    if next > limit {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "cache position beyond declared length",
+        ));
+    }
+    Ok(next)
+}
+
 fn validate_active_http_offset(next: u64, end_offset: u64, total: u64) -> io::Result<()> {
     if next > end_offset || next > total {
         return Err(Error::new(
@@ -511,7 +525,7 @@ where
                                     "cache ended before cached_len",
                                 )));
                             }
-                            self.pos += read as u64;
+                            self.pos = checked_cache_position(self.pos, read, self.len)?;
                             return Poll::Ready(Ok(read));
                         }
                         Poll::Ready(Err(err)) => {
@@ -532,6 +546,19 @@ where
             self.cache_write_state = CacheWriteState::Idle;
             return Poll::Ready(Ok(()));
         };
+
+        if self.pending_chunk_offset > chunk.len() {
+            self.cache_write_state = CacheWriteState::Idle;
+            return Poll::Ready(Err(Error::new(
+                ErrorKind::InvalidData,
+                "pending cache chunk offset beyond chunk",
+            )));
+        }
+        checked_cache_position(
+            self.cached_len,
+            chunk.len() - self.pending_chunk_offset,
+            self.len,
+        )?;
 
         loop {
             match self.cache_write_state {
@@ -583,9 +610,41 @@ where
                             )));
                         }
                         Poll::Ready(Ok(written)) => {
-                            self.pending_chunk_offset += written;
-                            self.cached_len += written as u64;
-                            self.cache_write_pos += written as u64;
+                            let next_pending_offset = self
+                                .pending_chunk_offset
+                                .checked_add(written)
+                                .ok_or_else(|| {
+                                    Error::new(
+                                        ErrorKind::InvalidData,
+                                        "pending cache chunk offset overflow",
+                                    )
+                                })?;
+                            if next_pending_offset > chunk.len() {
+                                self.cache_write_state = CacheWriteState::Idle;
+                                return Poll::Ready(Err(Error::new(
+                                    ErrorKind::InvalidData,
+                                    "cache writer reported more bytes than requested",
+                                )));
+                            }
+                            let next_cached_len =
+                                checked_cache_position(self.cached_len, written, self.len)?;
+                            let next_write_pos = self
+                                .cache_write_pos
+                                .checked_add(u64::try_from(written).map_err(|_| {
+                                    Error::new(
+                                        ErrorKind::InvalidData,
+                                        "cache write length does not fit u64",
+                                    )
+                                })?)
+                                .ok_or_else(|| {
+                                    Error::new(
+                                        ErrorKind::InvalidData,
+                                        "cache write position overflow",
+                                    )
+                                })?;
+                            self.pending_chunk_offset = next_pending_offset;
+                            self.cached_len = next_cached_len;
+                            self.cache_write_pos = next_write_pos;
                             if self.pending_chunk_offset >= chunk.len() {
                                 self.pending_chunk = None;
                                 self.pending_chunk_offset = 0;
@@ -848,7 +907,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+    use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, ReadBuf};
     use tokio::net::{TcpListener, TcpStream};
 
     use super::{HttpRead, PrefixCacheFile};
@@ -1021,6 +1080,28 @@ mod tests {
         (0..16384).map(|i| (i % 251) as u8).collect()
     }
 
+    struct FixedReader {
+        data: Vec<u8>,
+        position: usize,
+    }
+
+    impl AsyncRead for FixedReader {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> std::task::Poll<io::Result<()>> {
+            let remaining = &self.data[self.position..];
+            let count = remaining.len().min(buf.remaining());
+            if count == 0 {
+                return std::task::Poll::Ready(Ok(()));
+            }
+            buf.put_slice(&remaining[..count]);
+            self.position += count;
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
     #[test]
     fn http_read_rejects_pending_chunk_offset_beyond_chunk() {
         let error = super::checked_pending_chunk_offset(4, 1, 4)
@@ -1041,6 +1122,14 @@ mod tests {
     fn http_read_rejects_active_offset_beyond_extent() {
         let error = super::validate_active_http_offset(11, 10, 10)
             .expect_err("active offset beyond extent must fail");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn prefix_cache_rejects_upstream_extent_beyond_declared_length() {
+        let error = super::checked_cache_position(4, 1, 4)
+            .expect_err("cache data beyond the declared length must fail");
 
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
@@ -1247,6 +1336,31 @@ mod tests {
         let mut buf = [0u8; 256];
         let err = file.read_exact(&mut buf).await.unwrap_err();
         assert!(err.to_string().contains("range resume mismatch"));
+        let _ = std::fs::remove_file(cache);
+    }
+
+    #[tokio::test]
+    async fn cached_reader_rejects_overlong_upstream_before_cache_write() {
+        let cache = cache_path("overlong");
+        let mut file = PrefixCacheFile::new(
+            FixedReader {
+                data: b"too long".to_vec(),
+                position: 0,
+            },
+            4,
+            &cache,
+        )
+        .await
+        .expect("cache file should open");
+
+        let error = file
+            .read_exact(&mut [0_u8; 4])
+            .await
+            .expect_err("overlong upstream data must be rejected");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(file.cached_len(), 0);
+        assert_eq!(tokio::fs::metadata(&cache).await.unwrap().len(), 0);
         let _ = std::fs::remove_file(cache);
     }
 }
