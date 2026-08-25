@@ -1194,6 +1194,71 @@ mod tests {
     }
 
     #[test]
+    fn http_read_extent_properties_hold_for_seeded_inputs() {
+        fn next(seed: &mut u64) -> u64 {
+            *seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            *seed
+        }
+
+        let mut seed = 0x5eed_u64;
+        for _ in 0..4096 {
+            let total = next(&mut seed) % 1_000_000 + 1;
+            let start = next(&mut seed) % (total + 1);
+            let remaining = total - start;
+            let copied = next(&mut seed) % (remaining + 2);
+            let copied_len = usize::try_from(copied).expect("seeded length fits usize");
+
+            let position = super::checked_http_position(start, copied_len, total);
+            if copied <= remaining {
+                assert_eq!(
+                    position.expect("bounded position must succeed"),
+                    start + copied
+                );
+                assert_eq!(
+                    super::checked_active_http_offset(start, copied_len, total)
+                        .expect("bounded active offset must succeed"),
+                    start + copied
+                );
+            } else {
+                assert_eq!(
+                    position.expect_err("overlong position must fail").kind(),
+                    io::ErrorKind::InvalidData
+                );
+                assert_eq!(
+                    super::checked_active_http_offset(start, copied_len, total)
+                        .expect_err("overlong active offset must fail")
+                        .kind(),
+                    io::ErrorKind::InvalidData
+                );
+            }
+
+            if remaining > 0 {
+                let end = start + remaining;
+                super::validate_partial_http_response_extent(start, end - 1, total, remaining)
+                    .expect("a bounded response extent must validate");
+                assert_eq!(
+                    super::validate_partial_http_response_extent(
+                        start,
+                        end - 1,
+                        total,
+                        remaining + 1,
+                    )
+                    .expect_err("a mismatched response length must fail")
+                    .kind(),
+                    io::ErrorKind::InvalidData
+                );
+            } else {
+                assert_eq!(
+                    super::validate_partial_http_response_extent(start, start, total, 1)
+                        .expect_err("an empty response extent must fail")
+                        .kind(),
+                    io::ErrorKind::InvalidData
+                );
+            }
+        }
+    }
+
+    #[test]
     fn http_read_retry_budget_is_bounded() {
         let mut remaining = super::HTTP_RETRY_LIMIT;
         for _ in 0..super::HTTP_RETRY_LIMIT {
