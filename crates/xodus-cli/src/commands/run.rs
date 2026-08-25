@@ -19,6 +19,15 @@ use xodus::tokens::TokenManager;
 use crate::commands::streaming::open_package_input;
 use crate::license::get_license;
 
+fn expected_hash_count(length: u64) -> Result<usize, std::io::Error> {
+    usize::try_from(length.div_ceil(PAGE_SIZE as u64)).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "package page count does not fit in memory index",
+        )
+    })
+}
+
 fn child_exit_code(status: ExitStatus) -> ExitCode {
     if status.success() {
         ExitCode::SUCCESS
@@ -221,7 +230,14 @@ pub async fn run(
             }
         };
         for (n, sfile) in &sfiles {
-            if sfile.length.div_ceil(PAGE_SIZE as u64) as usize != sfile.data_hashs.len() {
+            let expected_hashes = match expected_hash_count(sfile.length) {
+                Ok(expected_hashes) => expected_hashes,
+                Err(error) => {
+                    eprintln!("invalid hash count for {n}: {error}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            if expected_hashes != sfile.data_hashs.len() {
                 println!("{}: {} {}", n, sfile.offset, sfile.length);
             }
         }
@@ -405,7 +421,18 @@ pub async fn run(
 mod tests {
     use std::os::unix::process::ExitStatusExt;
 
-    use super::child_exit_code;
+    use super::{child_exit_code, expected_hash_count};
+
+    #[test]
+    fn expected_hash_count_rejects_nonrepresentable_lengths() {
+        let result = expected_hash_count(u64::MAX);
+
+        if usize::BITS < u64::BITS {
+            assert!(result.is_err());
+        } else {
+            assert!(result.is_ok());
+        }
+    }
 
     #[test]
     fn child_exit_code_preserves_success() {
