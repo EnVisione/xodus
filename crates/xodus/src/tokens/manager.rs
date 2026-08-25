@@ -183,6 +183,8 @@ impl TokenManager {
 mod tests {
     use super::{PASSPORT_STS, TokenManager, TokenStoreError};
     use crate::models::secrets::{Device, Token, User};
+    use crate::models::xbox::XstsResponse;
+    use chrono::{Duration, Utc};
 
     fn device() -> Device {
         Device {
@@ -292,5 +294,37 @@ mod tests {
         ));
         assert!(matches!(manager.get_user_token_for(PASSPORT_STS), Ok(None)));
         assert!(matches!(manager.get_user(), Err(TokenStoreError::NotFound)));
+    }
+
+    fn xsts_response(not_after: chrono::DateTime<Utc>, token: &str) -> XstsResponse {
+        serde_json::from_value(serde_json::json!({
+            "NotAfter": not_after,
+            "Token": token,
+            "DisplayClaims": {"xui": [], "xti": []}
+        }))
+        .expect("synthetic XSTS response must deserialize")
+    }
+
+    #[test]
+    fn ephemeral_xsts_cache_expires_and_replaces_values() {
+        let manager = TokenManager::with_memory();
+        let fresh = xsts_response(Utc::now() + Duration::seconds(30), "fresh");
+        manager.cache_xsts("https://service.example.test", &fresh);
+
+        assert_eq!(
+            manager
+                .get_cached_xsts("https://service.example.test")
+                .expect("fresh XSTS response must be cached")
+                .token,
+            "fresh"
+        );
+
+        let expired = xsts_response(Utc::now() - Duration::seconds(30), "expired");
+        manager.cache_xsts("https://service.example.test", &expired);
+        assert!(
+            manager
+                .get_cached_xsts("https://service.example.test")
+                .is_none()
+        );
     }
 }
