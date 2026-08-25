@@ -68,7 +68,13 @@ async fn reauthenticate_device(client: &reqwest::Client, tokens: &TokenManager, 
         log::error!("device SPLicense is missing CLEP signing state");
         return;
     };
-    let key = clep_sign_state.get_rsa_key();
+    let key = match clep_sign_state.get_rsa_key() {
+        Ok(key) => key,
+        Err(error) => {
+            log::error!("failed to derive device RSA key: {error}");
+            return;
+        }
+    };
     let private_key = match parse_bcrypt_rsa_private(&key) {
         Ok(key) => key,
         Err(error) => {

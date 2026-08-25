@@ -103,6 +103,8 @@ pub async fn get_license(
     let encrypted_device_key = device_license
         .encrypted_device_key
         .ok_or_else(|| "device SPLicense has no encrypted device key".to_string())?;
-    let key = encrypted_device_key.derive_device_key();
+    let key = encrypted_device_key
+        .derive_device_key()
+        .map_err(|error| format!("could not derive device key: {error}"))?;
     Ok((key, game_splicense))
 }

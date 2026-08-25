@@ -75,7 +75,7 @@ pub async fn exchange_device_token(
 ) -> Result<soap::RequestSecurityTokenResponse, rst::RSTError> {
     let secret = decode_binary_secret(&token)?;
     let secret: ClepHmacState = transmute!(secret);
-    let hmac_secret = secret.get_hmac_state();
+    let hmac_secret = secret.get_hmac_state()?;
 
     let request = rst::RSTRequestBuilder::new()
         .sso_flags("SsoRestr")
@@ -116,7 +116,7 @@ pub async fn exchange_user_token(
 ) -> Result<ExchangeUserTokenOutcome, rst::RSTError> {
     let secret = decode_binary_secret(&device_token)?;
     let secret: ClepHmacState = transmute!(secret);
-    let hmac_secret = secret.get_hmac_state();
+    let hmac_secret = secret.get_hmac_state()?;
 
     let mut builder = rst::RSTRequestBuilder::new()
         .username(soap::UsernameToken::user_hint(username))

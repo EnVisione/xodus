@@ -37,6 +37,8 @@ pub enum RSTError {
     Decryption,
     #[error("SOAP decrypted payload is not valid UTF 8")]
     InvalidUtf8(#[from] std::str::Utf8Error),
+    #[error("SP license key derivation failed: {0}")]
+    SpLicenseKey(#[from] crate::licensing::splicense::SpLicenseKeyError),
 }
 
 #[derive(thiserror::Error, Debug)]

@@ -2491,7 +2491,6 @@ impl XvdFile {
         let drive_extents = ntfs_drive_extents(drive_data_offset, drive_size, drive_plain_len)?;
 
         block_in_place(|| {
-            let block_size = 4096;
             let drive = SyncSubstream::new(
                 XvdStream::new(
                     SyncIoBridge::new(file),
@@ -2505,13 +2504,7 @@ impl XvdFile {
 
             let gp = gpt::GptConfig::new()
                 .writable(false)
-                .logical_block_size(if block_size == 512 {
-                    gpt::disk::LogicalBlockSize::Lb512
-                } else if block_size == 4096 {
-                    gpt::disk::LogicalBlockSize::Lb4096
-                } else {
-                    todo!("unsupported block_size: {}", block_size)
-                })
+                .logical_block_size(gpt::disk::LogicalBlockSize::Lb4096)
                 .open_from_device(drive)
                 .map_err(|error| NtfsSegmentMetadataParseError::Gpt(Box::new(error)))?;
 

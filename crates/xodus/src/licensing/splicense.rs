@@ -389,34 +389,57 @@ impl SPLicense {
     }
 }
 
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum SpLicenseKeyError {
+    #[error("unsupported SP license key version {version}")]
+    UnsupportedVersion { version: u32 },
+    #[error("decrypted device key did not match its derived decryption key")]
+    DeviceKeyMismatch,
+}
+
 impl EncryptedDeviceKey {
-    pub fn derive_device_key(&self) -> DeviceKey {
-        assert!(self.version == 4);
+    pub fn derive_device_key(&self) -> Result<DeviceKey, SpLicenseKeyError> {
+        if self.version != 4 {
+            return Err(SpLicenseKeyError::UnsupportedVersion {
+                version: self.version,
+            });
+        }
 
         let device_key = decrypt_cbc_zero_iv(self.key_schedule, &self.device_key);
 
-        // Sanity check: the decrypted device key must be equal to the decryption key
-        assert_eq!(device_key, decryption_key(self.key_schedule));
+        if device_key != decryption_key(self.key_schedule) {
+            return Err(SpLicenseKeyError::DeviceKeyMismatch);
+        }
 
-        DeviceKey(device_key)
+        Ok(DeviceKey(device_key))
     }
 }
 
 impl ClepSignState {
-    pub fn get_rsa_key(&self) -> BCryptRsaBlock {
-        assert!(self.version == 4);
-        BCryptRsaBlock(decrypt_cbc_zero_iv(self.key_schedule, &self.key_data))
+    pub fn get_rsa_key(&self) -> Result<BCryptRsaBlock, SpLicenseKeyError> {
+        if self.version != 4 {
+            return Err(SpLicenseKeyError::UnsupportedVersion {
+                version: self.version,
+            });
+        }
+        Ok(BCryptRsaBlock(decrypt_cbc_zero_iv(
+            self.key_schedule,
+            &self.key_data,
+        )))
     }
 }
 
 impl ClepHmacState {
-    pub fn get_hmac_state(&self) -> HmacBinarySecret {
-        assert!(self.version == 4);
-        HmacBinarySecret(
-            decrypt_cbc_zero_iv(self.key_schedule, &self.key_data)[12..44]
-                .try_into()
-                .unwrap(),
-        )
+    pub fn get_hmac_state(&self) -> Result<HmacBinarySecret, SpLicenseKeyError> {
+        if self.version != 4 {
+            return Err(SpLicenseKeyError::UnsupportedVersion {
+                version: self.version,
+            });
+        }
+        let decrypted = decrypt_cbc_zero_iv(self.key_schedule, &self.key_data);
+        let mut secret = [0_u8; 32];
+        secret.copy_from_slice(&decrypted[12..44]);
+        Ok(HmacBinarySecret(secret))
     }
 }
 
@@ -526,6 +549,65 @@ mod tests {
         assert!(matches!(
             result,
             Err(ContentKeyAuthenticationFailed::AuthenticationFailed)
+        ));
+    }
+
+    #[test]
+    fn encrypted_device_key_rejects_unsupported_version_without_panicking() {
+        let key = EncryptedDeviceKey {
+            size: 4096,
+            version: 3,
+            key_schedule: [0; 58],
+            _unknown1: [0; 280],
+            device_key: [0; 16],
+            _unknown2: [0; 3562],
+        };
+
+        assert!(matches!(
+            key.derive_device_key(),
+            Err(SpLicenseKeyError::UnsupportedVersion { version: 3 })
+        ));
+    }
+
+    #[test]
+    fn encrypted_device_key_rejects_decryption_mismatch_without_panicking() {
+        let key = EncryptedDeviceKey {
+            size: 4096,
+            version: 4,
+            key_schedule: [0; 58],
+            _unknown1: [0; 280],
+            device_key: [0; 16],
+            _unknown2: [0; 3562],
+        };
+
+        assert!(matches!(
+            key.derive_device_key(),
+            Err(SpLicenseKeyError::DeviceKeyMismatch)
+        ));
+    }
+
+    #[test]
+    fn clep_key_states_reject_unsupported_versions_without_panicking() {
+        let sign_state = ClepSignState {
+            version: 3,
+            key_data: [0; 544],
+            key_schedule: [0; 58],
+            _unknown: [0; 3316],
+        };
+        let hmac_state = ClepHmacState {
+            version: 3,
+            key_data: [0; 48],
+            key_schedule: [0; 58],
+            _unknown: [0; 3812],
+        };
+
+        assert!(matches!(
+            sign_state.get_rsa_key(),
+            Err(SpLicenseKeyError::UnsupportedVersion { version: 3 })
+        ));
+        assert!(matches!(
+            hmac_state.get_hmac_state(),
+            Err(SpLicenseKeyError::UnsupportedVersion { version: 3 })
         ));
     }
 

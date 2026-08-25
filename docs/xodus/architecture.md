@@ -53,6 +53,8 @@ License acquisition and CIK export now propagate token, exchange, entitlement, S
 
 Content license responses now require a successful HTTP status, a nonempty key list, valid base64, valid UTF-8, and valid license XML. Malformed or incomplete service data returns typed `LicenseContentError` variants instead of indexing or decoding through unchecked operations.
 
+SP license key derivation now rejects unsupported key versions and device-key mismatches through `SpLicenseKeyError`. CLEP signing and HMAC state extraction propagate the same typed version failure through device reauthentication and live token exchange, while the CLI reports derivation failures as nonzero results. Unsupported key material is never accepted through an assertion or unchecked slice conversion.
+
 Packed content key unwrapping now maps authentication, invalid wrapped-key states, and unexpected output lengths to explicit typed errors. Key-wrap library variants are no longer treated as unreachable process paths.
 
 The legacy package download command now rejects missing CDN roots and invalid sizes, checks HTTP status, and returns failure for output creation, stream, and write errors instead of reporting success after a partial operation or panicking on service data.
