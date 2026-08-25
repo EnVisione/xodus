@@ -12,5 +12,6 @@ This directory contains the CachyOS planning, baseline, and verification records
 - [Login rendering verification](./login-rendering-verification.md) records the isolated runtime and workspace checks without retaining sign in data.
 - [Target package discovery](./target-package-discovery.md) records the sanitized authenticated package metadata available before package acquisition.
 - [MSIXVC2 fixture corpus](./fixture-corpus.md) records the currently reviewed synthetic package fixtures and their remaining evidence gaps.
+- [Runtime readiness](./runtime-readiness.md) records the current CachyOS, Hyprland, NVIDIA, display, and runtime prerequisite evidence without accessing account state.
 
 The baseline verifier is read only. Run `scripts/cachyos/verify-baseline.sh --all` from a clean descendant of the frozen source revision whose source-sensitive paths still match the baseline. A mismatch marks affected evidence stale; it does not alter system configuration or account state.
