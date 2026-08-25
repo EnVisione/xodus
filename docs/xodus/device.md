@@ -31,7 +31,7 @@ as well as DeviceInfo structure.
   <Authentication>
     <!-- These values are random -->
     <Membername>02drqshbgqvqgnls</Membername>
-    <Password>MPqGQL3bWcxHdQAzZ;`u</Password>
+    <Password>REDACTED</Password>
   </Authentication>
   <DeviceInfo Id="DeviceInfo">
     <Component name="4131">DgAAAFJUAGD2SlAAQwBJAAAA</Component>
