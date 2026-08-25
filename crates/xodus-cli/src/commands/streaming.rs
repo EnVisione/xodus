@@ -341,11 +341,7 @@ fn write_transaction_journal(
     entries: &[PromotionEntry],
     complete: bool,
 ) -> io::Result<()> {
-    let mut journal = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(journal_path(root))?;
+    let mut journal = open_transaction_journal(root, true)?;
     if complete {
         writeln!(journal, "complete")?;
     } else {
@@ -369,7 +365,7 @@ fn write_transaction_journal(
 
 fn read_transaction_journal(root: &Path) -> io::Result<Option<Vec<PromotionEntry>>> {
     let contents = read_bounded_transaction_journal(
-        std::fs::File::open(journal_path(root))?,
+        open_transaction_journal(root, false)?,
         MAX_TRANSACTION_JOURNAL_BYTES,
     )?;
     if contents.trim() == "complete" {
@@ -425,6 +421,35 @@ fn read_transaction_journal(root: &Path) -> io::Result<Option<Vec<PromotionEntry
         return Err(invalid_package_path("transaction journal has no entries"));
     }
     Ok(Some(entries))
+}
+
+fn open_transaction_journal(root: &Path, writable: bool) -> io::Result<std::fs::File> {
+    let directory = std::fs::File::open(root)?;
+    if !directory.metadata()?.is_dir() {
+        return Err(invalid_package_path(
+            "transaction journal root is not a directory",
+        ));
+    }
+    let flags = if writable {
+        OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC | OFlags::CLOEXEC
+    } else {
+        OFlags::RDONLY | OFlags::CLOEXEC
+    };
+    let mode = if writable {
+        Mode::RUSR.union(Mode::WUSR)
+    } else {
+        Mode::empty()
+    };
+    Ok(std::fs::File::from(
+        openat2(
+            &directory,
+            TRANSACTION_JOURNAL,
+            flags,
+            mode,
+            OUTPUT_RESOLVE_FLAGS,
+        )
+        .map_err(io::Error::from)?,
+    ))
 }
 
 fn read_bounded_transaction_journal<R: Read>(reader: R, max_bytes: usize) -> io::Result<String> {
@@ -659,7 +684,7 @@ pub(crate) fn recover_transactions(output_root: &Path) -> io::Result<()> {
         let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
-        if name.starts_with(TRANSACTION_DIRECTORY_PREFIX) && path.is_dir() {
+        if name.starts_with(TRANSACTION_DIRECTORY_PREFIX) && entry.file_type()?.is_dir() {
             transactions.push(path);
         }
     }
@@ -1335,12 +1360,12 @@ mod tests {
     use std::io::{Cursor, Write};
 
     use super::{
-        PromotionState, SegmentFile, TRANSACTION_JOURNAL, acquire_transaction_lock, changed_jobs,
-        new_transaction, open_package_input, open_package_output, package_path_components,
-        promote_transaction, promote_transaction_with_interruption, promotion_entries,
-        promotion_entries_with_removals, read_bounded_transaction_journal,
-        read_transaction_journal, recover_transaction_dir, recover_transactions,
-        write_transaction_journal,
+        PromotionState, SegmentFile, TRANSACTION_DIRECTORY_PREFIX, TRANSACTION_JOURNAL,
+        acquire_transaction_lock, changed_jobs, new_transaction, open_package_input,
+        open_package_output, package_path_components, promote_transaction,
+        promote_transaction_with_interruption, promotion_entries, promotion_entries_with_removals,
+        read_bounded_transaction_journal, read_transaction_journal, recover_transaction_dir,
+        recover_transactions, write_transaction_journal,
     };
 
     #[test]
@@ -1360,6 +1385,39 @@ mod tests {
         let result = read_bounded_transaction_journal(Cursor::new(b"12345"), 4);
 
         assert!(result.is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transaction_recovery_ignores_symlink_transaction_directory() {
+        let temporary = tempfile::tempdir().unwrap();
+        let target = temporary.path().join("target");
+        std::fs::create_dir(&target).unwrap();
+        let link = temporary
+            .path()
+            .join(format!("{TRANSACTION_DIRECTORY_PREFIX}symlink"));
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        recover_transactions(temporary.path()).unwrap();
+
+        assert!(
+            std::fs::symlink_metadata(link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transaction_journal_rejects_symlink_path() {
+        let temporary = tempfile::tempdir().unwrap();
+        let target = temporary.path().join("target-journal");
+        std::fs::write(&target, b"complete").unwrap();
+        let journal = temporary.path().join(TRANSACTION_JOURNAL);
+        std::os::unix::fs::symlink(&target, &journal).unwrap();
+
+        assert!(read_transaction_journal(temporary.path()).is_err());
     }
 
     #[test]
