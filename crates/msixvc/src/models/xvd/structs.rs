@@ -4,7 +4,9 @@ use super::{
     XvcRegionPresenceInfoFlags, XvdContentType, XvdSegmentMetadataSegmentFlags, XvdType,
     XvdVolumeFlags,
 };
-use crate::math::{bytes_to_pages, calculate_number_of_hash_pages, page_number_to_offset};
+use crate::math::{
+    ArithmeticError, bytes_to_pages, calculate_number_of_hash_pages, checked_page_number_to_offset,
+};
 
 use msixvc_common::parse::byteorder::little_endian::*;
 use msixvc_common::parse::structs::{Filetime, Version};
@@ -631,6 +633,31 @@ impl BinaryTryParse for XvdSegmentMetadataHeader {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct XvdHeaderLayout {
+    pub number_of_hashed_pages: u64,
+    pub mdu_offset: u64,
+    pub hash_tree_levels: u64,
+    pub hash_tree_page_count: u64,
+    pub hash_tree_offset: u64,
+    pub user_data_offset: u64,
+    pub xvc_info_offset: u64,
+    pub dynamic_header_offset: u64,
+    pub drive_data_offset: u64,
+}
+
+#[derive(thiserror::Error, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum XvdHeaderLayoutError {
+    #[error("xvd {operation} overflows for {left} and {right}")]
+    AdditionOverflow {
+        operation: &'static str,
+        left: u64,
+        right: u64,
+    },
+    #[error(transparent)]
+    Arithmetic(#[from] ArithmeticError),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct XvdSegmentMetadataSegment {
     pub flags: XvdSegmentMetadataSegmentFlags,
@@ -662,8 +689,118 @@ impl BinaryParse for XvdSegmentMetadataSegment {
 }
 
 impl XvdHeader {
-    pub fn mutable_data_length(&self) -> u64 {
-        page_number_to_offset(self.mutable_page_count as u64)
+    fn checked_add(
+        left: u64,
+        right: u64,
+        operation: &'static str,
+    ) -> Result<u64, XvdHeaderLayoutError> {
+        left.checked_add(right)
+            .ok_or(XvdHeaderLayoutError::AdditionOverflow {
+                operation,
+                left,
+                right,
+            })
+    }
+
+    fn checked_page_offset(page_count: u64) -> Result<u64, XvdHeaderLayoutError> {
+        checked_page_number_to_offset(page_count).map_err(XvdHeaderLayoutError::Arithmetic)
+    }
+
+    pub fn checked_number_of_hashed_pages(&self) -> Result<u64, XvdHeaderLayoutError> {
+        let drive_pages = self.drive_page_count();
+        let user_pages = self.user_data_page_count();
+        let xvc_pages = self.xvc_data_page_count();
+        let dynamic_pages = self.dynamic_header_page_count();
+        let metadata_pages = Self::checked_add(user_pages, xvc_pages, "metadata page count")?;
+        let metadata_pages =
+            Self::checked_add(metadata_pages, dynamic_pages, "metadata page count")?;
+        Self::checked_add(drive_pages, metadata_pages, "hashed page count")
+    }
+
+    pub fn checked_mdu_offset(&self) -> Result<u64, XvdHeaderLayoutError> {
+        Self::checked_add(
+            Self::checked_page_offset(self.embedded_xvd_page_count())?,
+            XVD_HEADER_INCL_SIGNATURE_SIZE,
+            "MDU offset",
+        )
+    }
+
+    pub fn checked_hash_tree_offset(&self) -> Result<u64, XvdHeaderLayoutError> {
+        Self::checked_add(
+            Self::checked_page_offset(self.mutable_page_count as u64)?,
+            self.checked_mdu_offset()?,
+            "hash tree offset",
+        )
+    }
+
+    pub fn checked_hash_tree_info(&self) -> Result<(u64, u64), XvdHeaderLayoutError> {
+        calculate_number_of_hash_pages(
+            self.checked_number_of_hashed_pages()?,
+            self.volume_flags.is_resiliency_enabled(),
+        )
+        .map_err(XvdHeaderLayoutError::Arithmetic)
+    }
+
+    pub fn checked_user_data_offset(
+        &self,
+        hash_tree_page_count: u64,
+    ) -> Result<u64, XvdHeaderLayoutError> {
+        let hash_pages_offset = if self.volume_flags.is_data_integrity_enabled() {
+            Self::checked_page_offset(hash_tree_page_count)?
+        } else {
+            0
+        };
+        Self::checked_add(
+            hash_pages_offset,
+            self.checked_hash_tree_offset()?,
+            "user data offset",
+        )
+    }
+
+    pub fn checked_xvc_info_offset(
+        &self,
+        hash_tree_page_count: u64,
+    ) -> Result<u64, XvdHeaderLayoutError> {
+        Self::checked_add(
+            Self::checked_page_offset(self.user_data_page_count())?,
+            self.checked_user_data_offset(hash_tree_page_count)?,
+            "XVC info offset",
+        )
+    }
+
+    pub fn checked_layout(&self) -> Result<XvdHeaderLayout, XvdHeaderLayoutError> {
+        let number_of_hashed_pages = self.checked_number_of_hashed_pages()?;
+        let mdu_offset = self.checked_mdu_offset()?;
+        let (hash_tree_levels, hash_tree_page_count) = self.checked_hash_tree_info()?;
+        let hash_tree_offset = self.checked_hash_tree_offset()?;
+        let user_data_offset = self.checked_user_data_offset(hash_tree_page_count)?;
+        let xvc_info_offset = self.checked_xvc_info_offset(hash_tree_page_count)?;
+        let dynamic_header_offset = Self::checked_add(
+            Self::checked_page_offset(self.xvc_data_page_count())?,
+            xvc_info_offset,
+            "dynamic header offset",
+        )?;
+        let drive_data_offset = Self::checked_add(
+            Self::checked_page_offset(self.dynamic_header_page_count())?,
+            dynamic_header_offset,
+            "drive data offset",
+        )?;
+
+        Ok(XvdHeaderLayout {
+            number_of_hashed_pages,
+            mdu_offset,
+            hash_tree_levels,
+            hash_tree_page_count,
+            hash_tree_offset,
+            user_data_offset,
+            xvc_info_offset,
+            dynamic_header_offset,
+            drive_data_offset,
+        })
+    }
+
+    pub fn mutable_data_length(&self) -> Result<u64, XvdHeaderLayoutError> {
+        Self::checked_page_offset(self.mutable_page_count as u64)
     }
 
     pub fn user_data_page_count(&self) -> u64 {
@@ -686,15 +823,21 @@ impl XvdHeader {
         bytes_to_pages(self.drive_size)
     }
 
-    pub fn number_of_hashed_pages(&self) -> u64 {
-        self.drive_page_count()
-            + self.user_data_page_count()
-            + self.xvc_data_page_count()
-            + self.dynamic_header_page_count()
+    pub fn number_of_hashed_pages(&self) -> Result<u64, XvdHeaderLayoutError> {
+        self.checked_number_of_hashed_pages()
     }
 
-    pub fn number_of_metadata_pages(&self) -> u64 {
-        self.user_data_page_count() + self.xvc_data_page_count() + self.dynamic_header_page_count()
+    pub fn number_of_metadata_pages(&self) -> Result<u64, XvdHeaderLayoutError> {
+        let metadata_pages = Self::checked_add(
+            self.user_data_page_count(),
+            self.xvc_data_page_count(),
+            "metadata page count",
+        )?;
+        Self::checked_add(
+            metadata_pages,
+            self.dynamic_header_page_count(),
+            "metadata page count",
+        )
     }
 
     pub fn sector_size(&self) -> usize {
@@ -705,33 +848,23 @@ impl XvdHeader {
         }
     }
 
-    pub fn mdu_offset(&self) -> u64 {
-        page_number_to_offset(self.embedded_xvd_page_count()) + XVD_HEADER_INCL_SIGNATURE_SIZE
+    pub fn mdu_offset(&self) -> Result<u64, XvdHeaderLayoutError> {
+        self.checked_mdu_offset()
     }
 
-    pub fn hash_tree_offset(&self) -> u64 {
-        self.mutable_data_length() + self.mdu_offset()
+    pub fn hash_tree_offset(&self) -> Result<u64, XvdHeaderLayoutError> {
+        self.checked_hash_tree_offset()
     }
 
-    pub fn hash_tree_info(&self) -> (u64, u64) {
-        calculate_number_of_hash_pages(
-            self.number_of_hashed_pages(),
-            self.volume_flags.is_resiliency_enabled(),
-        )
+    pub fn hash_tree_info(&self) -> Result<(u64, u64), XvdHeaderLayoutError> {
+        self.checked_hash_tree_info()
     }
 
-    pub fn user_data_offset(&self, hash_tree_page_count: u64) -> u64 {
-        let hash_pages_offset = if self.volume_flags.is_data_integrity_enabled() {
-            page_number_to_offset(hash_tree_page_count)
-        } else {
-            0
-        };
-
-        hash_pages_offset + self.hash_tree_offset()
+    pub fn user_data_offset(&self, hash_tree_page_count: u64) -> Result<u64, XvdHeaderLayoutError> {
+        self.checked_user_data_offset(hash_tree_page_count)
     }
 
-    pub fn xvc_info_offset(&self, hash_tree_page_count: u64) -> u64 {
-        page_number_to_offset(self.user_data_page_count())
-            + self.user_data_offset(hash_tree_page_count)
+    pub fn xvc_info_offset(&self, hash_tree_page_count: u64) -> Result<u64, XvdHeaderLayoutError> {
+        self.checked_xvc_info_offset(hash_tree_page_count)
     }
 }

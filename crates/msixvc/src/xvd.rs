@@ -22,12 +22,12 @@ use zerocopy::IntoBytes;
 
 use crate::crypt::{Tweak, decrypt_page_xts};
 use crate::math::{
-    bytes_to_pages, calculate_hash_block_num_and_run_for_block_num, offset_to_page_number,
-    page_number_to_offset,
+    ArithmeticError, bytes_to_pages, calculate_hash_block_num_and_run_for_block_num,
+    offset_to_page_number,
 };
 use crate::models::xvd::{
     PAGE_SIZE, PAGES_PER_BLOCK, XvcInfo, XvcRegionHeader, XvcRegionHeaderParseError, XvcRegionId,
-    XvdHashEntry, XvdHeader, XvdHeaderParseError, XvdSegmentMetadataHeader,
+    XvdHashEntry, XvdHeader, XvdHeaderLayoutError, XvdHeaderParseError, XvdSegmentMetadataHeader,
     XvdSegmentMetadataHeaderParseError, XvdSegmentMetadataSegment, XvdSegmentMetadataSegmentFlags,
     XvdUserDataHeader, XvdUserDataPackageFileEntry, XvdUserDataPackageFilesHeader,
 };
@@ -411,6 +411,10 @@ pub enum XvdFileParseError {
     RegionHeader(#[from] XvcRegionHeaderParseError),
     #[error(transparent)]
     Io(#[from] io::Error),
+    #[error(transparent)]
+    HeaderLayout(#[from] XvdHeaderLayoutError),
+    #[error(transparent)]
+    Arithmetic(#[from] ArithmeticError),
     #[error("XVC region count {region_count} exceeds the supported maximum of {max_region_count}")]
     RegionCountTooLarge {
         region_count: u32,
@@ -2037,7 +2041,7 @@ fn validate_xvc_region_hash_entry_addresses(
             0,
             false,
             false,
-        );
+        )?;
         hash_entry_read_offset(hash_tree_offset, hash_block, entry_start)?;
         page += min(run_length, num_pages - page);
     }
@@ -2146,9 +2150,8 @@ impl XvdFile {
             XvdHeader::try_from_array(&buf)?
         };
 
-        let mdu_offset = xvd_header.mdu_offset();
-        let (_hash_tree_levels, hash_tree_page_count) = xvd_header.hash_tree_info();
-        let xvc_info_offset = xvd_header.xvc_info_offset(hash_tree_page_count);
+        let layout = xvd_header.checked_layout()?;
+        let xvc_info_offset = layout.xvc_info_offset;
 
         let mut region_headers: Vec<XvcRegionHeader> = Vec::new();
 
@@ -2180,18 +2183,10 @@ impl XvdFile {
             }
         }
 
-        let hash_tree_offset = xvd_header.mutable_data_length() + mdu_offset;
-        let user_data_offset = if xvd_header.volume_flags.is_data_integrity_enabled() {
-            page_number_to_offset(xvd_header.hash_tree_info().1)
-        } else {
-            0
-        } + hash_tree_offset;
-        let xvc_info_offset =
-            page_number_to_offset(xvd_header.user_data_page_count()) + user_data_offset;
-        let dynamic_header_offset =
-            page_number_to_offset(xvd_header.xvc_data_page_count()) + xvc_info_offset;
-        let drive_data_offset =
-            page_number_to_offset(xvd_header.dynamic_header_page_count()) + dynamic_header_offset;
+        let hash_tree_levels = layout.hash_tree_levels;
+        let hash_tree_offset = layout.hash_tree_offset;
+        let user_data_offset = layout.user_data_offset;
+        let drive_data_offset = layout.drive_data_offset;
         let drive_data_end = drive_data_offset.checked_add(xvd_header.drive_size).ok_or(
             XvdFileParseError::DriveDataEndOverflow {
                 drive_data_offset,
@@ -2234,8 +2229,8 @@ impl XvdFile {
             let num_pages = bytes_to_pages(length);
             validate_xvc_region_hash_entry_addresses(
                 xvd_header.xvd_type as u32,
-                _hash_tree_levels,
-                xvd_header.number_of_hashed_pages(),
+                hash_tree_levels,
+                layout.number_of_hashed_pages,
                 hash_tree_offset,
                 start_page,
                 num_pages,
@@ -2250,13 +2245,13 @@ impl XvdFile {
                 let (hash_block, entry_start, run_length) =
                     calculate_hash_block_num_and_run_for_block_num(
                         xvd_header.xvd_type as u32,
-                        _hash_tree_levels,
-                        xvd_header.number_of_hashed_pages(),
+                        hash_tree_levels,
+                        layout.number_of_hashed_pages,
                         hash_page_index(start_page, page)?,
                         0,
                         false,
                         false,
-                    );
+                    )?;
                 let run_length = min(run_length, num_pages - page);
                 page += run_length;
                 let read_offset =
@@ -3275,6 +3270,28 @@ mod tests {
         assert!(matches!(
             error,
             XvdFileParseError::Io(error) if error.kind() == ErrorKind::Other
+        ));
+    }
+
+    #[tokio::test]
+    async fn parse_rejects_hash_tree_depth_from_adversarial_drive_size_before_seek() {
+        let mut reader = SyntheticXvdReader::synthetic_xvd_header(false);
+        reader.inner.get_mut()[DRIVE_SIZE_OFFSET..DRIVE_SIZE_OFFSET + 8]
+            .copy_from_slice(&u64::MAX.to_le_bytes());
+
+        let result = XvdFile::parse(reader).await;
+        let error = match result {
+            Ok(_) => panic!("an overflowing hash tree depth must not parse an XVD"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            XvdFileParseError::HeaderLayout(
+                super::super::models::xvd::XvdHeaderLayoutError::Arithmetic(
+                    crate::math::ArithmeticError::UnsupportedHashLevel { hash_level: 4 }
+                )
+            )
         ));
     }
 
