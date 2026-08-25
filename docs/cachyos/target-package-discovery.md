@@ -27,6 +27,8 @@ The download command now accepts `--version-id` and uses the packages service `G
 
 The remote `streaming` command accepts the same `--version-id` selector and streams that exact revision through the existing bounded HTTP and transaction path. A local `file://` source remains unchanged and does not contact the package service.
 
+The download command also accepts `--manifest PATH`. After every selected file completes and the transaction is promoted, Xodus can atomically write a bounded JSON manifest containing the content ID, exact version ID, package version, file names, sizes, hashes, relative paths, update types, and delta version IDs. The manifest intentionally omits key material, CDN roots, signed URLs, tokens, and package bytes. It is an acquisition record for a later source to target update exercise, not proof that an update was applied.
+
 The current latest-package response does not expose a source `VersionId` for every listed XSP descriptor. The selector therefore does not infer a source identity from an XSP filename or claim that an update has been applied. A real update still requires an authorized source revision, the current target revision, the matching XSP, and transaction, integrity, rollback, and recovery evidence. The service route shape is documented in the public [packagespc retrieval example](https://gist.github.com/rtm516/725fa1e38aafd2600976113ccc45a496).
 
 ### Isolated Minecraft Package Inspection

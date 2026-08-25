@@ -6,6 +6,7 @@ use xodus::tokens::TokenManager;
 mod commands;
 mod license;
 mod package;
+mod package_manifest;
 mod webview;
 
 #[derive(Subcommand)]
@@ -21,6 +22,12 @@ enum SubCommand {
             help = "Retrieve a specific package version through GetSpecificBasePackage"
         )]
         version_id: Option<String>,
+        #[arg(
+            long,
+            value_name = "PATH",
+            help = "Write a bounded nonsecret package revision manifest after download"
+        )]
+        manifest: Option<String>,
         #[arg(
             long,
             default_value_t = false,
@@ -219,8 +226,14 @@ async fn run_inner(args: CliArgs) -> ExitCode {
             product,
             market,
             version_id,
+            manifest,
             dry_run,
-        } => commands::download::run(&client, &tokens, product, market, version_id, dry_run).await,
+        } => {
+            commands::download::run(
+                &client, &tokens, product, market, version_id, manifest, dry_run,
+            )
+            .await
+        }
         SubCommand::License {
             content_id,
             market,

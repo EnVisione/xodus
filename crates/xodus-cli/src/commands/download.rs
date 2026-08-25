@@ -17,6 +17,7 @@ use crate::commands::streaming::{
     promotion_entries,
 };
 use crate::package::{get_content_id, get_packages, get_specific_packages, package_download_urls};
+use crate::package_manifest::write_package_revision_manifest;
 
 const MAX_FILE_HASH_BASE64_CHARS: usize = 64;
 const DOWNLOAD_RETRY_LIMIT: usize = 3;
@@ -246,8 +247,13 @@ pub async fn run(
     product: String,
     market: Option<String>,
     version_id: Option<String>,
+    manifest: Option<String>,
     dry_run: bool,
 ) -> ExitCode {
+    if dry_run && manifest.is_some() {
+        eprintln!("--manifest cannot be used with --dry-run");
+        return ExitCode::FAILURE;
+    }
     let content_id_task = get_content_id(client, product, market).await;
     let Ok(content_id) = content_id_task else {
         let Err(err) = content_id_task else {
@@ -271,6 +277,7 @@ pub async fn run(
         eprintln!("{}", err);
         return ExitCode::FAILURE;
     };
+    let manifest_package = package.clone();
 
     let Ok(files) = MultiSelect::new("Select files to download", package.package_files)
         .with_page_size(30)
@@ -385,6 +392,15 @@ pub async fn run(
         }
 
         progress_bar.finish();
+    }
+
+    if let Some(manifest) = manifest {
+        if let Err(error) = write_package_revision_manifest(Path::new(&manifest), &manifest_package)
+        {
+            eprintln!("could not write package revision manifest: {error}");
+            return ExitCode::FAILURE;
+        }
+        println!("Wrote package revision manifest to {manifest}");
     }
 
     println!("ContentID: {content_id}");
