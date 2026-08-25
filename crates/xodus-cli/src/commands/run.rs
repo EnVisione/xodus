@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io::{self, ErrorKind};
 use std::os::fd::{AsFd, AsRawFd};
 use std::path::Path;
 use std::process::{ExitCode, ExitStatus};
@@ -34,6 +35,42 @@ fn child_exit_code(status: ExitStatus) -> ExitCode {
     } else {
         ExitCode::FAILURE
     }
+}
+
+fn select_entrypoint<'a>(
+    files: &'a HashMap<String, SegmentFile>,
+    requested: Option<&str>,
+) -> io::Result<&'a str> {
+    if let Some(requested) = requested {
+        return match files.get_key_value(requested) {
+            Some((name, file)) if file.keep_encrypted => Ok(name.as_str()),
+            _ => Err(io::Error::new(
+                ErrorKind::NotFound,
+                format!("requested executable is not an encrypted package file: {requested}"),
+            )),
+        };
+    }
+
+    let mut candidate = None;
+    for (name, file) in files {
+        if !file.keep_encrypted {
+            continue;
+        }
+        if candidate.is_some() {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "multiple encrypted executables require an explicit --exe entrypoint",
+            ));
+        }
+        candidate = Some(name.as_str());
+    }
+
+    candidate.ok_or_else(|| {
+        io::Error::new(
+            ErrorKind::NotFound,
+            "package contains no encrypted executable entrypoint",
+        )
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -244,6 +281,14 @@ pub async fn run(
         lfiles.extend(sfiles);
     }
 
+    let entrypoint = match select_entrypoint(&lfiles, exe.as_deref()) {
+        Ok(entrypoint) => entrypoint,
+        Err(error) => {
+            eprintln!("failed to select package entrypoint: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
     let license = get_license(
         client,
         tokens,
@@ -356,11 +401,7 @@ pub async fn run(
 
         let nt_suffix = fd.0.trim_start_matches('\\');
         let nt_path = format!("\\??\\Z:{}\\{}", nt_prefix, nt_suffix);
-        if let Some(exe) = &exe {
-            if exe == fd.0 {
-                nt_entry = Some(nt_path)
-            }
-        } else if nt_entry.is_none() {
+        if entrypoint == fd.0 {
             nt_entry = Some(nt_path)
         }
 
@@ -427,9 +468,22 @@ pub async fn run(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::io::ErrorKind;
     use std::os::unix::process::ExitStatusExt;
 
-    use super::{child_exit_code, expected_hash_count};
+    use msixvc::xvd::SegmentFile;
+
+    use super::{child_exit_code, expected_hash_count, select_entrypoint};
+
+    fn segment(keep_encrypted: bool) -> SegmentFile {
+        SegmentFile {
+            offset: 0,
+            length: 0,
+            data_hashs: Vec::new(),
+            keep_encrypted,
+        }
+    }
 
     #[test]
     fn expected_hash_count_rejects_nonrepresentable_lengths() {
@@ -464,5 +518,50 @@ mod tests {
             child_exit_code(std::process::ExitStatus::from_raw(9)),
             std::process::ExitCode::FAILURE
         );
+    }
+
+    #[test]
+    fn entrypoint_selection_accepts_one_encrypted_file() {
+        let mut files = HashMap::new();
+        files.insert("Game.exe".to_owned(), segment(true));
+        files.insert("config.json".to_owned(), segment(false));
+
+        assert_eq!(select_entrypoint(&files, None).unwrap(), "Game.exe");
+    }
+
+    #[test]
+    fn entrypoint_selection_requires_explicit_name_for_multiple_files() {
+        let mut files = HashMap::new();
+        files.insert("Game.exe".to_owned(), segment(true));
+        files.insert("Launcher.exe".to_owned(), segment(true));
+
+        let error = select_entrypoint(&files, None).expect_err("ambiguous entrypoint must fail");
+
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("explicit --exe"));
+    }
+
+    #[test]
+    fn entrypoint_selection_matches_requested_encrypted_file() {
+        let mut files = HashMap::new();
+        files.insert("Game.exe".to_owned(), segment(true));
+        files.insert("Launcher.exe".to_owned(), segment(true));
+
+        assert_eq!(
+            select_entrypoint(&files, Some("Launcher.exe")).unwrap(),
+            "Launcher.exe"
+        );
+    }
+
+    #[test]
+    fn entrypoint_selection_rejects_unencrypted_name() {
+        let mut files = HashMap::new();
+        files.insert("Game.exe".to_owned(), segment(true));
+        files.insert("config.json".to_owned(), segment(false));
+
+        let error = select_entrypoint(&files, Some("config.json"))
+            .expect_err("unencrypted entrypoint must fail");
+
+        assert_eq!(error.kind(), ErrorKind::NotFound);
     }
 }
