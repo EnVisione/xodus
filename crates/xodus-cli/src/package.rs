@@ -44,6 +44,45 @@ fn register_content_id_redirect(
     Ok(())
 }
 
+fn package_endpoint_url(content_id: &str, version_id: Option<&str>) -> io::Result<reqwest::Url> {
+    let mut url = reqwest::Url::parse(XBOX_LIVE_PACKAGES_PC).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "package service endpoint is not a valid URL",
+        )
+    })?;
+    let endpoint = if version_id.is_some() {
+        "GetSpecificBasePackage"
+    } else {
+        "GetBasePackage"
+    };
+    let mut segments = url.path_segments_mut().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "package service endpoint cannot accept path segments",
+        )
+    })?;
+    segments.push(endpoint);
+    if content_id.is_empty() || content_id.chars().any(char::is_control) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "package content ID is empty or contains control characters",
+        ));
+    }
+    segments.push(content_id);
+    if let Some(version_id) = version_id {
+        if version_id.is_empty() || version_id.chars().any(char::is_control) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "package version ID is empty or contains control characters",
+            ));
+        }
+        segments.push(version_id);
+    }
+    drop(segments);
+    Ok(url)
+}
+
 pub(crate) fn package_download_urls(
     cdn_root_paths: &[String],
     background_cdn_root_paths: &[String],
@@ -175,6 +214,28 @@ pub async fn get_packages(
     tokens: &TokenManager,
     content_id: String,
 ) -> Result<PackageDetails, Box<dyn std::error::Error>> {
+    get_packages_at_endpoint(client, tokens, package_endpoint_url(&content_id, None)?).await
+}
+
+pub async fn get_specific_packages(
+    client: &reqwest::Client,
+    tokens: &TokenManager,
+    content_id: String,
+    version_id: String,
+) -> Result<PackageDetails, Box<dyn std::error::Error>> {
+    get_packages_at_endpoint(
+        client,
+        tokens,
+        package_endpoint_url(&content_id, Some(&version_id))?,
+    )
+    .await
+}
+
+async fn get_packages_at_endpoint(
+    client: &reqwest::Client,
+    tokens: &TokenManager,
+    endpoint: reqwest::Url,
+) -> Result<PackageDetails, Box<dyn std::error::Error>> {
     let dev_token = tokens.get_device_sts_token()?;
     let Token::Legacy(dev_token) = dev_token else {
         return Err(Box::new(std::io::Error::other("Invalid STS token")));
@@ -188,9 +249,7 @@ pub async fn get_packages(
         xodus::api::xbox::run(client, dev_token, legacy, "http://update.xboxlive.com").await?;
 
     let response = client
-        .get(format!(
-            "{XBOX_LIVE_PACKAGES_PC}/GetBasePackage/{content_id}"
-        ))
+        .get(endpoint)
         .header("x-xbl-contract-version", "3")
         .header(
             "Authorization",
@@ -213,8 +272,43 @@ pub async fn get_packages(
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_CONTENT_ID_REDIRECTS, package_download_url_capacity, register_content_id_redirect,
+        MAX_CONTENT_ID_REDIRECTS, package_download_url_capacity, package_endpoint_url,
+        register_content_id_redirect,
     };
+
+    #[test]
+    fn package_endpoint_url_selects_latest_or_specific_route() {
+        assert_eq!(
+            package_endpoint_url("content-id", None)
+                .expect("latest package endpoint")
+                .path(),
+            "/GetBasePackage/content-id"
+        );
+        assert_eq!(
+            package_endpoint_url("content-id", Some("version-id"))
+                .expect("specific package endpoint")
+                .path(),
+            "/GetSpecificBasePackage/content-id/version-id"
+        );
+    }
+
+    #[test]
+    fn package_endpoint_url_rejects_empty_or_controlled_ids() {
+        for (content_id, version_id) in [("", None), ("content", Some(""))] {
+            assert!(package_endpoint_url(content_id, version_id).is_err());
+        }
+        assert!(package_endpoint_url("content\n", None).is_err());
+        assert!(package_endpoint_url("content", Some("version\r")).is_err());
+    }
+
+    #[test]
+    fn package_endpoint_url_encodes_path_delimiters_inside_ids() {
+        let url = package_endpoint_url("content/id", Some("version/id")).expect("safe URL");
+        assert_eq!(
+            url.path(),
+            "/GetSpecificBasePackage/content%2Fid/version%2Fid"
+        );
+    }
 
     #[test]
     fn package_download_url_capacity_rejects_overflow() {

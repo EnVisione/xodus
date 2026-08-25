@@ -21,6 +21,12 @@ No credential, token, account identifier, signed download URL, package byte, pro
 
 The public DisplayCatalog result and the authenticated `GetBasePackage` result agree on the product, content, package format, and x64 architecture for both targets. The authenticated dry-run completed successfully for every selected file without a package download.
 
+### Versioned Package Retrieval Boundary
+
+The download command now accepts `--version-id` and uses the packages service `GetSpecificBasePackage/{content_id}/{version_id}` route to retrieve an exact previously recorded package revision. URL path segments are constructed through the URL API, so empty or control-bearing identifiers fail before authentication or network activity. This is the repository-owned acquisition path needed for a later source-to-target update exercise when an installed package manifest supplies its Microsoft `VersionId`.
+
+The current latest-package response does not expose a source `VersionId` for every listed XSP descriptor. The selector therefore does not infer a source identity from an XSP filename or claim that an update has been applied. A real update still requires an authorized source revision, the current target revision, the matching XSP, and transaction, integrity, rollback, and recovery evidence. The service route shape is documented in the public [packagespc retrieval example](https://gist.github.com/rtm516/725fa1e38aafd2600976113ccc45a496).
+
 ### Isolated Minecraft Package Inspection
 
 The owner authorized one isolated Minecraft base-package acquisition. Only `Microsoft.MinecraftUWP_1.26.4403.0_x64__8wekyb3d8bbwe.msixvc` was selected. It reached the authenticated metadata size exactly, 2,490,064,896 bytes, in a disposable directory. No XSP update, Forza package, install directory, save, license, content key, or decrypted executable was retained.

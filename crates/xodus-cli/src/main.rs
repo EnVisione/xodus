@@ -17,6 +17,12 @@ enum SubCommand {
         market: Option<String>,
         #[arg(
             long,
+            value_name = "VERSION_ID",
+            help = "Retrieve a specific package version through GetSpecificBasePackage"
+        )]
+        version_id: Option<String>,
+        #[arg(
+            long,
             default_value_t = false,
             help = "Display download URLs instead of downloading"
         )]
@@ -206,8 +212,9 @@ async fn run_inner(args: CliArgs) -> ExitCode {
         SubCommand::Download {
             product,
             market,
+            version_id,
             dry_run,
-        } => commands::download::run(&client, &tokens, product, market, dry_run).await,
+        } => commands::download::run(&client, &tokens, product, market, version_id, dry_run).await,
         SubCommand::License {
             content_id,
             market,

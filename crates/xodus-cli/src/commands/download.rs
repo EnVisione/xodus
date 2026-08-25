@@ -16,7 +16,7 @@ use crate::commands::streaming::{
     acquire_transaction_lock, new_transaction, open_package_output, promote_transaction,
     promotion_entries,
 };
-use crate::package::{get_content_id, get_packages, package_download_urls};
+use crate::package::{get_content_id, get_packages, get_specific_packages, package_download_urls};
 
 const MAX_FILE_HASH_BASE64_CHARS: usize = 64;
 const DOWNLOAD_RETRY_LIMIT: usize = 3;
@@ -245,6 +245,7 @@ pub async fn run(
     tokens: &TokenManager,
     product: String,
     market: Option<String>,
+    version_id: Option<String>,
     dry_run: bool,
 ) -> ExitCode {
     let content_id_task = get_content_id(client, product, market).await;
@@ -257,7 +258,11 @@ pub async fn run(
         return ExitCode::FAILURE;
     };
 
-    let package_result = get_packages(client, tokens, content_id.clone()).await;
+    let package_result = if let Some(version_id) = version_id {
+        get_specific_packages(client, tokens, content_id.clone(), version_id).await
+    } else {
+        get_packages(client, tokens, content_id.clone()).await
+    };
     let Ok(package) = package_result else {
         let Err(err) = package_result else {
             eprintln!("Unknown Error");
