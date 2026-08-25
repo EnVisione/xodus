@@ -452,6 +452,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn applies_rollback_fixture_replaces_existing_active_state_transactionally() {
+        let temporary = tempfile::tempdir().expect("temporary directory must exist");
+        let base = temporary.path().join("base.bin");
+        let new_data = temporary.path().join("new.bin");
+        let source_hashes = temporary.path().join("source.hashes");
+        let target_hashes = temporary.path().join("target.hashes");
+        let destination = temporary.path().join("rollback");
+        std::fs::create_dir(&destination).expect("destination must exist");
+        std::fs::write(destination.join("updated.bin"), b"active")
+            .expect("active output must be writable");
+        std::fs::write(&base, b"base").expect("base fixture must be writable");
+        std::fs::write(&new_data, b"new!").expect("new data fixture must be writable");
+        std::fs::write(&source_hashes, format!("{}\n", hash_line(b"base")))
+            .expect("source hash manifest must be writable");
+        std::fs::write(
+            &target_hashes,
+            format!("{}\n{}\n", hash_line(b"new!"), hash_line(b"base")),
+        )
+        .expect("target hash manifest must be writable");
+
+        assert_eq!(
+            run(ApplyXspRequest {
+                descriptor: fixture("xodus-fixture-rollback.xsp")
+                    .to_string_lossy()
+                    .into_owned(),
+                base: base.to_string_lossy().into_owned(),
+                new_data: new_data.to_string_lossy().into_owned(),
+                source_hashes: source_hashes.to_string_lossy().into_owned(),
+                target_hashes: target_hashes.to_string_lossy().into_owned(),
+                destination: destination.to_string_lossy().into_owned(),
+                output: "updated.bin".to_owned(),
+                block_size: 4,
+                rollback: true,
+            })
+            .await,
+            std::process::ExitCode::SUCCESS
+        );
+        assert_eq!(
+            std::fs::read(destination.join("updated.bin"))
+                .expect("rollback output must replace active state"),
+            b"new!base"
+        );
+        assert!(
+            std::fs::read_dir(&destination)
+                .expect("destination must remain readable")
+                .all(|entry| {
+                    !entry
+                        .expect("destination entry must be readable")
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".xodus-streaming-txn-")
+                }),
+            "successful rollback must clean its staging transaction"
+        );
+    }
+
+    #[tokio::test]
     async fn rejects_hash_mismatch_without_promoting_existing_state() {
         let temporary = tempfile::tempdir().expect("temporary directory must exist");
         let base = temporary.path().join("base.bin");
