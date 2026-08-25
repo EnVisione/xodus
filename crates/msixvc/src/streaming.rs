@@ -24,6 +24,7 @@ struct ActiveHttpStream {
 struct OpenedHttpStream {
     start: u64,
     len: u64,
+    end_offset: u64,
     stream: ByteStream,
 }
 
@@ -226,7 +227,7 @@ impl<'t> HttpRead<'t> {
             pending_open: None,
             active: Some(ActiveHttpStream {
                 next_offset: initial.start,
-                end_offset: initial.len,
+                end_offset: initial.end_offset,
                 stream: initial.stream,
             }),
             pending_chunk: None,
@@ -274,7 +275,7 @@ impl<'t> HttpRead<'t> {
                 validate_reopened_http_stream(self.pos, self.len, opened.start, opened.len)?;
                 self.active = Some(ActiveHttpStream {
                     next_offset: opened.start,
-                    end_offset: opened.len,
+                    end_offset: opened.end_offset,
                     stream: opened.stream,
                 });
                 Poll::Ready(Ok(()))
@@ -843,7 +844,7 @@ async fn open_http_stream(
         .error_for_status()
         .map_err(http_err)?;
 
-    let (actual_start, len) = match start {
+    let (actual_start, len, end_offset) = match start {
         None => {
             if response.status() != reqwest::StatusCode::OK {
                 return Err(Error::new(
@@ -859,7 +860,7 @@ async fn open_http_stream(
                 .map_err(|err| Error::new(ErrorKind::InvalidData, err))?
                 .parse::<u64>()
                 .map_err(|err| Error::new(ErrorKind::InvalidData, err))?;
-            (0, len)
+            (0, len, len)
         }
         Some(expected_start) => {
             if response.status() != reqwest::StatusCode::PARTIAL_CONTENT {
@@ -902,13 +903,17 @@ async fn open_http_stream(
                 .content_length()
                 .ok_or_else(|| Error::new(ErrorKind::InvalidData, "missing Content-Length"))?;
             validate_partial_http_response_extent(actual_start, actual_end, len, content_length)?;
-            (actual_start, len)
+            let end_offset = actual_end
+                .checked_add(1)
+                .ok_or_else(|| Error::new(ErrorKind::InvalidData, "response end overflow"))?;
+            (actual_start, len, end_offset)
         }
     };
 
     Ok(OpenedHttpStream {
         start: actual_start,
         len,
+        end_offset,
         stream: Box::pin(response.bytes_stream()),
     })
 }
@@ -1354,6 +1359,42 @@ mod tests {
             .expect("a bounded empty chunk must not prevent later data");
 
         assert_eq!(output, b"a");
+    }
+
+    #[tokio::test]
+    async fn http_read_rejects_chunk_beyond_response_extent() {
+        let stream: super::ByteStream = Box::pin(futures_util::stream::iter(vec![Ok::<
+            bytes::Bytes,
+            reqwest::Error,
+        >(
+            bytes::Bytes::from_static(b"12345"),
+        )]));
+        let mut reader = super::HttpRead {
+            client: reqwest::Client::new(),
+            url: "http://invalid.test/file".to_owned(),
+            len: 8,
+            pos: 0,
+            pending_open: None,
+            active: Some(super::ActiveHttpStream {
+                next_offset: 0,
+                end_offset: 4,
+                stream,
+            }),
+            pending_chunk: None,
+            pending_chunk_offset: 0,
+            retry_budget: 0,
+            progress: None,
+        };
+
+        let mut output = Vec::new();
+        let error = reader
+            .read_to_end(&mut output)
+            .await
+            .expect_err("a chunk beyond the response extent must fail");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("active stream offset"));
+        assert!(output.is_empty());
     }
 
     async fn open_cached_reader<'t>(
