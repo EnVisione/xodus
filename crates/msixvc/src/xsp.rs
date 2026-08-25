@@ -730,7 +730,18 @@ impl XspFile {
             });
         }
 
-        let mut entries = Vec::with_capacity(header.record_count as usize);
+        let record_count = usize::try_from(header.record_count).map_err(|_| {
+            XspFileParseError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "XSP record count cannot be represented",
+            ))
+        })?;
+        let mut entries = Vec::new();
+        entries.try_reserve_exact(record_count).map_err(|error| {
+            XspFileParseError::Io(std::io::Error::other(format!(
+                "XSP record allocation failed: {error}"
+            )))
+        })?;
         file.seek(std::io::SeekFrom::Start(record_table_offset))
             .await?;
 

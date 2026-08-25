@@ -77,8 +77,18 @@ where
         });
     }
 
-    let mut names = HashSet::with_capacity(archive.len());
-    let mut entries = Vec::with_capacity(archive.len());
+    let mut names = HashSet::new();
+    names.try_reserve(archive.len()).map_err(|error| {
+        Msixvc2ParseError::Io(std::io::Error::other(format!(
+            "MSIXVC2 entry index allocation failed: {error}"
+        )))
+    })?;
+    let mut entries = Vec::new();
+    entries.try_reserve_exact(archive.len()).map_err(|error| {
+        Msixvc2ParseError::Io(std::io::Error::other(format!(
+            "MSIXVC2 entry allocation failed: {error}"
+        )))
+    })?;
     let mut uncompressed_size = 0_u64;
     for index in 0..archive.len() {
         let file = archive.by_index(index)?;
