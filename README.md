@@ -100,6 +100,7 @@ Commands:
   download    Download msixvc or xsp files fo given game
   license     Dump CIKs for use with XvdTool
   extract     Extract locally stored msixvc file
+  inspect     Inspect a local MSIXVC2 archive without extracting it
   login       
   streaming   Download and extract the game through streaming algorithm
   clep        Generate or decrypt base64-encoded CLEP challenge data

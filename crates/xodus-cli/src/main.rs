@@ -38,6 +38,10 @@ enum SubCommand {
         #[arg(short, long)]
         market: Option<String>,
     },
+    #[command(about = "Inspect a local MSIXVC2 archive without extracting it")]
+    Inspect {
+        path: String,
+    },
     Login,
     Logout {
         #[arg(long, default_value_t = false, help = "Remove device license")]
@@ -150,7 +154,10 @@ async fn run(args: CliArgs) -> ExitCode {
     // these fully offline commands were unusable.
     let needs_device_credentials = !matches!(
         args.command,
-        SubCommand::Clep { .. } | SubCommand::SpLicense { .. } | SubCommand::Logout { .. }
+        SubCommand::Clep { .. }
+            | SubCommand::SpLicense { .. }
+            | SubCommand::Logout { .. }
+            | SubCommand::Inspect { .. }
     );
     if needs_device_credentials {
         xodus::tokens::device::ensure_device_credentials(&client, &tokens).await;
@@ -192,6 +199,7 @@ async fn run(args: CliArgs) -> ExitCode {
             )
             .await
         }
+        SubCommand::Inspect { path } => commands::inspect::run(path),
         SubCommand::Streaming {
             source,
             destination,
