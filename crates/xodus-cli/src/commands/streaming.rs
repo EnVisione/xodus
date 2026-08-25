@@ -1445,6 +1445,74 @@ mod tests {
     }
 
     #[test]
+    fn transaction_recovery_cleans_a_pending_transaction_without_mutation() {
+        let temporary = tempfile::tempdir().unwrap();
+        let output = temporary.path().join("output");
+        std::fs::create_dir(&output).unwrap();
+        let final_path = output.join("game.bin");
+        std::fs::write(&final_path, b"verified").unwrap();
+        let (transaction, _) = new_transaction(&output).unwrap();
+        let specs = vec![("game.bin".to_owned(), "game.bin".to_owned())];
+        let entries = promotion_entries(&specs).unwrap();
+        write_transaction_journal(transaction.path(), &entries, false).unwrap();
+
+        let entries = read_transaction_journal(transaction.path())
+            .unwrap()
+            .expect("pending journal must be recoverable");
+        assert!(
+            entries
+                .iter()
+                .all(|entry| entry.state == PromotionState::Pending)
+        );
+        recover_transaction_dir(transaction.path(), &output).unwrap();
+
+        assert_eq!(std::fs::read(final_path).unwrap(), b"verified");
+        assert!(!transaction.path().exists());
+    }
+
+    #[test]
+    fn transaction_recovery_restores_after_backup_before_promotion() {
+        let temporary = tempfile::tempdir().unwrap();
+        let output = temporary.path().join("output");
+        std::fs::create_dir(&output).unwrap();
+        let final_path = output.join("game.bin");
+        std::fs::write(&final_path, b"verified").unwrap();
+        let (transaction, _) = new_transaction(&output).unwrap();
+        let backup_path = transaction.path().join(".xodus-streaming-backup/game.bin");
+        std::fs::create_dir_all(backup_path.parent().unwrap()).unwrap();
+        std::fs::rename(&final_path, &backup_path).unwrap();
+        let specs = vec![("game.bin".to_owned(), "game.bin".to_owned())];
+        let mut entries = promotion_entries(&specs).unwrap();
+        entries[0].had_previous = true;
+        entries[0].state = PromotionState::BackedUp;
+        write_transaction_journal(transaction.path(), &entries, false).unwrap();
+
+        recover_transaction_dir(transaction.path(), &output).unwrap();
+
+        assert_eq!(std::fs::read(final_path).unwrap(), b"verified");
+        assert!(!transaction.path().exists());
+    }
+
+    #[test]
+    fn transaction_recovery_removes_new_file_after_promotion_without_previous() {
+        let temporary = tempfile::tempdir().unwrap();
+        let output = temporary.path().join("output");
+        std::fs::create_dir(&output).unwrap();
+        let (transaction, _) = new_transaction(&output).unwrap();
+        let final_path = output.join("game.bin");
+        std::fs::write(&final_path, b"unverified").unwrap();
+        let specs = vec![("game.bin".to_owned(), "game.bin".to_owned())];
+        let mut entries = promotion_entries(&specs).unwrap();
+        entries[0].state = PromotionState::Promoted;
+        write_transaction_journal(transaction.path(), &entries, false).unwrap();
+
+        recover_transaction_dir(transaction.path(), &output).unwrap();
+
+        assert!(!final_path.exists());
+        assert!(!transaction.path().exists());
+    }
+
+    #[test]
     fn transaction_promotion_removes_stale_sidecars_and_rolls_back() {
         let temporary = tempfile::tempdir().unwrap();
         let output = temporary.path().join("output");
