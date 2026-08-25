@@ -84,6 +84,13 @@ fn collect_stale_package_files_in(
 }
 
 pub fn run(path: String, destination: String) -> ExitCode {
+    run_with_hook(path, destination, || false)
+}
+
+fn run_with_hook<F>(path: String, destination: String, mut should_interrupt: F) -> ExitCode
+where
+    F: FnMut() -> bool,
+{
     let archive_path = Path::new(&path);
     let mut metadata_file = match File::open(archive_path) {
         Ok(file) => file,
@@ -170,7 +177,14 @@ pub fn run(path: String, destination: String) -> ExitCode {
             let mut output = open_package_output(&payload_root, &entry.name)?;
             io::copy(input, &mut output)?;
             output.flush()?;
-            output.sync_all()
+            output.sync_all()?;
+            if should_interrupt() {
+                return Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "MSIXVC2 install interrupted after staged write",
+                ));
+            }
+            Ok(())
         },
     );
     if let Err(error) = extract_result {
@@ -195,7 +209,9 @@ pub fn run(path: String, destination: String) -> ExitCode {
 mod tests {
     use std::path::PathBuf;
 
-    use super::run;
+    use crate::commands::streaming::recover_transactions;
+
+    use super::{run, run_with_hook};
 
     fn fixture(name: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -378,6 +394,77 @@ mod tests {
         assert!(
             !destination.exists(),
             "rejected archive must not create a destination"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn msixvc2_process_crash_recovers_staged_install() {
+        let temporary = tempfile::tempdir().expect("temporary destination must exist");
+        let destination = temporary.path().join("install");
+        std::fs::create_dir(&destination).expect("destination must be created");
+        std::fs::write(destination.join("keep.txt"), b"verified")
+            .expect("existing state must be writable");
+
+        let status = std::process::Command::new(
+            std::env::current_exe().expect("test executable must be available"),
+        )
+        .args([
+            "--exact",
+            "commands::install_msixvc2::tests::msixvc2_process_crash_helper",
+            "--nocapture",
+        ])
+        .env(
+            "XODUS_MSIXVC2_CRASH_ARCHIVE",
+            fixture("xodus-fixture-base.msixvc"),
+        )
+        .env("XODUS_MSIXVC2_CRASH_DESTINATION", &destination)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("crash helper must start");
+
+        assert!(
+            !status.success(),
+            "MSIXVC2 crash helper must terminate before promotion"
+        );
+        recover_transactions(&destination).expect("staged install must be recoverable");
+        assert_eq!(
+            std::fs::read(destination.join("keep.txt")).expect("verified state must remain"),
+            b"verified"
+        );
+        assert!(
+            std::fs::read_dir(&destination)
+                .expect("destination must remain readable")
+                .all(|entry| {
+                    !entry
+                        .expect("destination entry must be readable")
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".xodus-streaming-txn-")
+                }),
+            "recovery must remove the crashed install transaction"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn msixvc2_process_crash_helper() {
+        let Some(archive) = std::env::var_os("XODUS_MSIXVC2_CRASH_ARCHIVE") else {
+            return;
+        };
+        let destination = std::env::var_os("XODUS_MSIXVC2_CRASH_DESTINATION")
+            .map(PathBuf::from)
+            .expect("crash helper destination must be configured");
+        let result = run_with_hook(
+            PathBuf::from(archive).to_string_lossy().into_owned(),
+            destination.to_string_lossy().into_owned(),
+            || std::process::abort(),
+        );
+        assert_eq!(
+            result,
+            std::process::ExitCode::FAILURE,
+            "crash helper must not return normally"
         );
     }
 }
