@@ -307,6 +307,39 @@ pub enum XvdFileParseError {
     },
     #[error("XVC region end overflows for offset {offset} and length {length}")]
     RegionEndOverflow { offset: u64, length: u64 },
+    #[error("XVD drive data end overflows for offset {drive_data_offset} and size {drive_size}")]
+    DriveDataEndOverflow {
+        drive_data_offset: u64,
+        drive_size: u64,
+    },
+    #[error("XVC region end {region_end} exceeds declared XVD drive data end {drive_data_end}")]
+    RegionEndBeyondDriveData {
+        region_end: u64,
+        drive_data_end: u64,
+    },
+}
+
+fn reserve_xvc_region_entries(
+    num_pages: u64,
+) -> Result<(Vec<u32>, Vec<[u8; 20]>), XvdFileParseError> {
+    let page_capacity = usize::try_from(num_pages)
+        .map_err(|_| XvdFileParseError::RegionPageCountTooLarge { num_pages })?;
+    let mut data_units: Vec<u32> = Vec::new();
+    data_units.try_reserve_exact(page_capacity).map_err(|_| {
+        XvdFileParseError::RegionAllocationFailed {
+            num_pages,
+            allocation: "data-unit",
+        }
+    })?;
+    let mut data_hashs: Vec<[u8; 20]> = Vec::new();
+    data_hashs.try_reserve_exact(page_capacity).map_err(|_| {
+        XvdFileParseError::RegionAllocationFailed {
+            num_pages,
+            allocation: "data-hash",
+        }
+    })?;
+
+    Ok((data_units, data_hashs))
 }
 
 #[derive(Debug)]
@@ -427,6 +460,12 @@ impl XvdFile {
             page_number_to_offset(xvd_header.xvc_data_page_count()) + xvc_info_offset;
         let drive_data_offset =
             page_number_to_offset(xvd_header.dynamic_header_page_count()) + dynamic_header_offset;
+        let drive_data_end = drive_data_offset.checked_add(xvd_header.drive_size).ok_or(
+            XvdFileParseError::DriveDataEndOverflow {
+                drive_data_offset,
+                drive_size: xvd_header.drive_size,
+            },
+        )?;
 
         let mut enc_sections: Vec<EncryptedSectionInfo> = vec![];
         let mut reader = BufReader::with_capacity(PAGES_PER_BLOCK * XvdHashEntry::SIZE, file);
@@ -446,31 +485,22 @@ impl XvdFile {
                 });
             }
 
-            let _region_end =
+            let region_end =
                 h.offset
                     .checked_add(length)
                     .ok_or(XvdFileParseError::RegionEndOverflow {
                         offset: h.offset,
                         length,
                     })?;
+            if region_end > drive_data_end {
+                return Err(XvdFileParseError::RegionEndBeyondDriveData {
+                    region_end,
+                    drive_data_end,
+                });
+            }
             let start_page = offset_to_page_number(h.offset - user_data_offset);
             let num_pages = bytes_to_pages(length);
-            let page_capacity = usize::try_from(num_pages)
-                .map_err(|_| XvdFileParseError::RegionPageCountTooLarge { num_pages })?;
-            let mut data_units: Vec<u32> = Vec::new();
-            data_units.try_reserve_exact(page_capacity).map_err(|_| {
-                XvdFileParseError::RegionAllocationFailed {
-                    num_pages,
-                    allocation: "data-unit",
-                }
-            })?;
-            let mut data_hashs: Vec<[u8; 20]> = Vec::new();
-            data_hashs.try_reserve_exact(page_capacity).map_err(|_| {
-                XvdFileParseError::RegionAllocationFailed {
-                    num_pages,
-                    allocation: "data-hash",
-                }
-            })?;
+            let (mut data_units, mut data_hashs) = reserve_xvc_region_entries(num_pages)?;
 
             let mut page = 0;
             loop {
@@ -1137,7 +1167,7 @@ mod tests {
 
     use tokio::io::{AsyncRead, AsyncSeek, ReadBuf};
 
-    use super::{MAX_XVC_REGION_HEADERS, XvdFile, XvdFileParseError};
+    use super::{MAX_XVC_REGION_HEADERS, XvdFile, XvdFileParseError, reserve_xvc_region_entries};
 
     const XVD_HEADER_SIZE: usize = 4096;
     const XVC_INFO_OFFSET: usize = 0x4000;
@@ -1150,7 +1180,11 @@ mod tests {
     const XVC_REGION_OFFSET_OFFSET: usize = 80;
     const XVC_REGION_LENGTH_OFFSET: usize = 88;
     const FILETIME_OFFSET: usize = 0x210;
+    const DRIVE_SIZE_OFFSET: usize = 0x218;
     const XVC_DATA_LENGTH_OFFSET: usize = 0x290;
+    const SYNTHETIC_DRIVE_SIZE: u64 = XVD_HEADER_SIZE as u64;
+    const SYNTHETIC_DRIVE_DATA_OFFSET: u64 = 0x5000;
+    const SYNTHETIC_DRIVE_DATA_END: u64 = SYNTHETIC_DRIVE_DATA_OFFSET + SYNTHETIC_DRIVE_SIZE;
     const WINDOWS_TO_UNIX_FILETIME: i64 = 116_444_736_000_000_000;
 
     struct SyntheticXvdReader {
@@ -1164,6 +1198,8 @@ mod tests {
             header[0x200..0x208].copy_from_slice(b"msft-xvd");
             header[FILETIME_OFFSET..FILETIME_OFFSET + 8]
                 .copy_from_slice(&WINDOWS_TO_UNIX_FILETIME.to_le_bytes());
+            header[DRIVE_SIZE_OFFSET..DRIVE_SIZE_OFFSET + 8]
+                .copy_from_slice(&SYNTHETIC_DRIVE_SIZE.to_le_bytes());
             header[XVC_DATA_LENGTH_OFFSET..XVC_DATA_LENGTH_OFFSET + 4]
                 .copy_from_slice(&1_u32.to_le_bytes());
 
@@ -1192,6 +1228,14 @@ mod tests {
         }
 
         fn synthetic_xvd_with_region_key_id_and_offset(key_id: u16, region_offset: u64) -> Self {
+            Self::synthetic_xvd_with_region_key_id_and_offset_and_length(key_id, region_offset, 0)
+        }
+
+        fn synthetic_xvd_with_region_key_id_and_offset_and_length(
+            key_id: u16,
+            region_offset: u64,
+            length: u64,
+        ) -> Self {
             let mut reader = Self::synthetic_xvd_with_region_count(1);
             let xvc_info_start = XVC_INFO_OFFSET;
             reader.inner.get_mut()[xvc_info_start + XVC_INFO_VERSION_OFFSET
@@ -1209,16 +1253,18 @@ mod tests {
             reader.inner.get_mut()[region_start + XVC_REGION_OFFSET_OFFSET
                 ..region_start + XVC_REGION_OFFSET_OFFSET + 8]
                 .copy_from_slice(&region_offset.to_le_bytes());
-            reader
-        }
-
-        fn synthetic_xvd_with_region_length(length: u64) -> Self {
-            let mut reader = Self::synthetic_xvd_with_region_key_id(0);
-            let region_start = XVC_INFO_OFFSET + XVC_INFO_SIZE;
             reader.inner.get_mut()[region_start + XVC_REGION_LENGTH_OFFSET
                 ..region_start + XVC_REGION_LENGTH_OFFSET + 8]
                 .copy_from_slice(&length.to_le_bytes());
             reader
+        }
+
+        fn synthetic_xvd_with_region_length(length: u64) -> Self {
+            Self::synthetic_xvd_with_region_key_id_and_offset_and_length(
+                0,
+                XVC_INFO_OFFSET as u64,
+                length,
+            )
         }
     }
 
@@ -1335,13 +1381,12 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
-    async fn parse_rejects_unreservable_xvc_region_pages() {
+    #[test]
+    fn reserve_xvc_region_entries_rejects_unreservable_pages() {
         let length = !((XVD_HEADER_SIZE - 1) as u64) - XVC_INFO_OFFSET as u64;
-        let result =
-            XvdFile::parse(SyntheticXvdReader::synthetic_xvd_with_region_length(length)).await;
-        let error = match result {
-            Ok(_) => panic!("unreservable XVC region pages must not parse an XVD"),
+        let num_pages = length / XVD_HEADER_SIZE as u64;
+        let error = match reserve_xvc_region_entries(num_pages) {
+            Ok(_) => panic!("unreservable XVC region pages must not reserve entries"),
             Err(error) => error,
         };
 
@@ -1351,6 +1396,46 @@ mod tests {
                 num_pages,
                 allocation: "data-unit",
             } if num_pages == length / XVD_HEADER_SIZE as u64
+        ));
+    }
+
+    #[tokio::test]
+    async fn parse_accepts_xvc_region_ending_at_declared_drive_extent() {
+        let xvd = XvdFile::parse(
+            SyntheticXvdReader::synthetic_xvd_with_region_key_id_and_offset_and_length(
+                0,
+                SYNTHETIC_DRIVE_DATA_OFFSET,
+                SYNTHETIC_DRIVE_SIZE,
+            ),
+        )
+        .await
+        .expect("XVC region ending at the declared drive extent must parse");
+
+        assert_eq!(xvd.drive_data_offset, SYNTHETIC_DRIVE_DATA_OFFSET);
+    }
+
+    #[tokio::test]
+    async fn parse_rejects_xvc_region_past_declared_drive_extent_before_page_processing() {
+        let region_end = SYNTHETIC_DRIVE_DATA_END + SYNTHETIC_DRIVE_SIZE;
+        let result = XvdFile::parse(
+            SyntheticXvdReader::synthetic_xvd_with_region_key_id_and_offset_and_length(
+                0,
+                SYNTHETIC_DRIVE_DATA_END,
+                SYNTHETIC_DRIVE_SIZE,
+            ),
+        )
+        .await;
+        let error = match result {
+            Ok(_) => panic!("XVC region past the declared drive extent must not parse"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            XvdFileParseError::RegionEndBeyondDriveData {
+                region_end: actual_region_end,
+                drive_data_end,
+            } if actual_region_end == region_end && drive_data_end == SYNTHETIC_DRIVE_DATA_END
         ));
     }
 
