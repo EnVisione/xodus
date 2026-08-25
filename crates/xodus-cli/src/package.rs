@@ -136,6 +136,11 @@ fn validate_package_cdn_root(root: &str) -> io::Result<reqwest::Url> {
     if root.is_empty()
         || root.len() > MAX_PACKAGE_CDN_ROOT_BYTES
         || root.chars().any(char::is_control)
+        || root.contains('\\')
+        || has_encoded_path_escape(root)
+        || root
+            .split('/')
+            .any(|segment| segment == "." || segment == "..")
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -151,6 +156,10 @@ fn validate_package_cdn_root(root: &str) -> io::Result<reqwest::Url> {
         || parsed.query().is_some()
         || parsed.fragment().is_some()
         || !parsed.path().ends_with('/')
+        || parsed
+            .path()
+            .split('/')
+            .any(|segment| segment == "." || segment == "..")
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -169,6 +178,7 @@ fn validate_package_relative_url(relative_url: &str) -> io::Result<()> {
         || relative_url.contains('\\')
         || relative_url.contains('?')
         || relative_url.contains('#')
+        || has_encoded_path_escape(relative_url)
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -185,6 +195,16 @@ fn validate_package_relative_url(relative_url: &str) -> io::Result<()> {
         ));
     }
     Ok(())
+}
+
+fn has_encoded_path_escape(value: &str) -> bool {
+    value.as_bytes().windows(3).any(|window| {
+        window[0] == b'%'
+            && matches!(
+                (window[1], window[2]),
+                (b'2', b'e' | b'E') | (b'2', b'f' | b'F') | (b'5', b'c' | b'C')
+            )
+    })
 }
 
 pub async fn get_content_id(

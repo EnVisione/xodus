@@ -474,6 +474,9 @@ mod tests {
             "../escape.xvd",
             "content//empty.xvd",
             r"content\windows.xvd",
+            "content/%2e%2e/escape.xvd",
+            "content/%2f/escape.xvd",
+            "content/%5c/escape.xvd",
             "content/file.xvd?redirect=1",
             "content/file.xvd#fragment",
             "https://other.example/file.xvd",
@@ -489,6 +492,8 @@ mod tests {
     fn package_download_urls_reject_invalid_roots() {
         for root in [
             "https://cdn.example/base",
+            "https://cdn.example/base/../",
+            "https://cdn.example/base/%2e%2e/",
             "https://cdn.example/base/?query=1",
             "https://cdn.example/base/#fragment",
         ] {
