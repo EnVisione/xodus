@@ -568,6 +568,8 @@ pub enum SegmentMetadataParseError {
     SegmentAllocationFailed { segment_count: u32 },
     #[error("unable to reserve a segment metadata file entry")]
     FileMapAllocationFailed,
+    #[error("unable to reserve {hash_count} segment hashes")]
+    HashAllocationFailed { hash_count: usize },
     #[error(
         "segment path end overflows for paths offset {paths_offset}, path offset {path_offset}, and path length {path_length}"
     )]
@@ -656,6 +658,8 @@ pub enum PopulateSegmentHashesError {
     HashSliceEndOverflow { start: usize, page_count: usize },
     #[error("segment hash slice end {end} exceeds {data_hash_count} available section hashes")]
     HashSliceBeyondAvailableHashes { end: usize, data_hash_count: usize },
+    #[error("unable to reserve {hash_count} segment hashes")]
+    HashAllocationFailed { hash_count: usize },
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -2524,7 +2528,13 @@ impl XvdFile {
                     segment.filesize,
                     section.data_hashs.len(),
                 )?;
-                let data_hashs: Vec<[u8; 20]> = section.data_hashs[hash_slice].into();
+                let mut data_hashs = Vec::new();
+                data_hashs
+                    .try_reserve_exact(hash_slice.len())
+                    .map_err(|_| SegmentMetadataParseError::HashAllocationFailed {
+                        hash_count: hash_slice.len(),
+                    })?;
+                data_hashs.extend_from_slice(&section.data_hashs[hash_slice]);
                 files
                     .try_reserve(1)
                     .map_err(|_| SegmentMetadataParseError::FileMapAllocationFailed)?;
@@ -2585,7 +2595,14 @@ impl XvdFile {
                 section_end,
                 section.data_hashs.len(),
             )?;
-            file.data_hashs = section.data_hashs[hash_slice].into();
+            let mut data_hashs = Vec::new();
+            data_hashs
+                .try_reserve_exact(hash_slice.len())
+                .map_err(|_| PopulateSegmentHashesError::HashAllocationFailed {
+                    hash_count: hash_slice.len(),
+                })?;
+            data_hashs.extend_from_slice(&section.data_hashs[hash_slice]);
+            file.data_hashs = data_hashs;
         }
 
         Ok(())
