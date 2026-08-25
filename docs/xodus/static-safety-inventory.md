@@ -4,7 +4,7 @@
 
 This inventory covers Rust production sources under `crates/` and supports the Phase 2 requirement that remotely influenced parser, package, service, and environment paths do not contain placeholder macros or unconditional process aborts.
 
-The inventory was refreshed on August 25, 2026 after the parser hardening checkpoints `070eb42`, `658beef`, and `e9eab1a`.
+The inventory was refreshed on August 25, 2026 after the parser hardening checkpoints `070eb42`, `658beef`, `e9eab1a`, `7f9d68e`, `65b9274`, `59b37c5`, and `c7e6347`.
 
 ## Scan
 
