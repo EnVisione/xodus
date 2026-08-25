@@ -33,7 +33,7 @@ When a segment carries data-integrity hashes, both HTTP download and local extra
 
 The shared binary parser now builds nested generic-array chunk references through checked slice bounds instead of an unsafe layout transmute. The layout invariant is that `GenericArray` stores contiguous elements with the alignment of its element type, so each borrowed chunk remains a complete aligned view of the original array. Nested-array and aligned-element regressions prove chunk size, alignment, order, and round-trip values while keeping the type-level reader extent contract.
 
-Xbox package authentication now propagates token, exchange, HTTP status, JSON, unsupported-response, empty-collection, and missing-user-claim failures as typed results. It no longer panics on a malformed or incomplete service response before package metadata access.
+Xbox package authentication now propagates token, exchange, HTTP status, JSON schema, unsupported-response, empty-collection, and missing-user-claim failures as explicit errors. The shared JSON request path rejects non-success status before decoding and returns decode failures for incomplete responses. It no longer panics on a malformed or incomplete service response before package metadata access, and regression tests cover both HTTP status and schema failure handling.
 
 SOAP passport token conversion now returns typed failures for missing encrypted legacy data, missing compact binary data, unsupported token types, and legacy serialization errors. Device, Xbox, refresh, login, and license callers propagate or report these failures before storing or using a token. Empty refresh collections also fail explicitly instead of indexing an absent response.
 

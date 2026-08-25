@@ -1,6 +1,28 @@
 use crate::models::xbox::{
     UserAuthProperties, UserAuthRequest, XstsPropertyBag, XstsRequest, XstsResponse,
 };
+use serde::{Serialize, de::DeserializeOwned};
+
+async fn post_json<Body, Response>(
+    client: &reqwest::Client,
+    endpoint: &str,
+    body: &Body,
+) -> reqwest::Result<Response>
+where
+    Body: Serialize,
+    Response: DeserializeOwned,
+{
+    client
+        .post(endpoint)
+        .header("Content-Type", "application/json")
+        .header("x-xbl-contract-version", "1")
+        .json(body)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await
+}
 
 pub async fn authenticate_xbox_user(
     client: &reqwest::Client,
@@ -16,16 +38,12 @@ pub async fn authenticate_xbox_user(
         },
     };
 
-    let resp = client
-        .post("https://user.auth.xboxlive.com/user/authenticate")
-        .header("Content-Type", "application/json")
-        .header("x-xbl-contract-version", "1")
-        .json(&body)
-        .send()
-        .await?
-        .error_for_status()?;
-
-    resp.json().await
+    post_json(
+        client,
+        "https://user.auth.xboxlive.com/user/authenticate",
+        &body,
+    )
+    .await
 }
 
 pub async fn request_xsts_token(
@@ -44,16 +62,12 @@ pub async fn request_xsts_token(
         },
     };
 
-    let resp = client
-        .post("https://xsts.auth.xboxlive.com/xsts/authorize")
-        .header("Content-Type", "application/json")
-        .header("x-xbl-contract-version", "1")
-        .json(&body)
-        .send()
-        .await?
-        .error_for_status()?;
-
-    resp.json().await
+    post_json(
+        client,
+        "https://xsts.auth.xboxlive.com/xsts/authorize",
+        &body,
+    )
+    .await
 }
 
 pub fn get_xsts_auth_header(xsts: XstsResponse) -> Result<String, std::io::Error> {
@@ -65,8 +79,34 @@ pub fn get_xsts_auth_header(xsts: XstsResponse) -> Result<String, std::io::Error
 
 #[cfg(test)]
 mod tests {
-    use super::get_xsts_auth_header;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    use super::{get_xsts_auth_header, post_json};
     use crate::models::xbox::XstsResponse;
+
+    async fn response_server(status: &str, body: &str) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("test server must bind");
+        let address = listener
+            .local_addr()
+            .expect("test server address must be available");
+        let response = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let handle = tokio::spawn(async move {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).await;
+            let _ = stream.write_all(response.as_bytes()).await;
+            let _ = stream.shutdown().await;
+        });
+        (format!("http://{address}/response"), handle)
+    }
 
     #[test]
     fn xsts_header_rejects_missing_user_claim() {
@@ -80,5 +120,37 @@ mod tests {
         .expect("synthetic XSTS response must deserialize");
 
         assert!(get_xsts_auth_header(response).is_err());
+    }
+
+    #[tokio::test]
+    async fn xbox_http_status_is_returned_as_a_request_error() {
+        let (endpoint, server) = response_server("503 Service Unavailable", "{}").await;
+        let result = post_json::<_, serde_json::Value>(
+            &reqwest::Client::new(),
+            &endpoint,
+            &serde_json::json!({}),
+        )
+        .await;
+
+        let error = result.expect_err("non-success status must fail");
+        assert_eq!(
+            error.status(),
+            Some(reqwest::StatusCode::SERVICE_UNAVAILABLE)
+        );
+        server.await.expect("test server must exit");
+    }
+
+    #[tokio::test]
+    async fn xbox_schema_failure_is_returned_as_a_decode_error() {
+        let (endpoint, server) = response_server("200 OK", "{\"unexpected\":true}").await;
+        let result = post_json::<_, XstsResponse>(
+            &reqwest::Client::new(),
+            &endpoint,
+            &serde_json::json!({}),
+        )
+        .await;
+
+        assert!(result.is_err(), "missing required XSTS fields must fail");
+        server.await.expect("test server must exit");
     }
 }
