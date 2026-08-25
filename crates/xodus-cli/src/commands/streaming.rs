@@ -361,7 +361,9 @@ fn write_transaction_journal(
             )?;
         }
     }
-    journal.sync_all()
+    journal
+        .sync_all()
+        .and_then(|()| sync_parent_directory(&journal_path(root)))
 }
 
 fn read_transaction_journal(root: &Path) -> io::Result<Option<Vec<PromotionEntry>>> {
@@ -563,13 +565,15 @@ pub(crate) fn promote_transaction(
 fn recover_transaction_dir(transaction_root: &Path, output_root: &Path) -> io::Result<()> {
     let journal = journal_path(transaction_root);
     if !journal.exists() {
-        return std::fs::remove_dir_all(transaction_root);
+        return std::fs::remove_dir_all(transaction_root)
+            .and_then(|()| sync_parent_directory(transaction_root));
     }
     let Some(mut entries) = read_transaction_journal(transaction_root)? else {
-        return std::fs::remove_dir_all(transaction_root);
+        return std::fs::remove_dir_all(transaction_root)
+            .and_then(|()| sync_parent_directory(transaction_root));
     };
     rollback_transaction(transaction_root, output_root, &mut entries)?;
-    std::fs::remove_dir_all(transaction_root)
+    std::fs::remove_dir_all(transaction_root).and_then(|()| sync_parent_directory(transaction_root))
 }
 
 fn recover_transactions(output_root: &Path) -> io::Result<()> {
