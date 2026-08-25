@@ -317,6 +317,14 @@ pub enum XvdFileParseError {
         region_end: u64,
         drive_data_end: u64,
     },
+    #[error(
+        "XVD hash entry read offset overflows for hash tree offset {hash_tree_offset}, hash block {hash_block}, and entry start {entry_start}"
+    )]
+    HashEntryReadOffsetOverflow {
+        hash_tree_offset: u64,
+        hash_block: u64,
+        entry_start: u64,
+    },
 }
 
 fn reserve_xvc_region_entries(
@@ -340,6 +348,62 @@ fn reserve_xvc_region_entries(
     })?;
 
     Ok((data_units, data_hashs))
+}
+
+fn hash_entry_read_offset(
+    hash_tree_offset: u64,
+    hash_block: u64,
+    entry_start: u64,
+) -> Result<u64, XvdFileParseError> {
+    let hash_block_offset = hash_block.checked_mul(PAGE_SIZE as u64).ok_or(
+        XvdFileParseError::HashEntryReadOffsetOverflow {
+            hash_tree_offset,
+            hash_block,
+            entry_start,
+        },
+    )?;
+    let entry_offset = entry_start.checked_mul(XvdHashEntry::SIZE as u64).ok_or(
+        XvdFileParseError::HashEntryReadOffsetOverflow {
+            hash_tree_offset,
+            hash_block,
+            entry_start,
+        },
+    )?;
+
+    hash_tree_offset
+        .checked_add(hash_block_offset)
+        .and_then(|offset| offset.checked_add(entry_offset))
+        .ok_or(XvdFileParseError::HashEntryReadOffsetOverflow {
+            hash_tree_offset,
+            hash_block,
+            entry_start,
+        })
+}
+
+fn validate_xvc_region_hash_entry_addresses(
+    xvd_type: u32,
+    hash_tree_levels: u64,
+    number_of_hashed_pages: u64,
+    hash_tree_offset: u64,
+    start_page: u64,
+    num_pages: u64,
+) -> Result<(), XvdFileParseError> {
+    let mut page = 0;
+    while page < num_pages {
+        let (hash_block, entry_start, run_length) = calculate_hash_block_num_and_run_for_block_num(
+            xvd_type,
+            hash_tree_levels,
+            number_of_hashed_pages,
+            start_page + page,
+            0,
+            false,
+            false,
+        );
+        hash_entry_read_offset(hash_tree_offset, hash_block, entry_start)?;
+        page += min(run_length, num_pages - page);
+    }
+
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -500,6 +564,14 @@ impl XvdFile {
             }
             let start_page = offset_to_page_number(h.offset - user_data_offset);
             let num_pages = bytes_to_pages(length);
+            validate_xvc_region_hash_entry_addresses(
+                xvd_header.xvd_type as u32,
+                _hash_tree_levels,
+                xvd_header.number_of_hashed_pages(),
+                hash_tree_offset,
+                start_page,
+                num_pages,
+            )?;
             let (mut data_units, mut data_hashs) = reserve_xvc_region_entries(num_pages)?;
 
             let mut page = 0;
@@ -519,9 +591,8 @@ impl XvdFile {
                     );
                 let run_length = min(run_length, num_pages - page);
                 page += run_length;
-                let read_offset = hash_tree_offset
-                    + page_number_to_offset(hash_block)
-                    + (entry_start * XvdHashEntry::SIZE as u64);
+                let read_offset =
+                    hash_entry_read_offset(hash_tree_offset, hash_block, entry_start)?;
                 reader.seek(SeekFrom::Start(read_offset)).await?;
 
                 let mut buf = XvdHashEntry::buffer();
@@ -1167,7 +1238,10 @@ mod tests {
 
     use tokio::io::{AsyncRead, AsyncSeek, ReadBuf};
 
-    use super::{MAX_XVC_REGION_HEADERS, XvdFile, XvdFileParseError, reserve_xvc_region_entries};
+    use super::{
+        MAX_XVC_REGION_HEADERS, XvdFile, XvdFileParseError, hash_entry_read_offset,
+        reserve_xvc_region_entries, validate_xvc_region_hash_entry_addresses,
+    };
 
     const XVD_HEADER_SIZE: usize = 4096;
     const XVC_INFO_OFFSET: usize = 0x4000;
@@ -1396,6 +1470,36 @@ mod tests {
                 num_pages,
                 allocation: "data-unit",
             } if num_pages == length / XVD_HEADER_SIZE as u64
+        ));
+    }
+
+    #[test]
+    fn hash_entry_read_offset_rejects_page_byte_multiplication_overflow_before_io() {
+        let error = hash_entry_read_offset(0, u64::MAX, 0)
+            .expect_err("overflowing hash page offset must fail before I/O");
+
+        assert!(matches!(
+            error,
+            XvdFileParseError::HashEntryReadOffsetOverflow {
+                hash_tree_offset: 0,
+                hash_block: u64::MAX,
+                entry_start: 0,
+            }
+        ));
+    }
+
+    #[test]
+    fn hash_entry_address_preflight_rejects_addition_overflow_before_allocation() {
+        let error = validate_xvc_region_hash_entry_addresses(0, 1, 1, u64::MAX, 170, 1)
+            .expect_err("overflowing hash address must fail before allocation or I/O");
+
+        assert!(matches!(
+            error,
+            XvdFileParseError::HashEntryReadOffsetOverflow {
+                hash_tree_offset: u64::MAX,
+                hash_block: 1,
+                entry_start: 0,
+            }
         ));
     }
 
