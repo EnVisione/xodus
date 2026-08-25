@@ -294,6 +294,8 @@ pub enum XvdFileParseError {
         region_count: u32,
         max_region_count: u32,
     },
+    #[error("XVC key ID {key_id} is not supported")]
+    UnsupportedXvcKeyId { key_id: u8 },
 }
 
 #[derive(Debug)]
@@ -423,7 +425,7 @@ impl XvdFile {
             match key_id.get() {
                 None => continue,
                 Some(0) => (),
-                Some(n) => todo!("KeyID other than 0 or unencrypted is not supported, found {n}"),
+                Some(key_id) => return Err(XvdFileParseError::UnsupportedXvcKeyId { key_id }),
             }
 
             let start_page = offset_to_page_number(h.offset - user_data_offset);
@@ -1101,8 +1103,12 @@ mod tests {
     const XVD_HEADER_SIZE: usize = 4096;
     const XVC_INFO_OFFSET: usize = 0x4000;
     const XVC_INFO_SIZE: usize = 0xda8;
+    const XVC_INFO_VERSION_OFFSET: usize = 0xd10;
     const XVC_INFO_REGION_COUNT_OFFSET: usize = 0xd14;
     const XVC_INFO_FILETIME_OFFSET: usize = 0xd30;
+    const XVC_REGION_HEADER_SIZE: usize = 128;
+    const XVC_REGION_KEY_ID_OFFSET: usize = 4;
+    const XVC_REGION_OFFSET_OFFSET: usize = 80;
     const FILETIME_OFFSET: usize = 0x210;
     const XVC_DATA_LENGTH_OFFSET: usize = 0x290;
     const WINDOWS_TO_UNIX_FILETIME: i64 = 116_444_736_000_000_000;
@@ -1138,6 +1144,27 @@ mod tests {
             let filetime_start = XVC_INFO_OFFSET + XVC_INFO_FILETIME_OFFSET;
             reader.inner.get_mut()[filetime_start..filetime_start + 8]
                 .copy_from_slice(&WINDOWS_TO_UNIX_FILETIME.to_le_bytes());
+            reader
+        }
+
+        fn synthetic_xvd_with_region_key_id(key_id: u16) -> Self {
+            let mut reader = Self::synthetic_xvd_with_region_count(1);
+            let xvc_info_start = XVC_INFO_OFFSET;
+            reader.inner.get_mut()[xvc_info_start + XVC_INFO_VERSION_OFFSET
+                ..xvc_info_start + XVC_INFO_VERSION_OFFSET + 4]
+                .copy_from_slice(&1_u32.to_le_bytes());
+
+            let region_start = XVC_INFO_OFFSET + XVC_INFO_SIZE;
+            reader
+                .inner
+                .get_mut()
+                .resize(region_start + XVC_REGION_HEADER_SIZE, 0);
+            reader.inner.get_mut()[region_start + XVC_REGION_KEY_ID_OFFSET
+                ..region_start + XVC_REGION_KEY_ID_OFFSET + 2]
+                .copy_from_slice(&key_id.to_le_bytes());
+            reader.inner.get_mut()[region_start + XVC_REGION_OFFSET_OFFSET
+                ..region_start + XVC_REGION_OFFSET_OFFSET + 8]
+                .copy_from_slice(&(XVC_INFO_OFFSET as u64).to_le_bytes());
             reader
         }
     }
@@ -1211,5 +1238,26 @@ mod tests {
                 max_region_count: MAX_XVC_REGION_HEADERS,
             } if actual_region_count == region_count
         ));
+    }
+
+    #[tokio::test]
+    async fn parse_rejects_unsupported_xvc_key_id_without_aborting() {
+        let result = XvdFile::parse(SyntheticXvdReader::synthetic_xvd_with_region_key_id(1)).await;
+        let error = match result {
+            Ok(_) => panic!("unsupported synthetic XVC key ID must not parse an XVD"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            XvdFileParseError::UnsupportedXvcKeyId { key_id: 1 }
+        ));
+    }
+
+    #[tokio::test]
+    async fn parse_preserves_supported_xvc_key_id_zero() {
+        XvdFile::parse(SyntheticXvdReader::synthetic_xvd_with_region_key_id(0))
+            .await
+            .expect("synthetic XVC key ID zero must remain supported");
     }
 }
