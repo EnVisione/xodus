@@ -18,6 +18,8 @@ use crate::commands::streaming::{
 };
 use crate::package::{get_content_id, get_packages, package_download_urls};
 
+const MAX_FILE_HASH_BASE64_CHARS: usize = 64;
+
 fn validate_declared_download_length(expected: u64, declared: Option<u64>) -> io::Result<()> {
     if let Some(declared) = declared
         && declared != expected
@@ -52,6 +54,12 @@ fn decode_file_hash(value: &str) -> io::Result<Option<[u8; 32]>> {
     let value = value.trim();
     if value.is_empty() {
         return Ok(None);
+    }
+    if value.len() > MAX_FILE_HASH_BASE64_CHARS {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "package file hash is too long",
+        ));
     }
 
     let decoded = base64::engine::general_purpose::STANDARD
@@ -294,8 +302,8 @@ mod tests {
     use base64::Engine;
 
     use super::{
-        checked_download_total, decode_file_hash, validate_declared_download_length,
-        validate_file_hash,
+        MAX_FILE_HASH_BASE64_CHARS, checked_download_total, decode_file_hash,
+        validate_declared_download_length, validate_file_hash,
     };
     use crate::package::package_download_urls;
 
@@ -377,6 +385,7 @@ mod tests {
     #[test]
     fn file_hash_validation_rejects_invalid_or_mismatched_hashes() {
         assert!(decode_file_hash("not a digest").is_err());
+        assert!(decode_file_hash(&"A".repeat(MAX_FILE_HASH_BASE64_CHARS + 1)).is_err());
         let expected =
             decode_file_hash(&base64::engine::general_purpose::STANDARD.encode([8_u8; 32]))
                 .unwrap();
