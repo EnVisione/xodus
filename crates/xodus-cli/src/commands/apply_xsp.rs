@@ -1,3 +1,4 @@
+use std::io::Read;
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -9,6 +10,8 @@ use crate::commands::streaming::{
     promotion_entries, recover_transactions,
 };
 
+const MAX_HASH_MANIFEST_BYTES: usize = 64 * 1024 * 1024;
+
 fn hex_value(byte: u8) -> Option<u8> {
     match byte {
         b'0'..=b'9' => Some(byte - b'0'),
@@ -19,8 +22,7 @@ fn hex_value(byte: u8) -> Option<u8> {
 }
 
 fn read_hashes(path: &Path) -> Result<Vec<[u8; 20]>, String> {
-    let contents = std::fs::read_to_string(path)
-        .map_err(|error| format!("could not read hash manifest: {error}"))?;
+    let contents = read_bounded_text(path, MAX_HASH_MANIFEST_BYTES)?;
     let mut hashes = Vec::new();
     for (line_number, raw_line) in contents.lines().enumerate() {
         let line = raw_line.trim();
@@ -55,6 +57,23 @@ fn read_hashes(path: &Path) -> Result<Vec<[u8; 20]>, String> {
         return Err("hash manifest must contain at least one hash".to_owned());
     }
     Ok(hashes)
+}
+
+fn read_bounded_text(path: &Path, limit: usize) -> Result<String, String> {
+    let file = std::fs::File::open(path)
+        .map_err(|error| format!("could not read hash manifest: {error}"))?;
+    let read_limit = u64::try_from(limit)
+        .ok()
+        .and_then(|limit| limit.checked_add(1))
+        .ok_or_else(|| "hash manifest size limit is invalid".to_owned())?;
+    let mut bytes = Vec::new();
+    file.take(read_limit)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("could not read hash manifest: {error}"))?;
+    if bytes.len() > limit {
+        return Err(format!("hash manifest exceeds the {} byte limit", limit));
+    }
+    String::from_utf8(bytes).map_err(|_| "hash manifest is not valid utf 8".to_owned())
 }
 
 pub struct ApplyXspRequest {
@@ -256,6 +275,17 @@ mod tests {
         std::fs::write(&manifest, "é".repeat(20)).expect("hash manifest must be writable");
 
         assert!(super::read_hashes(&manifest).is_err());
+    }
+
+    #[test]
+    fn bounded_hash_manifest_reader_rejects_oversized_input() {
+        let temporary = tempfile::tempdir().expect("temporary directory must exist");
+        let manifest = temporary.path().join("oversized.hashes");
+        std::fs::write(&manifest, b"012345").expect("hash manifest must be writable");
+
+        let error = super::read_bounded_text(&manifest, 5)
+            .expect_err("hash manifest above the bound must fail");
+        assert!(error.contains("exceeds"));
     }
 
     #[tokio::test]
