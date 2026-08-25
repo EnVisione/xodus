@@ -147,7 +147,7 @@ pub async fn get_packages(
         .await?
         .error_for_status()?;
 
-    let res: PackageResponse = response.json().await?;
+    let res: PackageResponse = xodus::api::xbox::decode_json_response(response).await?;
 
     let PackageResponse::Found(package) = res else {
         return Err(Box::new(std::io::Error::other(

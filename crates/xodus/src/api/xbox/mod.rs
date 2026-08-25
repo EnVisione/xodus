@@ -5,7 +5,10 @@ use crate::models::xbox::XstsResponse;
 
 pub mod auth;
 pub mod title;
-pub use auth::{XboxApiError, authenticate_xbox_user, get_xsts_auth_header, request_xsts_token};
+pub use auth::{
+    XboxApiError, authenticate_xbox_user, decode_json_response, get_xsts_auth_header,
+    request_xsts_token,
+};
 
 pub async fn run(
     client: &reqwest::Client,
