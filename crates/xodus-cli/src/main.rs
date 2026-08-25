@@ -47,6 +47,22 @@ enum SubCommand {
         path: String,
         destination: String,
     },
+    #[command(about = "Apply a validated local XSP update transactionally")]
+    ApplyXsp {
+        descriptor: String,
+        base: String,
+        new_data: String,
+        destination: String,
+        output: String,
+        #[arg(long)]
+        source_hashes: String,
+        #[arg(long)]
+        target_hashes: String,
+        #[arg(long, default_value_t = 4)]
+        block_size: u64,
+        #[arg(long, default_value_t = false)]
+        rollback: bool,
+    },
     Login,
     Logout {
         #[arg(long, default_value_t = false, help = "Remove device license")]
@@ -163,6 +179,7 @@ async fn run(args: CliArgs) -> ExitCode {
             | SubCommand::Logout { .. }
             | SubCommand::Inspect { .. }
             | SubCommand::InstallMsixvc2 { .. }
+            | SubCommand::ApplyXsp { .. }
     );
     if needs_device_credentials {
         xodus::tokens::device::ensure_device_credentials(&client, &tokens).await;
@@ -207,6 +224,30 @@ async fn run(args: CliArgs) -> ExitCode {
         SubCommand::Inspect { path } => commands::inspect::run(path),
         SubCommand::InstallMsixvc2 { path, destination } => {
             commands::install_msixvc2::run(path, destination)
+        }
+        SubCommand::ApplyXsp {
+            descriptor,
+            base,
+            new_data,
+            destination,
+            output,
+            source_hashes,
+            target_hashes,
+            block_size,
+            rollback,
+        } => {
+            commands::apply_xsp::run(commands::apply_xsp::ApplyXspRequest {
+                descriptor,
+                base,
+                new_data,
+                source_hashes,
+                target_hashes,
+                destination,
+                output,
+                block_size,
+                rollback,
+            })
+            .await
         }
         SubCommand::Streaming {
             source,
