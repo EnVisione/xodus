@@ -5,6 +5,8 @@ use base64::prelude::*;
 use crate::api::live::utils;
 use crate::models::soap;
 
+const MAX_RST_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+
 fn referenced_token_id(uri: &str) -> Result<&str, super::RSTError> {
     uri.strip_prefix('#')
         .filter(|id| !id.is_empty())
@@ -32,11 +34,40 @@ impl<'a> RSTRequest<'a> {
         .send()
         .await?;
 
-        let response_text = response.text().await?;
+        let response_text = read_response_text(response).await?;
         let envelope: soap::Envelope = quick_xml::de::from_str(&response_text)?;
 
         verify_and_decrypt_envelope(self.signature, response_text, envelope)
     }
+}
+
+async fn read_response_text(mut response: reqwest::Response) -> Result<String, super::RSTError> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_RST_RESPONSE_BYTES as u64)
+    {
+        return Err(super::RSTError::ResponseBodyTooLarge {
+            limit: MAX_RST_RESPONSE_BYTES,
+        });
+    }
+
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        append_response_chunk(&mut body, &chunk, MAX_RST_RESPONSE_BYTES)?;
+    }
+    Ok(std::str::from_utf8(&body)?.to_owned())
+}
+
+fn append_response_chunk(
+    body: &mut Vec<u8>,
+    chunk: &[u8],
+    limit: usize,
+) -> Result<(), super::RSTError> {
+    if body.len() > limit || chunk.len() > limit.saturating_sub(body.len()) {
+        return Err(super::RSTError::ResponseBodyTooLarge { limit });
+    }
+    body.extend_from_slice(chunk);
+    Ok(())
 }
 
 fn verify_and_decrypt_envelope<'a>(
@@ -98,7 +129,7 @@ fn verify_and_decrypt_envelope<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::referenced_token_id;
+    use super::{append_response_chunk, referenced_token_id};
 
     #[test]
     fn referenced_token_id_requires_nonempty_fragment_uri() {
@@ -106,5 +137,11 @@ mod tests {
         assert!(referenced_token_id("").is_err());
         assert!(referenced_token_id("#").is_err());
         assert!(referenced_token_id("token").is_err());
+    }
+
+    #[test]
+    fn response_body_limit_rejects_oversized_chunks() {
+        let mut body = Vec::new();
+        append_response_chunk(&mut body, b"12345", 4).expect_err("response must be bounded");
     }
 }
