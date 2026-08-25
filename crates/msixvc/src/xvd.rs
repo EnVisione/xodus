@@ -298,6 +298,13 @@ pub enum XvdFileParseError {
     UnsupportedXvcKeyId { key_id: u8 },
     #[error("XVC region offset {offset} is before user data offset {user_data_offset}")]
     RegionOffsetBeforeUserData { offset: u64, user_data_offset: u64 },
+    #[error("XVC region page count {num_pages} cannot fit in memory")]
+    RegionPageCountTooLarge { num_pages: u64 },
+    #[error("unable to reserve {num_pages} XVC region {allocation} entries")]
+    RegionAllocationFailed {
+        num_pages: u64,
+        allocation: &'static str,
+    },
 }
 
 #[derive(Debug)]
@@ -439,8 +446,22 @@ impl XvdFile {
 
             let start_page = offset_to_page_number(h.offset - user_data_offset);
             let num_pages = bytes_to_pages(length);
-            let mut data_units: Vec<u32> = Vec::with_capacity(num_pages as usize);
-            let mut data_hashs: Vec<[u8; 20]> = Vec::with_capacity(num_pages as usize);
+            let page_capacity = usize::try_from(num_pages)
+                .map_err(|_| XvdFileParseError::RegionPageCountTooLarge { num_pages })?;
+            let mut data_units: Vec<u32> = Vec::new();
+            data_units.try_reserve_exact(page_capacity).map_err(|_| {
+                XvdFileParseError::RegionAllocationFailed {
+                    num_pages,
+                    allocation: "data-unit",
+                }
+            })?;
+            let mut data_hashs: Vec<[u8; 20]> = Vec::new();
+            data_hashs.try_reserve_exact(page_capacity).map_err(|_| {
+                XvdFileParseError::RegionAllocationFailed {
+                    num_pages,
+                    allocation: "data-hash",
+                }
+            })?;
 
             let mut page = 0;
             loop {
@@ -1118,6 +1139,7 @@ mod tests {
     const XVC_REGION_HEADER_SIZE: usize = 128;
     const XVC_REGION_KEY_ID_OFFSET: usize = 4;
     const XVC_REGION_OFFSET_OFFSET: usize = 80;
+    const XVC_REGION_LENGTH_OFFSET: usize = 88;
     const FILETIME_OFFSET: usize = 0x210;
     const XVC_DATA_LENGTH_OFFSET: usize = 0x290;
     const WINDOWS_TO_UNIX_FILETIME: i64 = 116_444_736_000_000_000;
@@ -1178,6 +1200,15 @@ mod tests {
             reader.inner.get_mut()[region_start + XVC_REGION_OFFSET_OFFSET
                 ..region_start + XVC_REGION_OFFSET_OFFSET + 8]
                 .copy_from_slice(&region_offset.to_le_bytes());
+            reader
+        }
+
+        fn synthetic_xvd_with_region_length(length: u64) -> Self {
+            let mut reader = Self::synthetic_xvd_with_region_key_id(0);
+            let region_start = XVC_INFO_OFFSET + XVC_INFO_SIZE;
+            reader.inner.get_mut()[region_start + XVC_REGION_LENGTH_OFFSET
+                ..region_start + XVC_REGION_LENGTH_OFFSET + 8]
+                .copy_from_slice(&length.to_le_bytes());
             reader
         }
     }
@@ -1292,6 +1323,25 @@ mod tests {
                 offset,
                 user_data_offset,
             } if offset == region_offset && user_data_offset == XVC_INFO_OFFSET as u64
+        ));
+    }
+
+    #[tokio::test]
+    async fn parse_rejects_unreservable_xvc_region_pages() {
+        let length = !((XVD_HEADER_SIZE - 1) as u64);
+        let result =
+            XvdFile::parse(SyntheticXvdReader::synthetic_xvd_with_region_length(length)).await;
+        let error = match result {
+            Ok(_) => panic!("unreservable XVC region pages must not parse an XVD"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            XvdFileParseError::RegionAllocationFailed {
+                num_pages,
+                allocation: "data-unit",
+            } if num_pages == length / XVD_HEADER_SIZE as u64
         ));
     }
 }
