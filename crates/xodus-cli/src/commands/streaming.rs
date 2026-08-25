@@ -482,12 +482,22 @@ fn rollback_transaction(
     }
 }
 
-pub(crate) fn promote_transaction(
+fn promote_transaction_inner<F>(
     transaction_root: &Path,
     output_root: &Path,
     entries: &mut [PromotionEntry],
-) -> io::Result<()> {
+    should_interrupt: &mut F,
+) -> io::Result<()>
+where
+    F: FnMut() -> bool,
+{
     write_transaction_journal(transaction_root, entries, false)?;
+    if should_interrupt() {
+        return Err(io::Error::new(
+            ErrorKind::Interrupted,
+            "transaction promotion interrupted after journaling",
+        ));
+    }
 
     for index in 0..entries.len() {
         let (staged_path, final_path, backup_path) = {
@@ -538,6 +548,12 @@ pub(crate) fn promote_transaction(
             let _ = rollback_transaction(transaction_root, output_root, entries);
             return Err(error);
         }
+        if should_interrupt() {
+            return Err(io::Error::new(
+                ErrorKind::Interrupted,
+                "transaction promotion interrupted after backup",
+            ));
+        }
 
         if !entries[index].remove_final
             && let Err(error) = std::fs::rename(&staged_path, &final_path)
@@ -557,9 +573,48 @@ pub(crate) fn promote_transaction(
             let _ = rollback_transaction(transaction_root, output_root, entries);
             return Err(error);
         }
+        if should_interrupt() {
+            return Err(io::Error::new(
+                ErrorKind::Interrupted,
+                "transaction promotion interrupted after promotion",
+            ));
+        }
     }
 
     write_transaction_journal(transaction_root, entries, true)
+}
+
+pub(crate) fn promote_transaction(
+    transaction_root: &Path,
+    output_root: &Path,
+    entries: &mut [PromotionEntry],
+) -> io::Result<()> {
+    let mut never_interrupt = || false;
+    promote_transaction_inner(transaction_root, output_root, entries, &mut never_interrupt)
+}
+
+#[cfg(test)]
+fn promote_transaction_with_interruption(
+    transaction_root: &Path,
+    output_root: &Path,
+    entries: &mut [PromotionEntry],
+    checkpoint: usize,
+) -> io::Result<()> {
+    let mut remaining = checkpoint;
+    let mut should_interrupt = || {
+        if remaining == 0 {
+            true
+        } else {
+            remaining -= 1;
+            false
+        }
+    };
+    promote_transaction_inner(
+        transaction_root,
+        output_root,
+        entries,
+        &mut should_interrupt,
+    )
 }
 
 fn recover_transaction_dir(transaction_root: &Path, output_root: &Path) -> io::Result<()> {
@@ -1262,8 +1317,9 @@ mod tests {
     use super::{
         PromotionState, SegmentFile, TRANSACTION_JOURNAL, acquire_transaction_lock, changed_jobs,
         new_transaction, open_package_input, open_package_output, package_path_components,
-        promote_transaction, promotion_entries, promotion_entries_with_removals,
-        read_transaction_journal, recover_transaction_dir, write_transaction_journal,
+        promote_transaction, promote_transaction_with_interruption, promotion_entries,
+        promotion_entries_with_removals, read_transaction_journal, recover_transaction_dir,
+        recover_transactions, write_transaction_journal,
     };
 
     #[test]
@@ -1578,6 +1634,37 @@ mod tests {
         assert_eq!(std::fs::read(stale).unwrap(), b"old package");
         assert!(!promoted.exists());
         assert!(!transaction.path().exists());
+    }
+
+    #[test]
+    fn transaction_recovery_restores_after_injected_promotion_interruptions() {
+        for checkpoint in 0..=2 {
+            let temporary = tempfile::tempdir().unwrap();
+            let output = temporary.path().join("output");
+            std::fs::create_dir(&output).unwrap();
+            let final_path = output.join("game.bin");
+            std::fs::write(&final_path, b"verified").unwrap();
+            let (transaction, payload) = new_transaction(&output).unwrap();
+            std::fs::write(payload.join("game.bin"), b"unverified").unwrap();
+            let mut entries =
+                promotion_entries(&[("game.bin".to_owned(), "game.bin".to_owned())]).unwrap();
+            let transaction_root = transaction.path().to_path_buf();
+            std::mem::forget(transaction);
+
+            assert!(
+                promote_transaction_with_interruption(
+                    &transaction_root,
+                    &output,
+                    &mut entries,
+                    checkpoint,
+                )
+                .is_err()
+            );
+            recover_transactions(&output).unwrap();
+
+            assert_eq!(std::fs::read(final_path).unwrap(), b"verified");
+            assert!(!transaction_root.exists());
+        }
     }
 
     #[test]
