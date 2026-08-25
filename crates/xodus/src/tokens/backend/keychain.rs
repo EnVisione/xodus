@@ -1,4 +1,4 @@
-use crate::tokens::store::{TokenBackend, TokenStoreError};
+use crate::tokens::store::{TokenBackend, TokenStoreError, validate_token_value};
 
 pub struct KeychainBackend;
 
@@ -13,6 +13,7 @@ impl TokenBackend for KeychainBackend {
     }
 
     fn set(&self, key: &str, value: &[u8]) -> Result<(), TokenStoreError> {
+        validate_token_value(value)?;
         Ok(crate::secrets::get_entry(key)?.set_secret(value)?)
     }
 

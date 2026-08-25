@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard};
 use std::time::Instant;
 
-use crate::tokens::store::{ExpiringTokenBackend, TokenBackend, TokenStoreError};
+use crate::tokens::store::{
+    ExpiringTokenBackend, TokenBackend, TokenStoreError, validate_token_value,
+};
 
 struct Slot {
     value: Vec<u8>,
@@ -35,6 +37,7 @@ impl TokenBackend for MemoryBackend {
     }
 
     fn set(&self, key: &str, value: &[u8]) -> Result<(), TokenStoreError> {
+        validate_token_value(value)?;
         self.lock()?.insert(
             key.to_string(),
             Slot {
@@ -58,6 +61,7 @@ impl ExpiringTokenBackend for MemoryBackend {
         value: &[u8],
         expires_at: Instant,
     ) -> Result<(), TokenStoreError> {
+        validate_token_value(value)?;
         self.lock()?.insert(
             key.to_string(),
             Slot {
@@ -74,7 +78,9 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::MemoryBackend;
-    use crate::tokens::store::{ExpiringTokenBackend, TokenBackend, TokenStoreError};
+    use crate::tokens::store::{
+        ExpiringTokenBackend, MAX_TOKEN_VALUE_BYTES, TokenBackend, TokenStoreError,
+    };
 
     #[test]
     fn memory_backend_expires_values() {
@@ -95,5 +101,24 @@ mod tests {
         }));
 
         assert!(matches!(backend.get("key"), Err(TokenStoreError::Poisoned)));
+    }
+
+    #[test]
+    fn memory_backend_rejects_oversized_values_before_storage() {
+        let backend = MemoryBackend::default();
+        let value = vec![0_u8; MAX_TOKEN_VALUE_BYTES + 1];
+
+        assert!(matches!(
+            backend.set("key", &value),
+            Err(TokenStoreError::ValueTooLarge { .. })
+        ));
+        assert!(matches!(
+            backend.set_with_expiry("ephemeral", &value, Instant::now()),
+            Err(TokenStoreError::ValueTooLarge { .. })
+        ));
+        assert_eq!(
+            backend.get("key").expect("failed write must not store"),
+            None
+        );
     }
 }

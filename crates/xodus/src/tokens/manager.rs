@@ -5,7 +5,9 @@ use std::time::Instant;
 use crate::models::secrets::{Device, Token, TokenStore, User};
 use crate::models::xbox::XstsResponse;
 use crate::tokens::backend::{KeychainBackend, MemoryBackend};
-use crate::tokens::store::{ExpiringTokenBackend, TokenBackend, TokenStoreError};
+use crate::tokens::store::{
+    ExpiringTokenBackend, TokenBackend, TokenStoreError, validate_token_value,
+};
 
 mod keys {
     pub const DEV_LICENSE: &str = "dev_license";
@@ -68,12 +70,14 @@ impl TokenManager {
             .persistent
             .get(keys::DEV_LICENSE)?
             .ok_or(TokenStoreError::NotFound)?;
+        validate_token_value(&bytes)?;
         Ok(serde_json::from_slice(&bytes)?)
     }
 
     pub fn save_device_license(&self, device: &Device) -> Result<(), TokenStoreError> {
-        self.persistent
-            .set(keys::DEV_LICENSE, &serde_json::to_vec(device)?)
+        let bytes = serde_json::to_vec(device)?;
+        validate_token_value(&bytes)?;
+        self.persistent.set(keys::DEV_LICENSE, &bytes)
     }
 
     pub fn remove_device_license(&self) -> Result<(), TokenStoreError> {
@@ -117,18 +121,21 @@ impl TokenManager {
             .persistent
             .get(keys::USER_INFO)?
             .ok_or(TokenStoreError::NotFound)?;
+        validate_token_value(&bytes)?;
         Ok(serde_json::from_slice(&bytes)?)
     }
 
     pub fn save_user(&self, user: &User) -> Result<(), TokenStoreError> {
-        self.persistent
-            .set(keys::USER_INFO, &serde_json::to_vec(user)?)
+        let bytes = serde_json::to_vec(user)?;
+        validate_token_value(&bytes)?;
+        self.persistent.set(keys::USER_INFO, &bytes)
     }
 
     // ---- Ephemeral XSTS-by-relying-party cache --------------------------------
 
     pub fn get_cached_xsts(&self, relying_party: &str) -> Option<XstsResponse> {
         let bytes = self.ephemeral.get(relying_party).ok()??;
+        validate_token_value(&bytes).ok()?;
         serde_json::from_slice(&bytes).ok()
     }
 
@@ -140,6 +147,9 @@ impl TokenManager {
         let Ok(bytes) = serde_json::to_vec(token) else {
             return;
         };
+        if validate_token_value(&bytes).is_err() {
+            return;
+        }
         let remaining = (token.not_after - chrono::Utc::now())
             .to_std()
             .unwrap_or(std::time::Duration::ZERO);
@@ -158,6 +168,7 @@ impl TokenManager {
         let Some(bytes) = backend.get(key)? else {
             return Ok(None);
         };
+        validate_token_value(&bytes)?;
         let store: TokenStore = serde_json::from_slice(&bytes)?;
         Ok(store.tokens.get(address).cloned())
     }
@@ -170,12 +181,15 @@ impl TokenManager {
     ) -> Result<(), TokenStoreError> {
         let mut tokens: HashMap<String, Token> = match backend.get(key)? {
             Some(bytes) if !bytes.is_empty() => {
+                validate_token_value(&bytes)?;
                 serde_json::from_slice::<TokenStore>(&bytes)?.tokens
             }
             _ => HashMap::new(),
         };
         tokens.insert(address, token);
-        backend.set(key, &serde_json::to_vec(&TokenStore { tokens })?)
+        let bytes = serde_json::to_vec(&TokenStore { tokens })?;
+        validate_token_value(&bytes)?;
+        backend.set(key, &bytes)
     }
 }
 
