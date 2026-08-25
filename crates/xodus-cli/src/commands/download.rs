@@ -1,4 +1,3 @@
-use std::io;
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -11,17 +10,7 @@ use xodus::models::packagespc::PackageFile;
 use xodus::tokens::TokenManager;
 
 use crate::commands::streaming::open_package_output;
-use crate::package::{get_content_id, get_packages};
-
-fn package_download_url(
-    cdn_root_paths: &[String],
-    relative_url: &str,
-) -> Result<String, io::Error> {
-    let root = cdn_root_paths
-        .first()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "package has no CDN root"))?;
-    Ok(format!("{root}{relative_url}"))
-}
+use crate::package::{get_content_id, get_packages, package_download_url};
 
 pub async fn run(
     client: &reqwest::Client,
@@ -141,7 +130,7 @@ pub async fn run(
 
 #[cfg(test)]
 mod tests {
-    use super::package_download_url;
+    use crate::package::package_download_url;
 
     #[test]
     fn package_download_url_rejects_missing_cdn_root() {
@@ -157,5 +146,21 @@ mod tests {
             package_download_url(&root, "file.xvd").expect("valid package URL"),
             "https://cdn.example/file.xvd"
         );
+    }
+
+    #[test]
+    fn package_download_url_rejects_insecure_or_credentialed_urls() {
+        for root in [
+            "http://cdn.example/",
+            "file:///tmp/",
+            "https://user:password@cdn.example/",
+            "not a URL",
+        ] {
+            let roots = vec![root.to_owned()];
+            assert!(
+                package_download_url(&roots, "file.xvd").is_err(),
+                "unsafe package URL accepted: {root}"
+            );
+        }
     }
 }

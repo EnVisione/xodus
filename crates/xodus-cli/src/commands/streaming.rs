@@ -20,7 +20,7 @@ use uuid::Uuid;
 use xodus::tokens::TokenManager;
 
 use crate::license::get_license;
-use crate::package::{get_content_id, get_packages};
+use crate::package::{get_content_id, get_packages, package_download_url};
 
 struct Job {
     name: String,
@@ -665,11 +665,13 @@ pub async fn run(
                 eprintln!("No .msixvc file found");
                 return ExitCode::FAILURE;
             };
-            let Some(cdn_root) = file.cdn_root_paths.first() else {
-                eprintln!(".msixvc file has no cdn root path");
-                return ExitCode::FAILURE;
-            };
-            format!("{}{}", cdn_root, file.relative_url)
+            match package_download_url(&file.cdn_root_paths, &file.relative_url) {
+                Ok(url) => url,
+                Err(error) => {
+                    eprintln!("could not construct package URL: {error}");
+                    return ExitCode::FAILURE;
+                }
+            }
         };
         let url = &vurl;
         let mut pos: u64 = 0;

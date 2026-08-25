@@ -1,9 +1,36 @@
+use std::io;
+
 use inquire::Select;
 use xodus::XBOX_LIVE_PACKAGES_PC;
 use xodus::api::displaycatalog::find_products_by_id;
 use xodus::models::packagespc::{PackageDetails, PackageResponse};
 use xodus::models::secrets::Token;
 use xodus::tokens::TokenManager;
+
+pub(crate) fn package_download_url(
+    cdn_root_paths: &[String],
+    relative_url: &str,
+) -> Result<String, io::Error> {
+    let root = cdn_root_paths
+        .first()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "package has no CDN root"))?;
+    let url = format!("{root}{relative_url}");
+    let parsed = reqwest::Url::parse(&url)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "package CDN URL is invalid"))?;
+    if parsed.scheme() != "https" {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "package CDN URL must use HTTPS",
+        ));
+    }
+    if parsed.host_str().is_none() || !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "package CDN URL must have a host and no user information",
+        ));
+    }
+    Ok(url)
+}
 
 pub async fn get_content_id(
     client: &reqwest::Client,
