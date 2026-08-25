@@ -520,6 +520,24 @@ pub enum NtfsSegmentMetadataParseError {
     SegmentHashes(#[from] PopulateSegmentHashesError),
     #[error("no used GPT partition was found")]
     NoUsedGptPartition,
+    #[error(
+        "non-encrypted prefix requested end overflows for start {range_start} and length {range_length}"
+    )]
+    NonEncryptedPrefixRequestedEndOverflow { range_start: u64, range_length: u64 },
+    #[error(
+        "non-encrypted prefix section end overflows for offset {section_offset} and length {section_length}"
+    )]
+    NonEncryptedPrefixSectionEndOverflow {
+        section_offset: u64,
+        section_length: u64,
+    },
+    #[error(
+        "non-encrypted prefix distance underflows for range start {range_start} and section offset {section_offset}"
+    )]
+    NonEncryptedPrefixDistanceUnderflow {
+        range_start: u64,
+        section_offset: u64,
+    },
     #[error("declared drive end overflows for offset {drive_data_offset} and size {drive_size}")]
     DriveEndOverflow {
         drive_data_offset: u64,
@@ -1689,34 +1707,63 @@ pub struct SegmentFile {
     pub keep_encrypted: bool,
 }
 
+fn non_encrypted_prefix_len(
+    sections: &[EncryptedSectionInfo],
+    range_start: u64,
+    range_length: u64,
+) -> Result<u64, NtfsSegmentMetadataParseError> {
+    let range_end = range_start.checked_add(range_length).ok_or(
+        NtfsSegmentMetadataParseError::NonEncryptedPrefixRequestedEndOverflow {
+            range_start,
+            range_length,
+        },
+    )?;
+    let mut first_overlapping_section_start = None;
+
+    for section in sections {
+        let section_end = section
+            .section_offset
+            .checked_add(section.section_length)
+            .ok_or(
+                NtfsSegmentMetadataParseError::NonEncryptedPrefixSectionEndOverflow {
+                    section_offset: section.section_offset,
+                    section_length: section.section_length,
+                },
+            )?;
+        if first_overlapping_section_start.is_none()
+            && section_end > range_start
+            && section.section_offset < range_end
+        {
+            first_overlapping_section_start = Some(section.section_offset);
+        }
+    }
+
+    let Some(section_start) = first_overlapping_section_start else {
+        return Ok(range_length);
+    };
+    if range_start >= section_start {
+        return Ok(0);
+    }
+
+    section_start.checked_sub(range_start).ok_or(
+        NtfsSegmentMetadataParseError::NonEncryptedPrefixDistanceUnderflow {
+            range_start,
+            section_offset: section_start,
+        },
+    )
+}
+
 impl XvdFile {
     pub fn content_id(&self) -> uuid::Uuid {
         self.header.vduid
     }
 
-    fn non_encrypted_prefix_len(&self, start: u64, len: u64) -> u64 {
-        let end = start.saturating_add(len);
-        let mut prefix_len = len;
-
-        for section in &self.encrypted_section_infos {
-            let section_start = section.section_offset;
-            let section_end = section
-                .section_offset
-                .saturating_add(section.section_length);
-
-            if section_end <= start || section_start >= end {
-                continue;
-            }
-
-            if start >= section_start {
-                return 0;
-            }
-
-            prefix_len = section_start.saturating_sub(start);
-            break;
-        }
-
-        prefix_len
+    fn non_encrypted_prefix_len(
+        &self,
+        range_start: u64,
+        range_length: u64,
+    ) -> Result<u64, NtfsSegmentMetadataParseError> {
+        non_encrypted_prefix_len(&self.encrypted_section_infos, range_start, range_length)
     }
 
     pub async fn parse_file(path: String) -> Result<Self, XvdFileParseError> {
@@ -2077,7 +2124,7 @@ impl XvdFile {
     {
         let drive_data_offset = self.drive_data_offset;
         let drive_size = self.header.drive_size;
-        let drive_plain_len = self.non_encrypted_prefix_len(drive_data_offset, drive_size);
+        let drive_plain_len = self.non_encrypted_prefix_len(drive_data_offset, drive_size)?;
         let drive_extents = ntfs_drive_extents(drive_data_offset, drive_size, drive_plain_len)?;
 
         block_in_place(|| {
@@ -2122,7 +2169,7 @@ impl XvdFile {
                     partition_start: part_start,
                 },
             )?;
-            let partition_plain_len = self.non_encrypted_prefix_len(partition_offset, part_len);
+            let partition_plain_len = self.non_encrypted_prefix_len(partition_offset, part_len)?;
             let partition = ntfs_partition_extents(
                 drive_data_offset,
                 drive_size,
@@ -2460,10 +2507,11 @@ mod tests {
         download_page_plan, download_request_range, extract_data_unit_index,
         extract_encrypted_section, extract_file_end, extract_page_loop_end, extract_page_plan,
         extract_progress_bytes, extract_write_length, hash_entry_read_offset, hash_page_index,
-        next_download_page, next_segment_page_offset, ntfs_drive_extents, ntfs_partition_extents,
-        package_file_name, required_gpt_partition_length, required_gpt_partition_start,
-        reserve_xvc_region_entries, segment_file_name, segment_metadata_reader_capacity,
-        validate_segment_metadata_table_extent, validate_xvc_region_hash_entry_addresses,
+        next_download_page, next_segment_page_offset, non_encrypted_prefix_len, ntfs_drive_extents,
+        ntfs_partition_extents, package_file_name, required_gpt_partition_length,
+        required_gpt_partition_start, reserve_xvc_region_entries, segment_file_name,
+        segment_metadata_reader_capacity, validate_segment_metadata_table_extent,
+        validate_xvc_region_hash_entry_addresses,
     };
 
     const XVD_HEADER_SIZE: usize = 4096;
@@ -3425,6 +3473,101 @@ mod tests {
             .expect("valid section hashes must populate");
 
         assert_eq!(files["valid-hash"].data_hashs, vec![[7; 20]]);
+    }
+
+    #[test]
+    fn non_encrypted_prefix_len_rejects_requested_end_overflow_before_ntfs_reads() {
+        let error = non_encrypted_prefix_len(&[], u64::MAX, 1)
+            .expect_err("overflowing prefix range must fail before NTFS reads");
+
+        assert!(matches!(
+            error,
+            NtfsSegmentMetadataParseError::NonEncryptedPrefixRequestedEndOverflow {
+                range_start: u64::MAX,
+                range_length: 1,
+            }
+        ));
+    }
+
+    #[test]
+    fn non_encrypted_prefix_len_rejects_every_overflowing_section_before_ntfs_reads() {
+        let sections = [
+            EncryptedSectionInfo {
+                section_offset: 0,
+                section_length: 1,
+                header_id: XvcRegionId::Unknown,
+                vduid: [0; 8],
+                data_units: None,
+                first_segment_index: 0,
+                data_hashs: vec![],
+            },
+            EncryptedSectionInfo {
+                section_offset: u64::MAX,
+                section_length: 1,
+                header_id: XvcRegionId::Unknown,
+                vduid: [0; 8],
+                data_units: None,
+                first_segment_index: 0,
+                data_hashs: vec![],
+            },
+        ];
+        let error = non_encrypted_prefix_len(&sections, 0, 1)
+            .expect_err("overflowing encrypted section must fail before NTFS reads");
+
+        assert!(matches!(
+            error,
+            NtfsSegmentMetadataParseError::NonEncryptedPrefixSectionEndOverflow {
+                section_offset: u64::MAX,
+                section_length: 1,
+            }
+        ));
+    }
+
+    #[test]
+    fn non_encrypted_prefix_len_preserves_valid_overlap_cases() {
+        let no_overlap = [EncryptedSectionInfo {
+            section_offset: 300,
+            section_length: 10,
+            header_id: XvcRegionId::Unknown,
+            vduid: [0; 8],
+            data_units: None,
+            first_segment_index: 0,
+            data_hashs: vec![],
+        }];
+        let first_overlap = [EncryptedSectionInfo {
+            section_offset: 150,
+            section_length: 10,
+            header_id: XvcRegionId::Unknown,
+            vduid: [0; 8],
+            data_units: None,
+            first_segment_index: 0,
+            data_hashs: vec![],
+        }];
+        let overlap_at_start = [EncryptedSectionInfo {
+            section_offset: 100,
+            section_length: 10,
+            header_id: XvcRegionId::Unknown,
+            vduid: [0; 8],
+            data_units: None,
+            first_segment_index: 0,
+            data_hashs: vec![],
+        }];
+
+        assert_eq!(
+            non_encrypted_prefix_len(&no_overlap, 100, 100)
+                .expect("non-overlapping section must preserve the full prefix"),
+            100
+        );
+        assert_eq!(
+            non_encrypted_prefix_len(&first_overlap, 100, 100)
+                .expect("first overlapping section must truncate the prefix"),
+            50
+        );
+        assert_eq!(
+            non_encrypted_prefix_len(&overlap_at_start, 100, 100)
+                .expect("section at range start must remove the prefix"),
+            0
+        );
     }
 
     #[test]
