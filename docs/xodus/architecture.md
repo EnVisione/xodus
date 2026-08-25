@@ -49,6 +49,8 @@ Device credential provisioning now propagates request serialization, HTTP status
 
 The BCrypt RSA private-key parser now validates magic, component extents, prime factors, modular inversion, and RSA construction through typed errors. Malformed persisted key blocks are rejected before slicing or signing, and device reauthentication returns the failure so the CLI and service cannot report or continue a false-success startup.
 
+Live RST RSA signing uses the AWS-LC provider through bergshamra and kryptering. The BCrypt parser emits a bounded PKCS#8 DER representation containing the validated RSA components instead of constructing a direct RustCrypto RSA key, and the DER bytes are held in zeroizing storage until signing completes. The parser validates the modulus, private exponent, CRT coefficient, and DER length arithmetic before the key reaches the signing provider. `deny.toml` records the dependency license and source policy plus the reviewed external XAL and GTK3 advisory exceptions. The external exceptions remain temporary and must be removed when compatible upstream dependency updates are available.
+
 SOAP key-info conversion now returns typed errors for missing key names or security-token references. Encrypted response handling validates reference prefixes and IV length, maps decryption and UTF 8 failures, and parses only the authenticated padded plaintext instead of indexing or unwrapping malformed data.
 
 Shared-key derivation now rejects empty secrets, unsupported output lengths, and checked length arithmetic failures through typed errors. HMAC signing and encrypted response handling propagate those failures without indexing or unwrapping invalid key material.

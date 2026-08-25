@@ -3,10 +3,11 @@ name = "xodus-cli"
 version = "0.1.0"
 edition = "2024"
 default-run = "xodus-cli"
+license.workspace = true
 
 [dependencies]
-xodus = { path = "../xodus" }
-msixvc = { path = "../msixvc" }
+xodus = { path = "../xodus", version = "0.1.0" }
+msixvc = { path = "../msixvc", version = "0.1.0" }
 base64 = { workspace = true }
 sha2 = "0.11.0"
 tokio = { workspace = true }

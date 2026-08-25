@@ -1,10 +1,11 @@
 use base64::prelude::*;
 
 use crate::api::live::utils;
+use crate::licensing::utils::RsaPrivateKeyDer;
 use crate::models::soap::{self, XML_SIGNATURE_METHOD_HMAC, XML_SIGNATURE_METHOD_RSA};
 
 pub enum RSTSignature<'a> {
-    Rsa(Box<rsa::RsaPrivateKey>),
+    Rsa(RsaPrivateKeyDer),
     Hmac {
         clep_secret: &'a [u8],
         /// Used only if TPMInfo public key was sent.
@@ -95,15 +96,10 @@ impl<'a> RSTSignature<'a> {
 
                 bergshamra::KeyData::from_symmetric_bytes(kryptering::KeyAlgorithm::Hmac, &hmac)
             }
-            RSTSignature::Rsa(private_key) => {
-                use rsa::pkcs8::EncodePrivateKey;
-
-                let der = private_key
-                    .to_pkcs8_der()
-                    .map_err(|e| bergshamra::Error::Key(e.to_string()))?;
-
-                bergshamra::KeyData::from_pkcs8_der(kryptering::KeyAlgorithm::Rsa, der.as_bytes())
-            }
+            RSTSignature::Rsa(private_key) => bergshamra::KeyData::from_pkcs8_der(
+                kryptering::KeyAlgorithm::Rsa,
+                private_key.as_bytes(),
+            ),
         }
     }
 }

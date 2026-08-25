@@ -2,9 +2,10 @@
 name = "xodus-service"
 version = "0.1.0"
 edition = "2024"
+license.workspace = true
 
 [dependencies]
-xodus = { path = "../xodus" }
+xodus = { path = "../xodus", version = "0.1.0" }
 tokio = { workspace = true }
 reqwest = { workspace = true }
 chrono = { workspace = true }

@@ -3,6 +3,9 @@ resolver = "3"
 members = ["crates/*"]
 exclude = ["fuzz"]
 
+[workspace.package]
+license = "GPL-3.0-only"
+
 [workspace.dependencies]
 chrono = "0.4.45"
 reqwest = { version = "0.13.4", features = ["json", "stream"] }

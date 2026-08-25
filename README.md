@@ -85,6 +85,17 @@ Running xodus-service in debug
 cargo run --bin xodus-service
 ```
 
+### Verification
+
+The repository dependency policy is checked with cargo deny. It validates the allowed license and source set, duplicate dependency review, and the reviewed advisory exceptions for the pinned external XAL and GTK3 dependency paths.
+
+```bash
+cargo fmt --all --check
+cargo deny --all-features check
+```
+
+Run `cargo audit` separately when refreshing the advisory database. Its remaining findings must be checked against the external XAL dependency path recorded in `deny.toml` before a release is accepted.
+
 > [!WARNING]
 > For better performance when decrypting MSIXVC files, the `aes` and `ssse3` features are enabled on `x86_64`,
 > and the `aes` feature is enabled on `aarch64`. This means that the program will crash with an illegal instruction

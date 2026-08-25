@@ -103,11 +103,11 @@ pub async fn login_device_credential(
 pub async fn authenticate_device(
     client: &reqwest::Client,
     username: String,
-    private_key: rsa::RsaPrivateKey,
+    private_key: crate::licensing::utils::RsaPrivateKeyDer,
 ) -> Result<soap::Envelope, rst::RSTError> {
     let request = rst::RSTRequestBuilder::new()
         .username(soap::UsernameToken::devicetoken(username))
-        .signature(rst::RSTSignature::Rsa(Box::new(private_key)))
+        .signature(rst::RSTSignature::Rsa(private_key))
         .scope_policy("http://Passport.NET/tb", None)
         .build()?;
 

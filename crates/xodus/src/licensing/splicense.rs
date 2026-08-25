@@ -799,4 +799,28 @@ mod tests {
         let result = parse_bcrypt_rsa_private(&BCryptRsaBlock(bytes));
         assert_eq!(result, Err(BcryptRsaPrivateError::InvalidPrimeFactors));
     }
+
+    #[test]
+    fn test_bcrypt_rsa_emits_pkcs8_der_without_rustcrypto_key() {
+        let mut bytes = [0_u8; 544];
+        bytes[0..4].copy_from_slice(&0x3341_5352_u32.to_le_bytes());
+        for (offset, value) in [(8, 1_u32), (12, 2), (16, 1), (20, 1)] {
+            bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        bytes[24] = 17;
+        bytes[25..27].copy_from_slice(&3233_u16.to_be_bytes());
+        bytes[27] = 61;
+        bytes[28] = 53;
+        bytes[29..31].copy_from_slice(&2753_u16.to_be_bytes());
+
+        let key = parse_bcrypt_rsa_private(&BCryptRsaBlock(bytes))
+            .expect("valid RSA components should produce PKCS#8 DER");
+
+        assert_eq!(&key.as_bytes()[..2], &[0x30, 0x33]);
+        assert!(
+            key.as_bytes()
+                .windows(9)
+                .any(|window| { window == [0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01] })
+        );
+    }
 }
