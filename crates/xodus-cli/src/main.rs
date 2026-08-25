@@ -148,6 +148,12 @@ fn main() -> ExitCode {
 
 #[tokio::main]
 async fn run(args: CliArgs) -> ExitCode {
+    let code = run_inner(args).await;
+    xodus::secrets::destroy_secrets();
+    code
+}
+
+async fn run_inner(args: CliArgs) -> ExitCode {
     env_logger::init_from_env("XODUS_LOG");
     let client = reqwest::ClientBuilder::new()
         .user_agent(format!("xodus-cli/{}", env!("CARGO_PKG_VERSION")))
@@ -196,7 +202,7 @@ async fn run(args: CliArgs) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let code = match args.command {
+    match args.command {
         SubCommand::Download {
             product,
             market,
@@ -293,9 +299,5 @@ async fn run(args: CliArgs) -> ExitCode {
             ClepAction::Decrypt { data } => commands::clep::decrypt(data),
         },
         SubCommand::SpLicense { block } => commands::splicense::run(block),
-    };
-
-    xodus::secrets::destroy_secrets();
-
-    code
+    }
 }
