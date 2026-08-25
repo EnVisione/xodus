@@ -2,10 +2,12 @@ use std::io;
 use std::path::Path;
 use std::process::ExitCode;
 
+use base64::Engine;
 use futures_util::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use inquire::MultiSelect;
 use inquire::validator::Validation;
+use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 use xodus::models::packagespc::PackageFile;
 use xodus::tokens::TokenManager;
@@ -43,6 +45,42 @@ fn checked_download_total(current: u64, chunk: usize, expected: u64) -> io::Resu
         ));
     }
     Ok(next)
+}
+
+fn decode_file_hash(value: &str) -> io::Result<Option<[u8; 32]>> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(value)
+        .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(value))
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "package file hash is not valid base64",
+            )
+        })?;
+    let hash = decoded.as_slice().try_into().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "package file hash is not a 32 byte SHA-256 digest",
+        )
+    })?;
+    Ok(Some(hash))
+}
+
+fn validate_file_hash(expected: Option<[u8; 32]>, actual: [u8; 32]) -> io::Result<()> {
+    if let Some(expected) = expected
+        && expected != actual
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "downloaded package file hash does not match metadata",
+        ));
+    }
+    Ok(())
 }
 
 pub async fn run(
@@ -115,6 +153,13 @@ pub async fn run(
             eprintln!("package file {} has an invalid size", file.file_name);
             return ExitCode::FAILURE;
         };
+        let expected_hash = match decode_file_hash(&file.file_hash) {
+            Ok(hash) => hash,
+            Err(error) => {
+                eprintln!("refusing {}: {error}", file.file_name);
+                return ExitCode::FAILURE;
+            }
+        };
         let progress_style = ProgressStyle::with_template(
             "[{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}) ({eta})",
         )
@@ -175,6 +220,7 @@ pub async fn run(
         let mut output = tokio::fs::File::from_std(output);
         let mut stream = res.bytes_stream();
         let mut downloaded = 0_u64;
+        let mut hasher = Sha256::new();
 
         while let Some(chunk) = stream.next().await {
             let chk = match chunk {
@@ -191,6 +237,7 @@ pub async fn run(
                     return ExitCode::FAILURE;
                 }
             };
+            hasher.update(&chk);
             if let Err(error) = output.write_all(&chk).await {
                 eprintln!("failed to write {}: {error}", file.file_name);
                 return ExitCode::FAILURE;
@@ -203,6 +250,11 @@ pub async fn run(
                 "refusing {}: received {downloaded} bytes, expected {file_size}",
                 file.file_name
             );
+            return ExitCode::FAILURE;
+        }
+
+        if let Err(error) = validate_file_hash(expected_hash, hasher.finalize().into()) {
+            eprintln!("refusing {}: {error}", file.file_name);
             return ExitCode::FAILURE;
         }
 
@@ -227,7 +279,12 @@ pub async fn run(
 
 #[cfg(test)]
 mod tests {
-    use super::{checked_download_total, validate_declared_download_length};
+    use base64::Engine;
+
+    use super::{
+        checked_download_total, decode_file_hash, validate_declared_download_length,
+        validate_file_hash,
+    };
     use crate::package::package_download_urls;
 
     #[test]
@@ -292,5 +349,25 @@ mod tests {
         assert_eq!(checked_download_total(4, 6, 10).unwrap(), 10);
         assert!(checked_download_total(4, 7, 10).is_err());
         assert!(checked_download_total(u64::MAX, 1, u64::MAX).is_err());
+    }
+
+    #[test]
+    fn file_hash_validation_accepts_empty_and_matching_hashes() {
+        let actual = [7_u8; 32];
+        assert!(decode_file_hash("").unwrap().is_none());
+        assert!(validate_file_hash(None, actual).is_ok());
+        let encoded = base64::engine::general_purpose::STANDARD.encode(actual);
+        let expected = decode_file_hash(&encoded).unwrap();
+        assert_eq!(expected, Some(actual));
+        assert!(validate_file_hash(expected, actual).is_ok());
+    }
+
+    #[test]
+    fn file_hash_validation_rejects_invalid_or_mismatched_hashes() {
+        assert!(decode_file_hash("not a digest").is_err());
+        let expected =
+            decode_file_hash(&base64::engine::general_purpose::STANDARD.encode([8_u8; 32]))
+                .unwrap();
+        assert!(validate_file_hash(expected, [7_u8; 32]).is_err());
     }
 }
