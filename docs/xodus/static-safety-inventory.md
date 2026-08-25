@@ -4,7 +4,7 @@
 
 This inventory covers Rust production sources under `crates/` and supports the Phase 2 requirement that remotely influenced parser, package, service, and environment paths do not contain placeholder macros or unconditional process aborts.
 
-The inventory was refreshed on August 25, 2026 at checkpoint `baffbf9e578cfa45b4534bba93c77015b45a350f`.
+The inventory was refreshed on August 25, 2026 at checkpoint `f6fc444638b84b6d498146dc6eccf973fd11dbc7`.
 
 ## Scan
 
@@ -25,6 +25,7 @@ The result contains no `TODO`, `todo!`, or `unimplemented!` match in the current
 | MSIXVC2 inspection and install | Typed ZIP, path, duplicate, symbolic link, compression, metadata, size, and transaction failures. Mutated archives return a result without a process panic. | `crates/msixvc/src/msixvc2.rs`, `mutated_msixvc2_fixture_never_panics` |
 | Package paths and promotion | Hostile paths fail before output creation, Linux writes stay beneath the transaction root, and promotion rollback preserves the prior verified state. | `crates/xodus-cli/src/commands/streaming.rs` tests |
 | HTTP and cache readers | Typed status, range, position, length, retry, and premature EOF failures with bounded retry budgets. | `crates/msixvc/src/streaming.rs` tests |
+| HTTP extent properties | A deterministic seeded sweep covers 4,096 bounded position, active-offset, and response-extent cases, including valid sums and invalid overlong or mismatched extents. | `http_read_extent_properties_hold_for_seeded_inputs` |
 | Account and licensing responses | Typed HTTP, schema, empty collection, token conversion, key, license, and UTF 8 failures. Test-only assertions remain outside production paths. | `crates/xodus/src/api`, `crates/xodus/src/models`, `crates/xodus/src/licensing` |
 | Service IPC | Bounded payloads, deadlines, connection and rate limits, peer identity checks, explicit unsupported operations, and escaped machine-readable errors. | `crates/xodus-service/src/connection` and startup code |
 
