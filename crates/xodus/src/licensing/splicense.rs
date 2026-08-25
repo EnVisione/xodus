@@ -262,14 +262,15 @@ impl SPLicense {
             }
             Ok(BlockId::PackageFullName) => {
                 let data = read_vec(&mut reader, size)?;
-                if data.len() % 2 != 0 {
+                let (utf16_bytes, remainder) = data.as_chunks::<2>();
+                if !remainder.is_empty() {
                     return Err(SPLicenseDecodeError::InvalidPackageNameByteLength {
                         len: data.len(),
                     });
                 }
-                let utf16: Vec<u16> = data
-                    .chunks_exact(2)
-                    .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+                let utf16: Vec<u16> = utf16_bytes
+                    .iter()
+                    .map(|bytes| u16::from_le_bytes(*bytes))
                     .collect();
                 let mut s = String::from_utf16(&utf16)?;
                 if s.ends_with('\0') {

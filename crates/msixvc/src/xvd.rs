@@ -439,6 +439,21 @@ pub enum SegmentMetadataParseError {
         path_offset: u32,
         path_length: u16,
     },
+    #[error(
+        "segment hash slice start underflows for page offset {page_offset} and segment page start {segment_page_start}"
+    )]
+    SegmentHashSliceStartUnderflow {
+        page_offset: u64,
+        segment_page_start: u64,
+    },
+    #[error("segment hash slice start {page_relative_start} cannot fit in usize")]
+    SegmentHashSliceStartTooLarge { page_relative_start: u64 },
+    #[error("segment hash slice length {page_length} cannot fit in usize")]
+    SegmentHashSliceLengthTooLarge { page_length: u64 },
+    #[error("segment hash slice end overflows for start {start} and length {length}")]
+    SegmentHashSliceEndOverflow { start: usize, length: usize },
+    #[error("segment hash slice end {end} exceeds {data_hash_count} available section hashes")]
+    SegmentHashSliceBeyondAvailableHashes { end: usize, data_hash_count: usize },
     #[error("segment metadata file name contains invalid UTF-16")]
     InvalidFileName(#[source] std::string::FromUtf16Error),
 }
@@ -740,6 +755,41 @@ fn segment_path_offset(
     )?;
 
     Ok(absolute_path_offset)
+}
+
+fn segment_hash_slice_bounds(
+    page_offset: u64,
+    segment_page_start: u64,
+    filesize: u64,
+    data_hash_count: usize,
+) -> Result<std::ops::Range<usize>, SegmentMetadataParseError> {
+    let page_relative_start = page_offset.checked_sub(segment_page_start).ok_or(
+        SegmentMetadataParseError::SegmentHashSliceStartUnderflow {
+            page_offset,
+            segment_page_start,
+        },
+    )?;
+    let start = usize::try_from(page_relative_start).map_err(|_| {
+        SegmentMetadataParseError::SegmentHashSliceStartTooLarge {
+            page_relative_start,
+        }
+    })?;
+    let page_length = filesize.div_ceil(PAGE_SIZE as u64);
+    let length = usize::try_from(page_length)
+        .map_err(|_| SegmentMetadataParseError::SegmentHashSliceLengthTooLarge { page_length })?;
+    let end = start
+        .checked_add(length)
+        .ok_or(SegmentMetadataParseError::SegmentHashSliceEndOverflow { start, length })?;
+    if end > data_hash_count {
+        return Err(
+            SegmentMetadataParseError::SegmentHashSliceBeyondAvailableHashes {
+                end,
+                data_hash_count,
+            },
+        );
+    }
+
+    Ok(start..end)
 }
 
 fn validate_xvc_region_hash_entry_addresses(
@@ -1102,11 +1152,13 @@ impl XvdFile {
                 {
                     break;
                 }
-                let end = page_offset as usize - segment_page_start as usize
-                    + segment.filesize.div_ceil(PAGE_SIZE as u64) as usize;
-                let data_hashs: Vec<[u8; 20]> = section.data_hashs
-                    [page_offset as usize - segment_page_start as usize..end]
-                    .into();
+                let hash_slice = segment_hash_slice_bounds(
+                    page_offset,
+                    segment_page_start,
+                    segment.filesize,
+                    section.data_hashs.len(),
+                )?;
+                let data_hashs: Vec<[u8; 20]> = section.data_hashs[hash_slice].into();
                 files.insert(
                     file_name,
                     SegmentFile {
@@ -1705,6 +1757,7 @@ mod tests {
         fn synthetic_segment_metadata_with_single_segment(
             path_length: u16,
             path_offset: u32,
+            filesize: u64,
             include_path: bool,
         ) -> (Self, Arc<AtomicUsize>) {
             let paths_offset = SEGMENT_METADATA_HEADER_SIZE + 16;
@@ -1725,6 +1778,8 @@ mod tests {
                 .copy_from_slice(&path_length.to_le_bytes());
             metadata[SEGMENT_METADATA_HEADER_SIZE + 4..SEGMENT_METADATA_HEADER_SIZE + 8]
                 .copy_from_slice(&path_offset.to_le_bytes());
+            metadata[SEGMENT_METADATA_HEADER_SIZE + 8..SEGMENT_METADATA_HEADER_SIZE + 16]
+                .copy_from_slice(&filesize.to_le_bytes());
             if include_path && path_length == 1 {
                 metadata
                     [paths_offset + path_offset as usize..paths_offset + path_offset as usize + 2]
@@ -2195,7 +2250,7 @@ mod tests {
         });
         let metadata_length = (SEGMENT_METADATA_HEADER_SIZE + 16) as u64;
         let (reader, read_bytes) =
-            SyntheticXvdReader::synthetic_segment_metadata_with_single_segment(1, 0, false);
+            SyntheticXvdReader::synthetic_segment_metadata_with_single_segment(1, 0, 0, false);
         let error = match xvd
             .parse_segment_metadata(
                 reader,
@@ -2239,8 +2294,12 @@ mod tests {
             data_hashs: vec![[0; 20]],
         });
         let metadata_length = (SEGMENT_METADATA_HEADER_SIZE + 16 + 2) as u64;
-        let (reader, _) =
-            SyntheticXvdReader::synthetic_segment_metadata_with_single_segment(1, 0, true);
+        let (reader, _) = SyntheticXvdReader::synthetic_segment_metadata_with_single_segment(
+            1,
+            0,
+            PAGE_SIZE as u64,
+            true,
+        );
         let files = xvd
             .parse_segment_metadata(
                 reader,
@@ -2252,7 +2311,54 @@ mod tests {
             .await
             .expect("declared segment path must parse");
 
-        assert!(files.contains_key("a"));
+        let file = files
+            .get("a")
+            .expect("declared segment path must be retained");
+        assert_eq!(file.data_hashs, vec![[0; 20]]);
+    }
+
+    #[tokio::test]
+    async fn parse_segment_metadata_rejects_hash_slice_beyond_available_hashes() {
+        let mut xvd = XvdFile::parse(SyntheticXvdReader::synthetic_xvd_with_region_count(0))
+            .await
+            .expect("synthetic XVD must parse");
+        xvd.encrypted_section_infos.push(EncryptedSectionInfo {
+            section_offset: 0,
+            section_length: PAGE_SIZE as u64,
+            header_id: XvcRegionId::Unknown,
+            vduid: [0; 8],
+            data_units: None,
+            first_segment_index: 0,
+            data_hashs: vec![],
+        });
+        let metadata_length = (SEGMENT_METADATA_HEADER_SIZE + 16 + 2) as u64;
+        let (reader, _) = SyntheticXvdReader::synthetic_segment_metadata_with_single_segment(
+            1,
+            0,
+            PAGE_SIZE as u64,
+            true,
+        );
+        let error = match xvd
+            .parse_segment_metadata(
+                reader,
+                &UserPackageFile {
+                    offset: 0,
+                    length: metadata_length,
+                },
+            )
+            .await
+        {
+            Ok(_) => panic!("out-of-range segment hash slice must not parse"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            SegmentMetadataParseError::SegmentHashSliceBeyondAvailableHashes {
+                end: 1,
+                data_hash_count: 0,
+            }
+        ));
     }
 
     #[tokio::test]

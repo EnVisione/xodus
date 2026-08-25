@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "planId": "PLAN-MASTER",
-  "planSetSha256": "e91b2c9e29b2dffcea29ab5ac1d050323ef8bffb15fcff8d21406acda51ff6b3",
+  "planSetSha256": "02747ecc7aa7f8210ce5dd2a944c3fa1004d6a4d2e0d0f084b293738ffd713f2",
   "planningSubject": {
     "name": "Evolve the EnVisione Xodus fork into a CachyOS native, launcher neutral Game Pass PC launcher and runtime for Hyprland, Wayland, XWayland, and the NVIDIA RTX 5090 Laptop GPU",
     "requestedArtifact": "authoritative_plan",
@@ -293,6 +293,27 @@
         "subject": "Verified Phase 2 XVD segment path range slice",
         "source": "Owner-authorized implementation and verification results for the working tree based on `f76bae380bf88e03cbb2c8f5600543e3f8ce4968`, with `crates/msixvc/src/xvd.rs` SHA-256 `10f5e3af047d28f3858ecebba7ceddaf82e707e65c4bb1617046a789c88656e6` and patch SHA-256 `c2669df56e8f592fbcce951765134c432474f6afa765785c221deac500dcc0f7`",
         "use": "Record checked segment-path relative and absolute range validation before path allocation, seek, UTF-16 decoding, or map insertion, typed path range failures, header-and-table-only invalid-path evidence, valid-path preservation, CodeGraph synchronization, exact verification, account-test exclusion, activity limits, and the selected segment hash-slice boundary without claiming requirement, phase, package, update-lifecycle, or unfiltered-suite completion"
+      },
+      {
+        "id": "SRC-042",
+        "role": "owner_request",
+        "subject": "Mandatory warning-free workspace quality gate",
+        "source": "`/home/envy/.codex/attachments/4184b35d-2e2d-44a1-a2f2-784fefacd6ae/pasted-text-1.txt`, SHA-256 `2ecfa58f5bc4fed683dd60c6cebf9fa1924108eba5db875874df851f97a4140d`",
+        "use": "Treat all four current workspace Clippy warnings as unresolved mandatory repository-owned defects, remove any acceptance meaning from baseline-tolerance wording, and require zero-warning workspace Clippy before the active phase can pass without claiming that a warning is fixed; treat the embedded branch, revision, plan digest, and execution checkpoint as historical source state superseded by verified current repository identity"
+      },
+      {
+        "id": "SRC-043",
+        "role": "repository_evidence",
+        "subject": "Verified Phase 2 XVD segment hash-slice range slice",
+        "source": "Owner-authorized implementation and verification results for the working tree based on `86ec3601a051c8f0524534940eeeff6d7fff576f`, with `crates/msixvc/src/xvd.rs` SHA-256 `e04e09a7f167ea32b7231380ad66676e6cbab8f314c0bb67af1ca2a4c665925c` and patch SHA-256 `ab5c0b9ba989eb33351a61a4e01af42fa004f7eab128c0fd10dfe9e241a47e77`",
+        "use": "Record checked segment hash-slice bounds, typed range failures, invalid and valid deterministic in-memory evidence, exact passing format, build, and filtered test evidence, the four-warning workspace Clippy defect state, and the warning-remediation next action without claiming requirement, phase, warning, unfiltered-suite, package, or runtime completion"
+      },
+      {
+        "id": "SRC-044",
+        "role": "repository_evidence",
+        "subject": "Verified Phase 2 workspace warning remediation",
+        "source": "Owner-authorized behavior-preserving implementation and verification results for the working tree based on 86ec3601a051c8f0524534940eeeff6d7fff576f, with crates/xodus/src/licensing/splicense.rs SHA-256 f430a031949c3a2d4b741f062781d2fde235291c0fff3f91f856d8d7d157fb45 and patch SHA-256 3299702d3b218c1d24c5d09f0800d574ca02c972b1027e2d5e3109944e1e364a, plus crates/xodus-cli/src/commands/streaming.rs SHA-256 aaa15e95bc50e3e693cb556e88afddf21e4894d55a45bb65be3382b21f146ed7 and patch SHA-256 cdfbef6823bbe739139ad159a80835c6a6133479de7bd389d8fb8e1fab458eda",
+        "use": "Record all four DEC-012 warnings fixed without suppression or behavior loss, the zero-warning workspace Clippy result, affected regression evidence, CodeGraph synchronization, the remaining account-test exclusion, and the exact next checked segment-metadata section-end and page-byte arithmetic task without claiming XODUS-REQ-002, Phase 2, unfiltered-suite, package, or runtime completion"
       }
     ]
   },
@@ -1015,6 +1036,17 @@
         "EXT-002",
         "XODUS-PHASE-002"
       ]
+    },
+    {
+      "id": "DEC-012",
+      "question": "How are workspace Clippy warnings classified during phased implementation?",
+      "selectedChoice": "Every workspace Clippy warning is an unfinished mandatory repository-owned defect. A zero exit status with warnings does not satisfy an applicable phase or release gate, and warnings must be fixed without lint suppression, test weakening, or behavior loss.",
+      "rationale": "Warning-bearing verification cannot be treated as a tolerated baseline while the completion endpoint requires no known mandatory repository-owned defect and XODUS-REQ-020 requires warning-free Clippy.",
+      "affectedRequirements": [
+        "XODUS-REQ-002",
+        "XODUS-REQ-020"
+      ],
+      "supersedes": []
     }
   ],
   "externalPrerequisites": [
@@ -1437,11 +1469,11 @@
   "goalCreator": {
     "mandatoryBoundary": "XODUS-REQ-001 through XODUS-REQ-022, including both local targets, both Forza profiles, Tier 2 compatibility, MSIXVC2, XSP updates, separate cloud fallback, and signed release packaging.",
     "optionalFutureDisposition": "excluded",
-    "lockedOwnerDecisions": "DEC-001 through DEC-011 are resolved exactly as recorded in this plan.",
+    "lockedOwnerDecisions": "DEC-001 through DEC-012 are resolved exactly as recorded in this plan.",
     "activePhase": "XODUS-PHASE-002",
-    "nextExecutableAction": "Continue XODUS-REQ-002 in `parse_segment_metadata` by deriving each segment's page-relative hash-slice start and end through checked subtraction, conversion, and addition, validating the range against `section.data_hashs.len()` before slice indexing or map insertion, and returning typed failures. Prove an out-of-range hash request neither panics nor inserts a record while preserving one valid hash slice through deterministic in-memory evidence and no filesystem mutation. Leave section-end, page-byte, and other downstream arithmetic for later bounded tasks. Do not begin XODUS-REQ-003 or XODUS-PHASE-003 until XODUS-REQ-002 closes.",
-    "knownFailingChecks": "Phase 1 baseline verification passed. SRC-024 containment, SRC-025 XSP, SRC-026 XVD seek, SRC-027 XVD region-count, SRC-028 XVD key-ID, SRC-029 XVD region-offset, SRC-030 XVD allocation, SRC-031 XVD region-end, SRC-032 XVD declared drive-extent, SRC-033 XVD hash-entry seek-address, SRC-034 XVD hash page-index, SRC-035 package-file UTF-16, SRC-036 segment-metadata UTF-16, SRC-037 segment-metadata fixed reader-capacity, SRC-038 segment-metadata table and allocation, SRC-039 package-files header and table extent, and SRC-040 package-file payload range checks remain passed. For SRC-041, `cargo test -p msixvc` passed 42 tests, targeted `msixvc` Clippy passed with no warnings, CodeGraph synchronization reported one changed file and 189 nodes, `cargo fmt --check`, the workspace release build, workspace Clippy with exactly the four known unrelated warnings, the filtered workspace all-target suite with 62 passing tests, one ignored test, and one filtered test, and `git diff --check` passed. The passing tests comprise 42 `msixvc`, 3 `common`, 9 `xodus`, and 8 `xodus-cli` tests. The warnings remain `chunks_exact` at `crates/xodus/src/licensing/splicense.rs:271` and three `xodus-cli` streaming warnings at lines 299, 373, and 482. The opt-in `api::live::test::test_get_xbox_live_dev_token` remains excluded from offline execution after its prior stall beyond two minutes without network activity, so no unfiltered workspace-suite pass is claimed. XODUS-REQ-002 still lacks segment hash-slice bounds, section-end and page-byte arithmetic, other downstream arithmetic, property, fuzz, unsafe-reshape, and static inventory evidence. EXT-002A remains available only for Phase 2 entry, while broader EXT-002 remains unavailable for later runtime and lifecycle acceptance. EXT-003 and EXT-004 remain unavailable, and no real-package update, target-game, performance, Tier 2, or release acceptance run has passed.",
+    "nextExecutableAction": "Continue XODUS-REQ-002 in `parse_segment_metadata` by deriving `section.section_offset + section.section_length` through checked addition, deriving each `page_offset * PAGE_SIZE` byte offset through checked multiplication before the section-end comparison and `SegmentFile` insertion, and advancing `page_offset + page_length` through checked addition. Return distinct typed `SegmentMetadataParseError` failures before comparison, insertion, or subsequent indexing. Prove each overflow path is deterministic and nonmutating while preserving the current valid single-segment result. Leave other downstream arithmetic, property, fuzz, unsafe-reshape, and static-inventory work for later bounded tasks. Do not begin XODUS-REQ-003 or XODUS-PHASE-003 until XODUS-REQ-002 closes.",
+    "knownFailingChecks": "No current formatting, targeted `msixvc`, targeted Clippy, workspace release-build, filtered workspace-suite, workspace Clippy, or diff check failure is recorded for SRC-044. `cargo fmt` and `cargo fmt --check` passed, `cargo test -p msixvc` passed 43 tests, targeted `msixvc` Clippy passed, `cargo build --workspace --release` passed, the filtered workspace all-target suite passed 63 tests with one ignored and one filtered test, `cargo clippy --workspace --all-targets --all-features --message-format short` passed with zero warnings, and `git diff --check` passed. CodeGraph synchronization reported one changed file and 196 nodes for the hash-slice work, then two files and 125 nodes for warning cleanup. All four DEC-012 warnings are fixed without suppression or behavior loss. The opt-in `api::live::test::test_get_xbox_live_dev_token` remains excluded, so no unfiltered workspace-suite pass is claimed. XODUS-REQ-002 still lacks checked segment-metadata section-end and page-byte arithmetic, other downstream arithmetic, property, fuzz, unsafe-reshape, and static inventory evidence. EXT-002A remains available only for Phase 2 entry, broader EXT-002 remains unavailable for later runtime and lifecycle acceptance, EXT-003 and EXT-004 remain unavailable, and no real-package update, target-game, performance, Tier 2, or release acceptance run has passed.",
     "knownExternalBlockers": "No current XODUS-PHASE-002 entry blocker remains after EXT-002A validation. Later endpoint blockers remain EXT-002, Complete target runtime, service, anti cheat, and lifecycle evidence, EXT-003, Versioned xgameruntime artifact, EXT-004, Versioned Xodus compatible Wine or Proton artifact, EXT-007, Scoped public release publication approval, EXT-010, Tier 2 CachyOS Hyprland NVIDIA compatibility hardware, and EXT-011, Authorized Minecraft and Forza update revision pairs.",
-    "requiredEvidenceGates": "Sequential phase exits, complete deterministic tests including XODUS-PHASE-002 corpus consumers, authorized real-package apply and recovery exercises, authorized local title lifecycles, target runtime traces, Forza telemetry, Tier 2 results, package lifecycle, security review, documentation, signatures, checksums, SBOM, public release inspection, fresh install, and rollback must pass."
+    "requiredEvidenceGates": "Sequential phase exits, zero-warning workspace Clippy, complete deterministic tests including XODUS-PHASE-002 corpus consumers, authorized real-package apply and recovery exercises, authorized local title lifecycles, target runtime traces, Forza telemetry, Tier 2 results, package lifecycle, security review, documentation, signatures, checksums, SBOM, public release inspection, fresh install, and rollback must pass."
   }
 }

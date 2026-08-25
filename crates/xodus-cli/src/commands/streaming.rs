@@ -167,6 +167,17 @@ enum ProgressEvent {
     UpdateStatus { name: String },
 }
 
+struct StreamingRun<'a> {
+    client: &'a reqwest::Client,
+    tokens: &'a TokenManager,
+    destination: String,
+    try_skip_ntfs: bool,
+    parallel: Option<usize>,
+    market: Option<String>,
+    url: &'a str,
+    tx: &'a Sender<ProgressEvent>,
+}
+
 pub async fn run(
     client: &reqwest::Client,
     tokens: &TokenManager,
@@ -194,16 +205,18 @@ pub async fn run(
             }
         };
         return if run_cli_reader(
-            client,
-            tokens,
-            destination,
-            try_skip_ntfs,
-            parallel,
-            market,
+            StreamingRun {
+                client,
+                tokens,
+                destination,
+                try_skip_ntfs,
+                parallel,
+                market,
+                url: &source,
+                tx: &tx,
+            },
             f,
             l,
-            &source,
-            &tx,
             rx,
         )
         .await
@@ -275,16 +288,18 @@ pub async fn run(
         let l = http_file.len();
 
         return if run_cli_reader(
-            client,
-            tokens,
-            destination,
-            try_skip_ntfs,
-            parallel,
-            market,
+            StreamingRun {
+                client,
+                tokens,
+                destination,
+                try_skip_ntfs,
+                parallel,
+                market,
+                url,
+                tx: &tx,
+            },
             http_file,
             l,
-            url,
-            &tx,
             rx,
         )
         .await
@@ -297,16 +312,9 @@ pub async fn run(
 }
 
 async fn run_cli_reader<Reader>(
-    client: &reqwest::Client,
-    tokens: &TokenManager,
-    destination: String,
-    try_skip_ntfs: bool,
-    parallel: Option<usize>,
-    market: Option<String>,
+    run: StreamingRun<'_>,
     reader: Reader,
-    l: u64,
-    url: &str,
-    tx: &Sender<ProgressEvent>,
+    length: u64,
     mut rx: Receiver<ProgressEvent>,
 ) -> bool
 where
@@ -314,7 +322,7 @@ where
 {
     tokio::spawn(async move {
         let multi_progress = MultiProgress::new();
-        let total_progess = multi_progress.add(ProgressBar::new(l).with_style(
+        let total_progess = multi_progress.add(ProgressBar::new(length).with_style(
             ProgressStyle::with_template("{msg:30!} {bytes:>12}/{total_bytes:>12} {bytes_per_sec:>12} [{bar:40.cyan/blue}] {percent:>3}%").unwrap()
             .progress_chars("#>-")
         ));
@@ -355,36 +363,23 @@ where
 
         total_progess.abandon();
     });
-    run_reader(
+    run_reader(run, reader, length).await
+}
+
+async fn run_reader<Reader>(run: StreamingRun<'_>, reader: Reader, l: u64) -> bool
+where
+    Reader: AsyncRead + Unpin,
+{
+    let StreamingRun {
         client,
         tokens,
         destination,
         try_skip_ntfs,
         parallel,
         market,
-        reader,
-        l,
         url,
         tx,
-    )
-    .await
-}
-
-async fn run_reader<Reader>(
-    client: &reqwest::Client,
-    tokens: &TokenManager,
-    destination: String,
-    try_skip_ntfs: bool,
-    parallel: Option<usize>,
-    market: Option<String>,
-    reader: Reader,
-    l: u64,
-    url: &str,
-    tx: &Sender<ProgressEvent>,
-) -> bool
-where
-    Reader: AsyncRead + Unpin,
-{
+    } = run;
     let out: &Path = Path::new(&destination);
 
     if let Err(err) = std::fs::create_dir_all(out) {
@@ -490,7 +485,7 @@ where
         })
         .map(|(_, v)| v.length)
         .reduce(|old, c| old + c)
-        .map_or(0, |x| x);
+        .unwrap_or(0);
 
     let required_free_space = total_size;
     let available_free_space = match available_space(out) {
