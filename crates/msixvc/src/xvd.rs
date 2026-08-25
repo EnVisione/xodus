@@ -962,13 +962,20 @@ where
     loop {
         match out.write_all(data).await {
             Ok(()) => return Ok(()),
-            Err(_error) if retries > 0 => {
+            Err(error) if is_retryable_output_error(&error) && retries > 0 => {
                 retries -= 1;
                 sleep(OUTPUT_WRITE_RETRY_DELAY).await;
             }
             Err(error) => return Err(error),
         }
     }
+}
+
+fn is_retryable_output_error(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        ErrorKind::Interrupted | ErrorKind::Other | ErrorKind::TimedOut | ErrorKind::WouldBlock
+    )
 }
 
 fn verify_page_hash(
@@ -2967,11 +2974,12 @@ mod tests {
         download_encrypted_section, download_file_end, download_page_plan, download_request_range,
         extract_data_unit_index, extract_encrypted_section, extract_file_end,
         extract_page_loop_end, extract_page_plan, extract_progress_bytes, extract_write_length,
-        hash_entry_read_offset, hash_page_index, is_retryable_download_error, next_download_page,
-        next_download_received_byte_count, next_segment_page_offset, non_encrypted_prefix_len,
-        ntfs_drive_extents, ntfs_partition_extents, package_file_name,
-        required_gpt_partition_length, required_gpt_partition_start, reserve_xvc_region_entries,
-        segment_file_name, segment_metadata_reader_capacity, sync_substream_absolute_target,
+        hash_entry_read_offset, hash_page_index, is_retryable_download_error,
+        is_retryable_output_error, next_download_page, next_download_received_byte_count,
+        next_segment_page_offset, non_encrypted_prefix_len, ntfs_drive_extents,
+        ntfs_partition_extents, package_file_name, required_gpt_partition_length,
+        required_gpt_partition_start, reserve_xvc_region_entries, segment_file_name,
+        segment_metadata_reader_capacity, sync_substream_absolute_target,
         validate_download_response_extent, validate_segment_metadata_table_extent,
         validate_xvc_region_hash_entry_addresses, verify_page_hash, write_all_with_retry,
         xvd_stream_absolute_seek_target,
@@ -3036,6 +3044,23 @@ mod tests {
             attempts.load(Ordering::SeqCst),
             OUTPUT_WRITE_RETRY_LIMIT + 1
         );
+    }
+
+    #[test]
+    fn output_retry_policy_rejects_permanent_errors() {
+        assert!(is_retryable_output_error(&Error::other("temporary")));
+        assert!(is_retryable_output_error(&Error::new(
+            ErrorKind::TimedOut,
+            "temporary",
+        )));
+        assert!(!is_retryable_output_error(&Error::new(
+            ErrorKind::PermissionDenied,
+            "permanent",
+        )));
+        assert!(!is_retryable_output_error(&Error::new(
+            ErrorKind::InvalidInput,
+            "permanent",
+        )));
     }
 
     const SEGMENT_METADATA_HEADER_LENGTH_OFFSET: usize = 12;
