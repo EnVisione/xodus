@@ -399,6 +399,7 @@ pub struct XvdFile {
 }
 
 const MAX_XVC_REGION_HEADERS: u32 = 4_096;
+const MAX_USER_PACKAGE_FILES: u32 = 1_048_576;
 const MAX_SUPPORTED_XVC_INFO_VERSION: u32 = 2;
 const SEGMENT_METADATA_READER_CAPACITY: usize = PAGE_SIZE;
 const DOWNLOAD_HTTP_RETRY_LIMIT: usize = 3;
@@ -497,6 +498,13 @@ pub enum UserPackageFilesParseError {
     PackageFilesTableBeyondUserData {
         table_end: u64,
         user_data_length: u64,
+    },
+    #[error(
+        "package files entry count {file_count} exceeds the supported maximum {max_file_count}"
+    )]
+    FileCountTooLarge {
+        file_count: u32,
+        max_file_count: u32,
     },
     #[error(
         "package file payload end overflows for entry offset {payload_offset} and length {payload_length}"
@@ -2371,6 +2379,12 @@ impl XvdFile {
                 file.read_exact(&mut buf).await?;
                 XvdUserDataPackageFilesHeader::from_array(&buf)
             };
+            if user_data_package_files_header.file_count > MAX_USER_PACKAGE_FILES {
+                return Err(UserPackageFilesParseError::FileCountTooLarge {
+                    file_count: user_data_package_files_header.file_count,
+                    max_file_count: MAX_USER_PACKAGE_FILES,
+                });
+            }
             let table_end = validate_package_files_table_end(
                 user_data_offset,
                 user_data_header.length,
@@ -5114,15 +5128,10 @@ mod tests {
 
         assert!(matches!(
             error,
-            UserPackageFilesParseError::PackageFilesTableBeyondUserData {
-                table_end,
-                user_data_length,
-            } if table_end
-                == u64::from(header_length)
-                    + USER_DATA_PACKAGE_FILES_HEADER_SIZE as u64
-                    + u64::from(file_count) * USER_DATA_PACKAGE_FILES_HEADER_SIZE as u64
-                && user_data_length
-                    == (USER_DATA_HEADER_SIZE + USER_DATA_PACKAGE_FILES_HEADER_SIZE) as u64
+            UserPackageFilesParseError::FileCountTooLarge {
+                file_count: observed,
+                max_file_count: _,
+            } if observed == file_count
         ));
         assert_eq!(
             read_bytes.load(Ordering::Relaxed),
