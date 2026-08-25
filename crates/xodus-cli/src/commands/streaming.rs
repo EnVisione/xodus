@@ -274,12 +274,20 @@ pub(crate) struct PromotionEntry {
     final_relative: PathBuf,
     backup_relative: PathBuf,
     had_previous: bool,
+    remove_final: bool,
     state: PromotionState,
 }
 
 pub(crate) fn promotion_entries(specs: &[(String, String)]) -> io::Result<Vec<PromotionEntry>> {
+    promotion_entries_with_removals(specs, &[])
+}
+
+pub(crate) fn promotion_entries_with_removals(
+    specs: &[(String, String)],
+    removals: &[String],
+) -> io::Result<Vec<PromotionEntry>> {
     let mut seen = HashSet::new();
-    let mut entries = Vec::with_capacity(specs.len());
+    let mut entries = Vec::with_capacity(specs.len() + removals.len());
     for (staged, final_name) in specs {
         let staged_relative = package_relative_path(staged)?;
         let final_relative = package_relative_path(final_name)?;
@@ -294,6 +302,24 @@ pub(crate) fn promotion_entries(specs: &[(String, String)]) -> io::Result<Vec<Pr
             backup_relative: PathBuf::from(TRANSACTION_BACKUP_DIRECTORY).join(&final_relative),
             final_relative,
             had_previous: false,
+            remove_final: false,
+            state: PromotionState::Pending,
+        });
+    }
+    for final_name in removals {
+        let final_relative = package_relative_path(final_name)?;
+        let key = final_relative.to_string_lossy().into_owned();
+        if !seen.insert(key) {
+            return Err(invalid_package_path(
+                "transaction contains a duplicate package path",
+            ));
+        }
+        entries.push(PromotionEntry {
+            staged_relative: final_relative.clone(),
+            backup_relative: PathBuf::from(TRANSACTION_BACKUP_DIRECTORY).join(&final_relative),
+            final_relative,
+            had_previous: false,
+            remove_final: true,
             state: PromotionState::Pending,
         });
     }
@@ -324,12 +350,13 @@ fn write_transaction_journal(
         for entry in entries {
             writeln!(
                 journal,
-                "{}\t{}\t{}\t{}\t{}",
+                "{}\t{}\t{}\t{}\t{}\t{}",
                 entry.state.as_str(),
                 relative_path_text(&entry.staged_relative),
                 relative_path_text(&entry.final_relative),
                 relative_path_text(&entry.backup_relative),
                 u8::from(entry.had_previous),
+                u8::from(entry.remove_final),
             )?;
         }
     }
@@ -364,6 +391,15 @@ fn read_transaction_journal(root: &Path) -> io::Result<Option<Vec<PromotionEntry
                 ));
             }
         };
+        let remove_final = match fields.next() {
+            None | Some("0") => false,
+            Some("1") => true,
+            _ => {
+                return Err(invalid_package_path(
+                    "transaction journal has invalid removal state",
+                ));
+            }
+        };
         if fields.next().is_some() {
             return Err(invalid_package_path(
                 "transaction journal has too many fields",
@@ -374,6 +410,7 @@ fn read_transaction_journal(root: &Path) -> io::Result<Option<Vec<PromotionEntry
             final_relative: package_relative_path(final_text)?,
             backup_relative: package_relative_path(backup_text)?,
             had_previous,
+            remove_final,
             state,
         });
     }
@@ -447,7 +484,7 @@ pub(crate) fn promote_transaction(
                 transaction_root.join(&entry.backup_relative),
             )
         };
-        if !staged_path.is_file() {
+        if !entries[index].remove_final && !staged_path.is_file() {
             let error = io::Error::new(
                 ErrorKind::NotFound,
                 format!("staged package file is missing: {}", staged_path.display()),
@@ -455,7 +492,9 @@ pub(crate) fn promote_transaction(
             let _ = rollback_transaction(transaction_root, output_root, entries);
             return Err(error);
         }
-        if let Err(error) = ensure_package_parent(output_root, &entries[index].final_relative) {
+        if !entries[index].remove_final
+            && let Err(error) = ensure_package_parent(output_root, &entries[index].final_relative)
+        {
             let _ = rollback_transaction(transaction_root, output_root, entries);
             return Err(error);
         }
@@ -478,7 +517,9 @@ pub(crate) fn promote_transaction(
             return Err(error);
         }
 
-        if let Err(error) = std::fs::rename(&staged_path, &final_path) {
+        if !entries[index].remove_final
+            && let Err(error) = std::fs::rename(&staged_path, &final_path)
+        {
             let _ = rollback_transaction(transaction_root, output_root, entries);
             return Err(error);
         }
@@ -1140,7 +1181,12 @@ where
         ".xodus-streaming.msixvc".to_owned(),
     ));
     promotion_specs.extend(job_names.into_iter().map(|name| (name.clone(), name)));
-    let mut entries = match promotion_entries(&promotion_specs) {
+    let stale_sidecars = lfiles
+        .keys()
+        .filter(|name| !rfiles.contains_key(*name))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut entries = match promotion_entries_with_removals(&promotion_specs, &stale_sidecars) {
         Ok(entries) => entries,
         Err(err) => {
             eprintln!("failed to prepare package transaction journal: {err}");
@@ -1164,8 +1210,9 @@ mod tests {
     use std::io::Write;
 
     use super::{
-        PromotionState, SegmentFile, changed_jobs, new_transaction, open_package_input,
-        open_package_output, package_path_components, promote_transaction, promotion_entries,
+        PromotionState, SegmentFile, TRANSACTION_JOURNAL, changed_jobs, new_transaction,
+        open_package_input, open_package_output, package_path_components, promote_transaction,
+        promotion_entries, promotion_entries_with_removals, read_transaction_journal,
         recover_transaction_dir, write_transaction_journal,
     };
 
@@ -1345,5 +1392,60 @@ mod tests {
 
         assert_eq!(std::fs::read(final_path).unwrap(), b"old package");
         assert!(!transaction.path().exists());
+    }
+
+    #[test]
+    fn transaction_promotion_removes_stale_sidecars_and_rolls_back() {
+        let temporary = tempfile::tempdir().unwrap();
+        let output = temporary.path().join("output");
+        std::fs::create_dir(&output).unwrap();
+        std::fs::create_dir(output.join("content")).unwrap();
+        let stale = output.join("content/stale.bin");
+        std::fs::write(&stale, b"old sidecar").unwrap();
+
+        let (transaction, payload) = new_transaction(&output).unwrap();
+        std::fs::write(payload.join("new.bin"), b"new file").unwrap();
+        let specs = vec![("new.bin".to_owned(), "new.bin".to_owned())];
+        let removals = vec!["content/stale.bin".to_owned()];
+        let mut entries = promotion_entries_with_removals(&specs, &removals).unwrap();
+        promote_transaction(transaction.path(), &output, &mut entries).unwrap();
+
+        assert_eq!(std::fs::read(output.join("new.bin")).unwrap(), b"new file");
+        assert!(!stale.exists());
+
+        let (rollback_transaction, rollback_payload) = new_transaction(&output).unwrap();
+        std::fs::write(rollback_payload.join("new.bin"), b"replacement").unwrap();
+        let mut rollback_entries = promotion_entries_with_removals(&specs, &removals).unwrap();
+        rollback_entries[1].state = PromotionState::BackedUp;
+        rollback_entries[1].had_previous = true;
+        let backup = rollback_transaction
+            .path()
+            .join(".xodus-streaming-backup/content/stale.bin");
+        std::fs::create_dir_all(backup.parent().unwrap()).unwrap();
+        std::fs::write(&backup, b"restored sidecar").unwrap();
+        write_transaction_journal(rollback_transaction.path(), &rollback_entries, false).unwrap();
+        recover_transaction_dir(rollback_transaction.path(), &output).unwrap();
+
+        assert_eq!(std::fs::read(stale).unwrap(), b"restored sidecar");
+    }
+
+    #[test]
+    fn transaction_journal_reads_legacy_entries_without_removal_flag() {
+        let temporary = tempfile::tempdir().unwrap();
+        let output = temporary.path().join("output");
+        std::fs::create_dir(&output).unwrap();
+        let (transaction, _) = new_transaction(&output).unwrap();
+        let journal = transaction.path().join(TRANSACTION_JOURNAL);
+        std::fs::write(
+            journal,
+            "promoted\tnew.bin\tnew.bin\t.xodus-streaming-backup/new.bin\t0\n",
+        )
+        .unwrap();
+
+        let entries = read_transaction_journal(transaction.path())
+            .unwrap()
+            .expect("legacy journal must be recoverable");
+        assert_eq!(entries.len(), 1);
+        assert!(!entries[0].remove_final);
     }
 }
