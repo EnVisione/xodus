@@ -853,6 +853,10 @@ fn progress_style() -> ProgressStyle {
     .progress_chars("#>-")
 }
 
+fn checked_progress_length(position: u64, additional: u64) -> Option<u64> {
+    position.checked_add(additional)
+}
+
 async fn run_with_cancellation<Operation, Cancellation>(
     operation: Operation,
     cancellation: Cancellation,
@@ -1091,7 +1095,13 @@ where
                 }
                 ProgressEvent::UpdateRemaining { name, total } => {
                     total_progess.set_message(name);
-                    total_progess.set_length(total_progess.position() + total);
+                    let position = total_progess.position();
+                    let Some(length) = checked_progress_length(position, total) else {
+                        total_progess.set_message("Progress size exceeds supported range");
+                        total_progess.set_length(u64::MAX);
+                        continue;
+                    };
+                    total_progess.set_length(length);
                 }
                 ProgressEvent::UpdateStatus { name } => {
                     total_progess.set_message(name);
@@ -1496,13 +1506,19 @@ mod tests {
 
     use super::{
         PromotionState, SegmentFile, TRANSACTION_DIRECTORY_PREFIX, TRANSACTION_JOURNAL,
-        TRANSACTION_JOURNAL_TEMP, acquire_transaction_lock, changed_jobs, new_transaction,
-        open_package_input, open_package_output, package_path_components, promote_transaction,
-        promote_transaction_with_interruption, promotion_entries, promotion_entries_with_removals,
-        promotion_entry_capacity, read_bounded_transaction_journal, read_transaction_journal,
-        recover_transaction_dir, recover_transactions, rollback_transaction,
-        write_transaction_journal,
+        TRANSACTION_JOURNAL_TEMP, acquire_transaction_lock, changed_jobs, checked_progress_length,
+        new_transaction, open_package_input, open_package_output, package_path_components,
+        promote_transaction, promote_transaction_with_interruption, promotion_entries,
+        promotion_entries_with_removals, promotion_entry_capacity,
+        read_bounded_transaction_journal, read_transaction_journal, recover_transaction_dir,
+        recover_transactions, rollback_transaction, write_transaction_journal,
     };
+
+    #[test]
+    fn progress_length_rejects_overflow_without_wrapping() {
+        assert_eq!(checked_progress_length(4, 6), Some(10));
+        assert_eq!(checked_progress_length(u64::MAX, 1), None);
+    }
 
     #[tokio::test]
     async fn streaming_cancellation_drops_operation_before_promotion() {
