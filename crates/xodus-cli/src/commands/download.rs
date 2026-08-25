@@ -1,3 +1,4 @@
+use std::io;
 use std::process::ExitCode;
 
 use futures_util::StreamExt;
@@ -9,6 +10,16 @@ use xodus::models::packagespc::PackageFile;
 use xodus::tokens::TokenManager;
 
 use crate::package::{get_content_id, get_packages};
+
+fn package_download_url(
+    cdn_root_paths: &[String],
+    relative_url: &str,
+) -> Result<String, io::Error> {
+    let root = cdn_root_paths
+        .first()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "package has no CDN root"))?;
+    Ok(format!("{root}{relative_url}"))
+}
 
 pub async fn run(
     client: &reqwest::Client,
@@ -55,38 +66,71 @@ pub async fn run(
     };
     println!();
     for file in files {
-        let url = format!(
-            "{}{}",
-            file.cdn_root_paths.first().unwrap(),
-            file.relative_url
-        );
+        let url = match package_download_url(&file.cdn_root_paths, &file.relative_url) {
+            Ok(url) => url,
+            Err(error) => {
+                eprintln!(
+                    "could not construct package URL for {}: {error}",
+                    file.file_name
+                );
+                return ExitCode::FAILURE;
+            }
+        };
         if dry_run {
             println!("{}", url);
             continue;
         }
 
-        let progress_bar = ProgressBar::new(file.file_size as u64).with_style(
-            ProgressStyle::with_template("[{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}) ({eta})").unwrap()
-            .progress_chars("#>-")
-        );
+        let Ok(file_size) = u64::try_from(file.file_size) else {
+            eprintln!("package file {} has an invalid size", file.file_name);
+            return ExitCode::FAILURE;
+        };
+        let progress_style = ProgressStyle::with_template(
+            "[{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}) ({eta})",
+        )
+        .unwrap_or_else(|_| ProgressStyle::default_bar())
+        .progress_chars("#>-");
+        let progress_bar = ProgressBar::new(file_size).with_style(progress_style);
 
-        let res = client
+        let res = match client
             .get(url)
             .send()
             .await
-            .expect("Failed to request the download");
-        let mut file = tokio::fs::OpenOptions::new()
+            .and_then(reqwest::Response::error_for_status)
+        {
+            Ok(response) => response,
+            Err(error) => {
+                eprintln!("failed to request {}: {error}", file.file_name);
+                return ExitCode::FAILURE;
+            }
+        };
+        let mut output = match tokio::fs::OpenOptions::new()
             .create(true)
             .write(true)
             .truncate(true)
-            .open(file.file_name)
+            .open(&file.file_name)
             .await
-            .unwrap();
+        {
+            Ok(file) => file,
+            Err(error) => {
+                eprintln!("failed to create {}: {error}", file.file_name);
+                return ExitCode::FAILURE;
+            }
+        };
         let mut stream = res.bytes_stream();
 
         while let Some(chunk) = stream.next().await {
-            let chk = chunk.expect("Failed to stream file");
-            file.write_all(&chk).await.expect("Failed to write to file");
+            let chk = match chunk {
+                Ok(chunk) => chunk,
+                Err(error) => {
+                    eprintln!("failed to stream {}: {error}", file.file_name);
+                    return ExitCode::FAILURE;
+                }
+            };
+            if let Err(error) = output.write_all(&chk).await {
+                eprintln!("failed to write {}: {error}", file.file_name);
+                return ExitCode::FAILURE;
+            }
             progress_bar.inc(chk.len() as u64);
         }
 
@@ -96,4 +140,25 @@ pub async fn run(
     println!("ContentID: {content_id}");
 
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::package_download_url;
+
+    #[test]
+    fn package_download_url_rejects_missing_cdn_root() {
+        let error = package_download_url(&[], "/file.xvd")
+            .expect_err("a package without a CDN root must fail before HTTP");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn package_download_url_preserves_the_relative_url() {
+        let root = vec!["https://cdn.example/".to_owned()];
+        assert_eq!(
+            package_download_url(&root, "file.xvd").expect("valid package URL"),
+            "https://cdn.example/file.xvd"
+        );
+    }
 }

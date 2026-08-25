@@ -23,4 +23,6 @@ The shared binary parser now builds nested generic-array chunk references throug
 
 Xbox package authentication now propagates token, exchange, HTTP status, JSON, unsupported-response, empty-collection, and missing-user-claim failures as typed results. It no longer panics on a malformed or incomplete service response before package metadata access.
 
+The legacy package download command now rejects missing CDN roots and invalid sizes, checks HTTP status, and returns failure for output creation, stream, and write errors instead of reporting success after a partial operation or panicking on service data.
+
 MSIXVC parser hardening, complete integrity validation, atomic promotion, rollback policy, and transaction recovery remain Phase 2 work. The account backed Xbox Live development token test is not part of ordinary offline verification and currently requires an explicit bounded opt in.
