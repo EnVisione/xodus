@@ -189,8 +189,11 @@ async fn run(args: CliArgs) -> ExitCode {
             | SubCommand::InstallMsixvc2 { .. }
             | SubCommand::ApplyXsp { .. }
     );
-    if needs_device_credentials {
-        xodus::tokens::device::ensure_device_credentials(&client, &tokens).await;
+    if needs_device_credentials
+        && let Err(error) = xodus::tokens::device::ensure_device_credentials(&client, &tokens).await
+    {
+        eprintln!("Unable to establish device credentials: {error}");
+        return ExitCode::FAILURE;
     }
 
     let code = match args.command {

@@ -45,9 +45,9 @@ SOAP passport token conversion now returns typed failures for missing encrypted 
 
 Device and user token exchange now validates the stored binary secret before constructing the fixed-size signing state. Missing, undecodable, and non-4096-byte secrets return typed RST failures before signing or network activity. The service path also reports missing device state and unsupported or empty exchange responses instead of panicking or using a placeholder.
 
-Device credential provisioning now propagates request serialization, HTTP status, transport, response-body, and XML deserialization failures. Provisioning logs the typed failure and stops without persisting a partial device record.
+Device credential provisioning now propagates request serialization, HTTP status, transport, response-body, and XML deserialization failures. Provisioning stops without persisting a partial device record, and callers receive a failure instead of continuing with missing or corrupted credential state.
 
-The BCrypt RSA private-key parser now validates magic, component extents, prime factors, modular inversion, and RSA construction through typed errors. Malformed persisted key blocks are rejected before slicing or signing, and device reauthentication logs the failure without aborting the service.
+The BCrypt RSA private-key parser now validates magic, component extents, prime factors, modular inversion, and RSA construction through typed errors. Malformed persisted key blocks are rejected before slicing or signing, and device reauthentication returns the failure so the CLI and service cannot report or continue a false-success startup.
 
 SOAP key-info conversion now returns typed errors for missing key names or security-token references. Encrypted response handling validates reference prefixes and IV length, maps decryption and UTF 8 failures, and parses only the authenticated padded plaintext instead of indexing or unwrapping malformed data.
 
@@ -57,7 +57,7 @@ The service startup path now returns typed initialization, token, runtime-direct
 
 The login command now reports missing or wrong device token state, webview startup errors, unsupported response bodies, and user persistence failures through explicit exit paths. Native webview creation also validates the GTK container and propagates builder errors for Wayland and XWayland sessions.
 
-The CLI startup now reports HTTP client and credential-store initialization failures through a nonzero exit code instead of panicking before command dispatch. It does not enable reqwest connection-verbose logging, so authorization headers and response bodies are not emitted through transport tracing.
+The CLI startup now reports HTTP client, credential-store, and device-credential setup failures through a nonzero exit code instead of dispatching a command after failed initialization or panicking. It does not enable reqwest connection-verbose logging, so authorization headers and response bodies are not emitted through transport tracing.
 
 Linux SMBIOS probing now validates the raw header length, UUID extent, string-table bounds, and version or serial indexes. Malformed firmware data falls back to the existing component error markers instead of panicking during device provisioning.
 

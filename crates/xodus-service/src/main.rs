@@ -82,7 +82,9 @@ fn validate_runtime_dir(path: &Path) -> Result<std::fs::Metadata, ServiceError> 
 async fn main() -> Result<(), ServiceError> {
     xodus::secrets::init_secrets().map_err(|error| ServiceError::Secrets(error.to_string()))?;
     let tokens = Arc::new(TokenManager::with_keychain_and_memory());
-    xodus::tokens::device::ensure_device_credentials(&reqwest::Client::new(), &tokens).await;
+    xodus::tokens::device::ensure_device_credentials(&reqwest::Client::new(), &tokens)
+        .await
+        .map_err(|error| ServiceError::DeviceToken(error.to_string()))?;
     let device_token = tokens
         .get_device_sts_token()
         .map_err(|error| ServiceError::DeviceToken(error.to_string()))?;
