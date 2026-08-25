@@ -27,6 +27,8 @@ SOAP passport token conversion now returns typed failures for missing encrypted 
 
 Device and user token exchange now validates the stored binary secret before constructing the fixed-size signing state. Missing, undecodable, and non-4096-byte secrets return typed RST failures before signing or network activity. The service path also reports missing device state and unsupported or empty exchange responses instead of panicking or using a placeholder.
 
+Device credential provisioning now propagates request serialization, HTTP status, transport, response-body, and XML deserialization failures. Provisioning logs the typed failure and stops without persisting a partial device record.
+
 The legacy package download command now rejects missing CDN roots and invalid sizes, checks HTTP status, and returns failure for output creation, stream, and write errors instead of reporting success after a partial operation or panicking on service data.
 
 MSIXVC parser hardening, complete integrity validation, atomic promotion, rollback policy, and transaction recovery remain Phase 2 work. The account backed Xbox Live development token test is not part of ordinary offline verification and currently requires an explicit bounded opt in.

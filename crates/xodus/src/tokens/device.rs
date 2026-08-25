@@ -31,9 +31,13 @@ async fn provision_device(client: &reqwest::Client, tokens: &TokenManager) {
         }),
     };
 
-    let dev = crate::api::live::login_device_credential(client, provision)
-        .await
-        .expect("Failed to get device creds");
+    let dev = match crate::api::live::login_device_credential(client, provision).await {
+        Ok(device) => device,
+        Err(error) => {
+            log::error!("failed to get device credentials: {error}");
+            return;
+        }
+    };
 
     let device = Device {
         username: username.clone(),
@@ -44,9 +48,10 @@ async fn provision_device(client: &reqwest::Client, tokens: &TokenManager) {
         splicense: dev.license.splicense_block,
     };
 
-    tokens
-        .save_device_license(&device)
-        .expect("Failed to save device license");
+    if let Err(error) = tokens.save_device_license(&device) {
+        log::error!("failed to save device license: {error}");
+        return;
+    }
 
     reauthenticate_device(client, tokens, device).await;
 }

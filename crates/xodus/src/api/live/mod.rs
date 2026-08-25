@@ -12,6 +12,16 @@ mod utils;
 
 pub const XML_HEADER: &str = r#"<?xml version="1.0" encoding="UTF-8"?>"#;
 
+#[derive(Debug, thiserror::Error)]
+pub enum DeviceCredentialError {
+    #[error("device credential request failed: {0}")]
+    Request(#[from] reqwest::Error),
+    #[error("device credential request serialization failed: {0}")]
+    Serialization(#[from] quick_xml::SeError),
+    #[error("device credential response deserialization failed: {0}")]
+    Deserialization(#[from] quick_xml::DeError),
+}
+
 fn decode_binary_secret(token: &LegacyToken) -> Result<[u8; 4096], rst::RSTError> {
     let encoded = token
         .binary_secret
@@ -27,8 +37,8 @@ fn decode_binary_secret(token: &LegacyToken) -> Result<[u8; 4096], rst::RSTError
 pub async fn login_device_credential(
     client: &reqwest::Client,
     data: DeviceAddRequest,
-) -> reqwest::Result<DeviceAddResponse> {
-    let data = quick_xml::se::to_string(&data).unwrap();
+) -> Result<DeviceAddResponse, DeviceCredentialError> {
+    let data = quick_xml::se::to_string(&data)?;
 
     let response = client
         .post("https://login.live.com/ppsecure/deviceaddcredential.srf")
@@ -38,9 +48,8 @@ pub async fn login_device_credential(
         .body(data)
         .send()
         .await?;
-    let text = response.text().await?;
-    let resp: DeviceAddResponse = quick_xml::de::from_str(&text).expect("Failed to de xml");
-    Ok(resp)
+    let text = response.error_for_status()?.text().await?;
+    Ok(quick_xml::de::from_str(&text)?)
 }
 
 pub async fn authenticate_device(
