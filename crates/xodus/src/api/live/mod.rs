@@ -12,6 +12,18 @@ mod utils;
 
 pub const XML_HEADER: &str = r#"<?xml version="1.0" encoding="UTF-8"?>"#;
 
+fn decode_binary_secret(token: &LegacyToken) -> Result<[u8; 4096], rst::RSTError> {
+    let encoded = token
+        .binary_secret
+        .as_deref()
+        .ok_or(rst::RSTError::MissingBinarySecret)?;
+    let decoded = BASE64_STANDARD.decode(encoded)?;
+    let length = decoded.len();
+    decoded
+        .try_into()
+        .map_err(|_| rst::RSTError::InvalidBinarySecretLength(length))
+}
+
 pub async fn login_device_credential(
     client: &reqwest::Client,
     data: DeviceAddRequest,
@@ -52,8 +64,7 @@ pub async fn exchange_device_token(
     scope: String,
     policy: Option<soap::PolicyReference>,
 ) -> Result<soap::RequestSecurityTokenResponse, rst::RSTError> {
-    let secret = BASE64_STANDARD.decode(token.binary_secret.as_ref().unwrap())?;
-    let secret: [u8; 4096] = secret.try_into().unwrap();
+    let secret = decode_binary_secret(&token)?;
     let secret: ClepHmacState = transmute!(secret);
     let hmac_secret = secret.get_hmac_state();
 
@@ -94,8 +105,7 @@ pub async fn exchange_user_token(
     hosting_app: String,
     scope_policies: &[(String, Option<soap::PolicyReference>)],
 ) -> Result<ExchangeUserTokenOutcome, rst::RSTError> {
-    let secret = BASE64_STANDARD.decode(device_token.binary_secret.as_ref().unwrap())?;
-    let secret: [u8; 4096] = secret.try_into().unwrap();
+    let secret = decode_binary_secret(&device_token)?;
     let secret: ClepHmacState = transmute!(secret);
     let hmac_secret = secret.get_hmac_state();
 
@@ -132,11 +142,45 @@ pub async fn exchange_user_token(
 
 #[cfg(test)]
 mod test {
+    use base64::prelude::*;
+
     use crate::api::live::exchange_device_token;
-    use crate::models::secrets::Token;
+    use crate::models::secrets::{LegacyToken, Token};
     use crate::models::soap;
     use crate::tokens::TokenManager;
     use crate::tokens::device::ensure_device_credentials;
+
+    fn legacy_token(binary_secret: Option<&str>) -> LegacyToken {
+        LegacyToken {
+            key_name: None,
+            token: String::new(),
+            binary_secret: binary_secret.map(str::to_string),
+            tpm_key: None,
+            lifetime: soap::Timestamp {
+                id: None,
+                created: String::new(),
+                expires: String::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn binary_secret_requires_a_value() {
+        let error = super::decode_binary_secret(&legacy_token(None))
+            .expect_err("missing binary secret must fail");
+        assert!(matches!(error, super::rst::RSTError::MissingBinarySecret));
+    }
+
+    #[test]
+    fn binary_secret_rejects_wrong_decoded_length() {
+        let encoded = BASE64_STANDARD.encode([0_u8; 1]);
+        let error = super::decode_binary_secret(&legacy_token(Some(&encoded)))
+            .expect_err("short binary secret must fail");
+        assert!(matches!(
+            error,
+            super::rst::RSTError::InvalidBinarySecretLength(1)
+        ));
+    }
 
     #[tokio::test]
     async fn test_get_xbox_live_dev_token() {

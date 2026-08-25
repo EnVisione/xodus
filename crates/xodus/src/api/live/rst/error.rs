@@ -23,6 +23,10 @@ pub enum RSTError {
     EmptyTokenCollection,
     #[error("Unsupported token response body")]
     UnsupportedTokenResponse,
+    #[error("Token is missing its binary secret")]
+    MissingBinarySecret,
+    #[error("Token binary secret has invalid decoded length {0}, expected 4096 bytes")]
+    InvalidBinarySecretLength(usize),
 }
 
 #[derive(thiserror::Error, Debug)]
