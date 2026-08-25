@@ -191,6 +191,7 @@ mod test {
         ));
     }
 
+    #[ignore = "requires authorized Xbox service access and keychain state"]
     #[tokio::test]
     async fn test_get_xbox_live_dev_token() {
         let client = reqwest::Client::new();
@@ -198,9 +199,11 @@ mod test {
         let mgr = TokenManager::with_memory();
         ensure_device_credentials(&client, &mgr).await;
 
-        let token: Token = mgr.get_device_sts_token().unwrap();
+        let token: Token = mgr
+            .get_device_sts_token()
+            .expect("device token must be available after provisioning");
         let Token::Legacy(token) = token else {
-            todo!("no a LegacyToken");
+            panic!("device token must use the legacy token format");
         };
         let resp = exchange_device_token(
             &client,
@@ -210,13 +213,18 @@ mod test {
             Some(soap::PolicyReference::token_broker()),
         )
         .await
-        .unwrap();
+        .expect("device token exchange must succeed");
 
-        let ms_device_token: Token = resp.try_into().unwrap();
+        let ms_device_token: Token = resp
+            .try_into()
+            .expect("device response must convert to a token");
         let Token::Compact(ms_device_token) = ms_device_token else {
-            todo!("Unsupported token");
+            panic!("device response must use the compact token format");
         };
 
-        println!("{}", ms_device_token);
+        assert!(
+            !ms_device_token.is_empty(),
+            "device token must not be empty"
+        );
     }
 }
