@@ -3030,7 +3030,10 @@ mod tests {
     };
 
     use sha2::{Digest, Sha256};
-    use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf};
+    use tokio::{
+        io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf},
+        net::TcpListener,
+    };
 
     use crate::streaming_ntfs::{NtfsDataRunReport, NtfsStreamLayoutReport};
 
@@ -3194,6 +3197,73 @@ mod tests {
         assert!(writer.0.is_empty());
     }
 
+    #[tokio::test]
+    async fn download_file_http_verifies_page_hash_before_promotion() {
+        let xvd = XvdFile::parse(SyntheticXvdReader::synthetic_xvd_with_region_count(0))
+            .await
+            .expect("synthetic XVD must parse");
+        let body = [9_u8; PAGE_SIZE];
+        let digest = Sha256::digest(body);
+        let mut page_hash = [0_u8; 20];
+        page_hash.copy_from_slice(&digest[..20]);
+        let (url, server) = spawn_download_server(body.to_vec()).await;
+        let mut writer = RecordingAsyncWriter(Vec::new());
+        let file = SegmentFile {
+            offset: 0,
+            length: 1,
+            data_hashs: vec![page_hash],
+            keep_encrypted: false,
+        };
+
+        xvd.download_file_http(
+            &reqwest::Client::new(),
+            &url,
+            &mut writer,
+            &file,
+            [0_u8; 32],
+            |_, _| {},
+        )
+        .await
+        .expect("a valid ranged response must promote verified output");
+        server.await.expect("download test server must finish");
+
+        assert_eq!(writer.0, vec![9]);
+    }
+
+    #[tokio::test]
+    async fn download_file_http_rejects_page_hash_mismatch_before_output() {
+        let xvd = XvdFile::parse(SyntheticXvdReader::synthetic_xvd_with_region_count(0))
+            .await
+            .expect("synthetic XVD must parse");
+        let (url, server) = spawn_download_server(vec![3_u8; PAGE_SIZE]).await;
+        let mut writer = RecordingAsyncWriter(Vec::new());
+        let file = SegmentFile {
+            offset: 0,
+            length: 1,
+            data_hashs: vec![[0_u8; 20]],
+            keep_encrypted: false,
+        };
+
+        let error = xvd
+            .download_file_http(
+                &reqwest::Client::new(),
+                &url,
+                &mut writer,
+                &file,
+                [0_u8; 32],
+                |_, _| {},
+            )
+            .await
+            .expect_err("a page hash mismatch must fail before promotion");
+        server.await.expect("download test server must finish");
+
+        assert!(matches!(
+            error,
+            DownloadFileHttpError::DataHashMismatch { page_index: 0 }
+        ));
+        assert!(writer.0.is_empty());
+    }
+
     #[test]
     fn output_retry_policy_rejects_permanent_errors() {
         assert!(is_retryable_output_error(&Error::other("temporary")));
@@ -3311,6 +3381,57 @@ mod tests {
         fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
             Poll::Ready(Ok(()))
         }
+    }
+
+    async fn spawn_download_server(body: Vec<u8>) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("download test server must bind");
+        let address = listener
+            .local_addr()
+            .expect("download test server address must be available");
+        let total = body.len() as u64;
+        let handle = tokio::spawn(async move {
+            let (mut stream, _) = listener
+                .accept()
+                .await
+                .expect("download test server must accept");
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            loop {
+                let read = tokio::io::AsyncReadExt::read(&mut stream, &mut buffer)
+                    .await
+                    .expect("download test request must read");
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let request = String::from_utf8_lossy(&request);
+            assert!(
+                request
+                    .lines()
+                    .any(|line| line.eq_ignore_ascii_case("range: bytes=0-4095")),
+                "download request must carry the expected page range"
+            );
+            let headers = format!(
+                "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-{}/{}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                total - 1,
+                total,
+                total
+            );
+            tokio::io::AsyncWriteExt::write_all(&mut stream, headers.as_bytes())
+                .await
+                .expect("download test response headers must write");
+            tokio::io::AsyncWriteExt::write_all(&mut stream, &body)
+                .await
+                .expect("download test response body must write");
+        });
+
+        (format!("http://{address}/file"), handle)
     }
 
     struct SyntheticXvdReader {
