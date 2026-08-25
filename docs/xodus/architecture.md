@@ -53,7 +53,7 @@ SOAP key-info conversion now returns typed errors for missing key names or secur
 
 Shared-key derivation now rejects empty secrets, unsupported output lengths, and checked length arithmetic failures through typed errors. HMAC signing and encrypted response handling propagate those failures without indexing or unwrapping invalid key material.
 
-The service startup path now returns typed initialization, token, runtime-directory, socket, permission, accept, and cleanup failures. Per-connection request-client construction also reports errors and closes the connection without a process panic. The CLI wraps command execution in an outer teardown boundary so the configured secret store is unset on both successful and early-failure paths.
+The service startup path now returns typed initialization, token, runtime-directory, socket, permission, accept, and cleanup failures. Its outer execution boundary unsets the configured secret store on both clean shutdown and startup failure. Per-connection request-client construction also reports errors and closes the connection without a process panic. The CLI wraps command execution in the same teardown boundary so the configured secret store is unset on both successful and early-failure paths.
 
 The login command now reports missing or wrong device token state, webview startup errors, unsupported response bodies, empty or cancelled token responses, exchange faults without inline authentication, and user persistence failures through explicit exit paths. Native webview creation also validates the GTK container and propagates builder errors for Wayland and XWayland sessions.
 

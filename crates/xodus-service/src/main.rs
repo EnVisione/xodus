@@ -80,6 +80,12 @@ fn validate_runtime_dir(path: &Path) -> Result<std::fs::Metadata, ServiceError> 
 
 #[tokio::main]
 async fn main() -> Result<(), ServiceError> {
+    let result = run_service().await;
+    xodus::secrets::destroy_secrets();
+    result
+}
+
+async fn run_service() -> Result<(), ServiceError> {
     xodus::secrets::init_secrets().map_err(|error| ServiceError::Secrets(error.to_string()))?;
     let tokens = Arc::new(TokenManager::with_keychain_and_memory());
     xodus::tokens::device::ensure_device_credentials(&reqwest::Client::new(), &tokens)
