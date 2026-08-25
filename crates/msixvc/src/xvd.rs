@@ -273,24 +273,72 @@ fn xvd_stream_absolute_seek_target(offset: u64, relative: u64) -> io::Result<u64
 impl<R: Seek> XvdStream<R> {
     fn current_relative_pos(&mut self) -> std::io::Result<u64> {
         let absolute = self.inner.stream_position()?;
-        absolute
+        let relative = absolute
             .checked_sub(self.offset)
-            .ok_or_else(|| Error::new(ErrorKind::InvalidData, "stream before virtual start"))
+            .ok_or_else(|| Error::new(ErrorKind::InvalidData, "stream before virtual start"))?;
+
+        if relative > self.len() {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "stream beyond virtual end",
+            ));
+        }
+
+        Ok(relative)
     }
 }
 
 impl<R: Read + Seek> Read for XvdStream<R> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let current = self.current_relative_pos()?;
-        if current >= self.len() {
+        if current == self.len() || buf.is_empty() {
             return Ok(0);
         }
 
-        let remaining = usize::try_from(self.len() - current)
-            .map_err(|_| Error::new(ErrorKind::InvalidData, "remaining range too large"))?;
+        let remaining = usize::try_from(
+            self.len()
+                .checked_sub(current)
+                .ok_or_else(|| Error::new(ErrorKind::InvalidData, "stream beyond virtual end"))?,
+        )
+        .map_err(|_| Error::new(ErrorKind::InvalidData, "remaining range too large"))?;
         let to_read = remaining.min(buf.len());
 
-        self.inner.read(&mut buf[..to_read])
+        let read = self.inner.read(&mut buf[..to_read])?;
+        if read > to_read {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "inner stream returned more bytes than requested",
+            ));
+        }
+
+        let expected_relative = current
+            .checked_add(u64::try_from(read).map_err(|_| {
+                Error::new(
+                    ErrorKind::InvalidData,
+                    "returned byte count does not fit u64",
+                )
+            })?)
+            .ok_or_else(|| Error::new(ErrorKind::InvalidData, "stream read position overflow"))?;
+        if expected_relative > self.len() {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "stream read position beyond virtual end",
+            ));
+        }
+
+        let expected_absolute = self
+            .offset
+            .checked_add(expected_relative)
+            .ok_or_else(|| Error::new(ErrorKind::InvalidData, "stream read position overflow"))?;
+        let observed_absolute = self.inner.stream_position()?;
+        if observed_absolute != expected_absolute || observed_absolute > self.end_offset {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "inner stream position drifted during read",
+            ));
+        }
+
+        Ok(read)
     }
 }
 
@@ -2614,6 +2662,8 @@ mod tests {
 
     struct OverReportingIo;
 
+    struct DriftingIo(Cursor<Vec<u8>>);
+
     impl Read for OverReportingIo {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
             Ok(buf.len() + 1)
@@ -2623,6 +2673,22 @@ mod tests {
     impl Seek for OverReportingIo {
         fn seek(&mut self, _pos: std::io::SeekFrom) -> std::io::Result<u64> {
             Ok(0)
+        }
+    }
+
+    impl Read for DriftingIo {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let read = self.0.read(buf)?;
+            if read > 0 {
+                self.0.seek(std::io::SeekFrom::Current(1))?;
+            }
+            Ok(read)
+        }
+    }
+
+    impl Seek for DriftingIo {
+        fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+            self.0.seek(pos)
         }
     }
 
@@ -3602,6 +3668,84 @@ mod tests {
         assert_eq!(stream.seek(std::io::SeekFrom::Current(2)).unwrap(), 2);
         assert_eq!(stream.seek(std::io::SeekFrom::End(-1)).unwrap(), 3);
         assert_eq!(stream.into_inner().position(), 103);
+    }
+
+    #[test]
+    fn xvd_stream_rejects_overreported_read_count() {
+        let mut stream = XvdStream::new(OverReportingIo, 0, 1, None)
+            .expect("valid XVD stream extent must construct");
+        let mut buf = [0; 1];
+
+        let error = stream
+            .read(&mut buf)
+            .expect_err("overreported XVD stream read must fail");
+
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn xvd_stream_rejects_read_position_before_virtual_start() {
+        let mut stream = XvdStream::new(Cursor::new(vec![0; 2]), 1, 2, None)
+            .expect("valid XVD stream extent must construct");
+        let mut buf = [0; 1];
+
+        let error = stream
+            .read(&mut buf)
+            .expect_err("XVD stream before virtual start must fail");
+
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn xvd_stream_rejects_read_position_beyond_virtual_end() {
+        let mut inner = Cursor::new(vec![0; 2]);
+        inner.set_position(2);
+        let mut stream =
+            XvdStream::new(inner, 0, 1, None).expect("valid XVD stream extent must construct");
+        let mut buf = [0; 1];
+
+        let error = stream
+            .read(&mut buf)
+            .expect_err("XVD stream beyond virtual end must fail");
+
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn xvd_stream_rejects_read_position_drift() {
+        let mut stream = XvdStream::new(DriftingIo(Cursor::new(vec![1, 2, 3])), 0, 3, None)
+            .expect("valid XVD stream extent must construct");
+        let mut buf = [0; 1];
+
+        let error = stream
+            .read(&mut buf)
+            .expect_err("XVD stream read position drift must fail");
+
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn xvd_stream_preserves_valid_partial_read() {
+        let mut stream = XvdStream::new(Cursor::new(vec![1, 2, 3]), 0, 3, None)
+            .expect("valid XVD stream extent must construct");
+        let mut buf = [0; 2];
+
+        assert_eq!(stream.read(&mut buf).unwrap(), 2);
+        assert_eq!(buf, [1, 2]);
+        assert_eq!(stream.into_inner().position(), 2);
+    }
+
+    #[test]
+    fn xvd_stream_preserves_valid_exact_end_read() {
+        let mut stream = XvdStream::new(Cursor::new(vec![1, 2]), 0, 2, None)
+            .expect("valid XVD stream extent must construct");
+        let mut exact = [0; 2];
+        let mut trailing = [0; 1];
+
+        assert_eq!(stream.read(&mut exact).unwrap(), 2);
+        assert_eq!(exact, [1, 2]);
+        assert_eq!(stream.read(&mut trailing).unwrap(), 0);
+        assert_eq!(stream.into_inner().position(), 2);
     }
 
     #[test]
