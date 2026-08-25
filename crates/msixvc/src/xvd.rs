@@ -176,6 +176,7 @@ struct XvdStream<R> {
     inner: R,
     offset: u64,
     end_offset: u64,
+    len: u64,
 
     encryption_info: Option<XvdEncryptionInfo>,
 }
@@ -191,13 +192,45 @@ impl<R> Debug for XvdStream<R> {
 }
 
 impl<R> XvdStream<R> {
+    fn new(
+        inner: R,
+        offset: u64,
+        end_offset: u64,
+        encryption_info: Option<XvdEncryptionInfo>,
+    ) -> Result<Self, NtfsSegmentMetadataParseError> {
+        let len = xvd_stream_virtual_length(offset, end_offset)?;
+
+        Ok(Self {
+            inner,
+            offset,
+            end_offset,
+            len,
+            encryption_info,
+        })
+    }
+
     fn len(&self) -> u64 {
-        self.end_offset - self.offset
+        self.len
     }
 
     fn into_inner(self) -> R {
         self.inner
     }
+}
+
+fn xvd_stream_virtual_length(
+    offset: u64,
+    end_offset: u64,
+) -> Result<u64, NtfsSegmentMetadataParseError> {
+    end_offset
+        .checked_sub(offset)
+        .ok_or(NtfsSegmentMetadataParseError::XvdStreamEndBeforeOffset { offset, end_offset })
+}
+
+fn xvd_stream_absolute_seek_target(offset: u64, relative: u64) -> io::Result<u64> {
+    offset
+        .checked_add(relative)
+        .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "absolute seek target overflow"))
 }
 
 impl<R: Seek> XvdStream<R> {
@@ -255,8 +288,8 @@ impl<R: Seek> Seek for XvdStream<R> {
             ));
         }
 
-        self.inner
-            .seek(SeekFrom::Start(self.offset + new_relative))?;
+        let absolute_target = xvd_stream_absolute_seek_target(self.offset, new_relative)?;
+        self.inner.seek(SeekFrom::Start(absolute_target))?;
         Ok(new_relative)
     }
 }
@@ -538,6 +571,8 @@ pub enum NtfsSegmentMetadataParseError {
         range_start: u64,
         section_offset: u64,
     },
+    #[error("XVD stream end {end_offset} is before virtual offset {offset}")]
+    XvdStreamEndBeforeOffset { offset: u64, end_offset: u64 },
     #[error("declared drive end overflows for offset {drive_data_offset} and size {drive_size}")]
     DriveEndOverflow {
         drive_data_offset: u64,
@@ -2130,12 +2165,12 @@ impl XvdFile {
         block_in_place(|| {
             let block_size = 4096;
             let drive = SyncSubstream::new(
-                XvdStream {
-                    inner: SyncIoBridge::new(file),
-                    offset: drive_data_offset,
-                    end_offset: drive_extents.plain_end,
-                    encryption_info: None,
-                },
+                XvdStream::new(
+                    SyncIoBridge::new(file),
+                    drive_data_offset,
+                    drive_extents.plain_end,
+                    None,
+                )?,
                 0,
                 drive_plain_len,
             );
@@ -2179,12 +2214,7 @@ impl XvdFile {
                 partition_plain_len,
             )?;
             let mut fs = SyncSubstream::new(
-                XvdStream {
-                    inner: bridge,
-                    offset: partition.offset,
-                    end_offset: partition.plain_end,
-                    encryption_info: None,
-                },
+                XvdStream::new(bridge, partition.offset, partition.plain_end, None)?,
                 0,
                 partition_plain_len,
             );
@@ -2502,7 +2532,7 @@ mod tests {
         DownloadFileHttpError, EncryptedSectionInfo, ExtractFileError, MAX_XVC_REGION_HEADERS,
         NtfsSegmentMetadataParseError, PAGE_SIZE, PopulateSegmentHashesError,
         SEGMENT_METADATA_READER_CAPACITY, SegmentFile, SegmentMetadataParseError, UserPackageFile,
-        UserPackageFilesParseError, XvcRegionId, XvdFile, XvdFileParseError,
+        UserPackageFilesParseError, XvcRegionId, XvdFile, XvdFileParseError, XvdStream,
         collect_ntfs_segment_files, download_encrypted_section, download_file_end,
         download_page_plan, download_request_range, extract_data_unit_index,
         extract_encrypted_section, extract_file_end, extract_page_loop_end, extract_page_plan,
@@ -2511,7 +2541,7 @@ mod tests {
         ntfs_partition_extents, package_file_name, required_gpt_partition_length,
         required_gpt_partition_start, reserve_xvc_region_entries, segment_file_name,
         segment_metadata_reader_capacity, validate_segment_metadata_table_extent,
-        validate_xvc_region_hash_entry_addresses,
+        validate_xvc_region_hash_entry_addresses, xvd_stream_absolute_seek_target,
     };
 
     const XVD_HEADER_SIZE: usize = 4096;
@@ -3473,6 +3503,41 @@ mod tests {
             .expect("valid section hashes must populate");
 
         assert_eq!(files["valid-hash"].data_hashs, vec![[7; 20]]);
+    }
+
+    #[test]
+    fn xvd_stream_rejects_reversed_virtual_extent_before_inner_io() {
+        let error = match XvdStream::new(Cursor::new(Vec::<u8>::new()), 10, 9, None) {
+            Ok(_) => panic!("reversed XVD stream extent must fail before inner I/O"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            NtfsSegmentMetadataParseError::XvdStreamEndBeforeOffset {
+                offset: 10,
+                end_offset: 9,
+            }
+        ));
+    }
+
+    #[test]
+    fn xvd_stream_rejects_absolute_seek_target_overflow_before_inner_seek() {
+        let error = xvd_stream_absolute_seek_target(u64::MAX, 1)
+            .expect_err("overflowing absolute XVD seek target must fail before inner seek");
+
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn xvd_stream_preserves_valid_bounded_start_current_and_end_relative_seeks() {
+        let mut stream = XvdStream::new(Cursor::new(vec![0; 4]), 100, 104, None)
+            .expect("valid XVD stream extent must construct");
+
+        assert_eq!(stream.seek(std::io::SeekFrom::Start(0)).unwrap(), 0);
+        assert_eq!(stream.seek(std::io::SeekFrom::Current(2)).unwrap(), 2);
+        assert_eq!(stream.seek(std::io::SeekFrom::End(-1)).unwrap(), 3);
+        assert_eq!(stream.into_inner().position(), 103);
     }
 
     #[test]
