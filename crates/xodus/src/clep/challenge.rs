@@ -230,6 +230,9 @@ impl Cipher {
 ///
 /// Operates in a CBC-like mode on 8-byte blocks over the 2044-byte data region
 /// (skipping the 4-byte version header)
+/// The array reshapes below are isolated here because both packed CLEP layouts
+/// are exactly 2048 bytes with byte alignment. The size and alignment contract
+/// is asserted by tests and the round trip test verifies the byte layout.
 pub fn clep_obfuscate(buffer: &mut [u8; 2048]) {
     // --- IV setup: XOR state with first data word, write back ---
     let blocks: &mut [[u8; 8]; 256] = transmute_mut!(buffer);
@@ -266,9 +269,21 @@ pub fn clep_deobfuscate(buffer: &mut [u8; 2048]) {
 
 #[cfg(test)]
 mod tests {
+    use std::mem::{align_of, size_of};
+
     use base64::prelude::*;
 
     use super::*;
+
+    #[test]
+    fn clep_layouts_match_the_2048_byte_reshape() {
+        assert_eq!(size_of::<ClepV2>(), 2048);
+        assert_eq!(size_of::<ClepV4>(), 2048);
+        assert_eq!(align_of::<ClepV2>(), 1);
+        assert_eq!(align_of::<ClepV4>(), 1);
+        assert_eq!(size_of::<[u8; 2048]>(), 2048);
+        assert_eq!(align_of::<[u8; 2048]>(), 1);
+    }
 
     #[test]
     fn test_obfuscation() {
