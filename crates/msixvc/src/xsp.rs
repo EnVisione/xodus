@@ -1017,12 +1017,19 @@ mod tests {
         let mut xsp = parse(ROLLBACK_XSP)
             .await
             .expect("valid synthetic rollback fixture");
-        xsp.entries = vec![XspPatchRecord::NewData {
-            block_number: 0,
-            block_count: 1,
-        }];
+        xsp.entries = vec![
+            XspPatchRecord::NewData {
+                block_number: 0,
+                block_count: 1,
+            },
+            XspPatchRecord::CopyData {
+                old_block_number: 1,
+                new_block_number: 1,
+                block_count: 1,
+            },
+        ];
         let base_hashes = [hash20(b"new!"), hash20(b"base")];
-        let target_hashes = [hash20(b"base")];
+        let target_hashes = [hash20(b"base"), hash20(b"base")];
         let base = XspBaseState {
             content_id: xsp.header.content_id,
             version: xsp.header.upgrade_from_version,
@@ -1048,7 +1055,7 @@ mod tests {
         .await
         .expect("valid stream rollback should apply");
 
-        assert_eq!(output.0, b"base");
+        assert_eq!(output.0, b"basebase");
     }
 
     #[tokio::test]
