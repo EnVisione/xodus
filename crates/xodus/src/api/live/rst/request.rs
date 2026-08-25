@@ -5,6 +5,12 @@ use base64::prelude::*;
 use crate::api::live::utils;
 use crate::models::soap;
 
+fn referenced_token_id(uri: &str) -> Result<&str, super::RSTError> {
+    uri.strip_prefix('#')
+        .filter(|id| !id.is_empty())
+        .ok_or(super::RSTError::InvalidSecurityTokenReference)
+}
+
 pub struct RSTRequest<'a> {
     pub signed_xml: String,
     pub signature: Option<super::RSTSignature<'a>>,
@@ -54,8 +60,8 @@ fn verify_and_decrypt_envelope<'a>(
     if let Some(security_signature) = &envelope.header.security.signature
         && let Some(key_info) = &security_signature.key_info
     {
-        let id = &key_info.security_token_reference.reference.uri;
-        let nonce = nonces.get(&id[1..]).ok_or(super::RSTError::MissingNonce)?;
+        let id = referenced_token_id(&key_info.security_token_reference.reference.uri)?;
+        let nonce = nonces.get(id).ok_or(super::RSTError::MissingNonce)?;
         let nonce = BASE64_STANDARD.decode(nonce)?;
         let key = signature.signing_key(&nonce)?;
         let mut kmgr = bergshamra::KeysManager::new();
@@ -88,4 +94,17 @@ fn verify_and_decrypt_envelope<'a>(
     }
 
     Ok(envelope)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::referenced_token_id;
+
+    #[test]
+    fn referenced_token_id_requires_nonempty_fragment_uri() {
+        assert_eq!(referenced_token_id("#token").unwrap(), "token");
+        assert!(referenced_token_id("").is_err());
+        assert!(referenced_token_id("#").is_err());
+        assert!(referenced_token_id("token").is_err());
+    }
 }
