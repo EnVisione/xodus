@@ -45,13 +45,19 @@ fn retryable_download_error(error: io::Error) -> DownloadAttemptError {
     }
 }
 
+fn is_retryable_package_download_status(status: reqwest::StatusCode) -> bool {
+    matches!(
+        status,
+        reqwest::StatusCode::REQUEST_TIMEOUT
+            | reqwest::StatusCode::TOO_EARLY
+            | reqwest::StatusCode::TOO_MANY_REQUESTS
+    ) || status.is_server_error()
+}
+
 fn request_download_error(error: reqwest::Error) -> DownloadAttemptError {
-    let retryable = match error.status() {
-        Some(status) => {
-            status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS
-        }
-        None => true,
-    };
+    let retryable = error
+        .status()
+        .is_none_or(is_retryable_package_download_status);
     DownloadAttemptError {
         error: io::Error::other(error),
         retryable,
@@ -421,7 +427,8 @@ mod tests {
     use super::{
         DOWNLOAD_RETRY_LIMIT, DownloadAttemptRequest, MAX_FILE_HASH_BASE64_CHARS,
         checked_download_total, consume_download_retry, decode_file_hash, download_file_attempt,
-        download_file_attempt_with_hook, validate_declared_download_length, validate_file_hash,
+        download_file_attempt_with_hook, is_retryable_package_download_status,
+        validate_declared_download_length, validate_file_hash,
     };
     use crate::commands::streaming::recover_transactions;
     use crate::package::package_download_urls;
@@ -497,6 +504,88 @@ mod tests {
             consume_download_retry(&mut remaining).expect("retry must consume budget");
         }
         assert!(consume_download_retry(&mut remaining).is_err());
+    }
+
+    #[test]
+    fn package_download_retry_status_policy_is_bounded() {
+        for status in [408, 425, 429, 500, 503, 599] {
+            let status = reqwest::StatusCode::from_u16(status).expect("status is valid");
+            assert!(
+                is_retryable_package_download_status(status),
+                "transient status must be retryable: {status}"
+            );
+        }
+        for status in [400, 401, 403, 404, 409, 422] {
+            let status = reqwest::StatusCode::from_u16(status).expect("status is valid");
+            assert!(
+                !is_retryable_package_download_status(status),
+                "permanent client status must fail immediately: {status}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn request_timeout_retries_before_atomic_promotion() {
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("test server must bind");
+        let address = listener
+            .local_addr()
+            .expect("test server address must exist");
+        let server = tokio::spawn(async move {
+            for response in [
+                b"HTTP/1.1 408 Request Timeout\r\nConnection: close\r\n\r\n".as_slice(),
+                b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\ngood".as_slice(),
+            ] {
+                let (mut stream, _) = listener.accept().await.expect("request must connect");
+                let mut request = [0_u8; 1024];
+                let received = stream
+                    .read(&mut request)
+                    .await
+                    .expect("request must be readable");
+                assert!(received > 0, "request must contain bytes");
+                stream
+                    .write_all(response)
+                    .await
+                    .expect("response must be writable");
+            }
+        });
+
+        let directory = tempfile::tempdir().expect("temporary output must exist");
+        std::fs::write(directory.path().join("package.bin"), b"verified")
+            .expect("existing package must be writable");
+        let progress = ProgressBar::hidden();
+        let url = format!("http://{address}/package");
+        let client = reqwest::Client::new();
+        let first = download_file_attempt(
+            &client,
+            &url,
+            "package.bin",
+            4,
+            None,
+            directory.path(),
+            &progress,
+        )
+        .await
+        .expect_err("request timeout must be returned as retryable");
+        assert!(first.retryable);
+        assert!(first.try_next_url);
+        download_file_attempt(
+            &client,
+            &url,
+            "package.bin",
+            4,
+            None,
+            directory.path(),
+            &progress,
+        )
+        .await
+        .expect("the next bounded attempt should promote the complete response");
+        assert_eq!(
+            std::fs::read(directory.path().join("package.bin")).expect("promoted file exists"),
+            b"good"
+        );
+        server.await.expect("test server must exit");
     }
 
     #[tokio::test]
