@@ -343,6 +343,8 @@ pub async fn run(
 #[cfg(test)]
 mod tests {
     use base64::Engine;
+    use indicatif::ProgressBar;
+    use sha2::{Digest, Sha256};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
@@ -501,6 +503,64 @@ mod tests {
         assert_eq!(
             std::fs::read(directory.path().join("package.bin")).expect("promoted file exists"),
             b"good"
+        );
+        server.await.expect("test server must exit");
+    }
+
+    #[tokio::test]
+    async fn hash_mismatch_preserves_existing_package_and_cleans_staging() {
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("test server must bind");
+        let address = listener
+            .local_addr()
+            .expect("test server address must exist");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("request must connect");
+            let mut request = [0_u8; 1024];
+            let received = stream
+                .read(&mut request)
+                .await
+                .expect("request must be readable");
+            assert!(received > 0, "request must contain bytes");
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\ngood")
+                .await
+                .expect("response must be writable");
+        });
+
+        let directory = tempfile::tempdir().expect("temporary output must exist");
+        std::fs::write(directory.path().join("package.bin"), b"verified")
+            .expect("existing package must be writable");
+        let expected_hash: [u8; 32] = Sha256::digest(b"wrong").into();
+        let progress = ProgressBar::hidden();
+        let url = format!("http://{address}/package");
+        let client = reqwest::Client::new();
+        let error = download_file_attempt(
+            &client,
+            &url,
+            "package.bin",
+            4,
+            Some(expected_hash),
+            directory.path(),
+            &progress,
+        )
+        .await
+        .expect_err("hash mismatch must reject the completed candidate");
+
+        assert!(!error.retryable);
+        assert_eq!(
+            std::fs::read(directory.path().join("package.bin"))
+                .expect("hash failure must preserve the existing package"),
+            b"verified"
+        );
+        assert!(
+            std::fs::read_dir(directory.path())
+                .expect("output directory must remain readable")
+                .all(|entry| {
+                    entry.expect("output entry must be readable").file_name() == "package.bin"
+                }),
+            "hash failure must not leave a transaction directory"
         );
         server.await.expect("test server must exit");
     }
