@@ -85,6 +85,20 @@ fn checked_cache_position(current: u64, advanced: usize, limit: u64) -> io::Resu
     Ok(next)
 }
 
+fn checked_prefix_target_end(pos: u64, requested: usize, len: u64) -> io::Result<u64> {
+    let requested = u64::try_from(requested)
+        .map_err(|_| Error::new(ErrorKind::InvalidData, "requested length does not fit u64"))?;
+    let available = len
+        .checked_sub(pos)
+        .ok_or_else(|| Error::new(ErrorKind::InvalidData, "cache position beyond length"))?;
+    if available == 0 {
+        return Ok(pos);
+    }
+    let delta = available.min(requested).max(1);
+    pos.checked_add(delta)
+        .ok_or_else(|| Error::new(ErrorKind::InvalidData, "cache target end overflow"))
+}
+
 fn validate_active_http_offset(next: u64, end_offset: u64, total: u64) -> io::Result<()> {
     if next > end_offset || next > total {
         return Err(Error::new(
@@ -734,11 +748,7 @@ where
             Poll::Pending => return Poll::Pending,
         }
 
-        let target_end = self.len.min(
-            self.pos
-                .saturating_add(buf.remaining() as u64)
-                .max(self.pos.saturating_add(1)),
-        );
+        let target_end = checked_prefix_target_end(self.pos, buf.remaining(), self.len)?;
 
         loop {
             if self.cached_len >= target_end {
@@ -938,7 +948,7 @@ mod tests {
     use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, ReadBuf};
     use tokio::net::{TcpListener, TcpStream};
 
-    use super::{HttpRead, PrefixCacheFile};
+    use super::{HttpRead, PrefixCacheFile, checked_prefix_target_end};
 
     #[derive(Clone, Debug)]
     struct RequestRecord {
@@ -1106,6 +1116,26 @@ mod tests {
 
     fn test_body() -> Vec<u8> {
         (0..16384).map(|i| (i % 251) as u8).collect()
+    }
+
+    #[test]
+    fn prefix_target_end_stays_within_declared_length() {
+        assert_eq!(
+            checked_prefix_target_end(4, 8, 10).expect("bounded target end must succeed"),
+            10
+        );
+        assert_eq!(
+            checked_prefix_target_end(u64::MAX - 1, usize::MAX, u64::MAX)
+                .expect("maximum bounded target end must succeed"),
+            u64::MAX
+        );
+    }
+
+    #[test]
+    fn prefix_target_end_rejects_position_beyond_length() {
+        let error = checked_prefix_target_end(11, 1, 10)
+            .expect_err("position beyond declared length must fail");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
 
     struct FixedReader {
