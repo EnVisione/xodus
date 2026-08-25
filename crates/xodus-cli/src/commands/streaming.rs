@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::io::{self, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -841,6 +842,28 @@ fn progress_style() -> ProgressStyle {
     .progress_chars("#>-")
 }
 
+async fn run_with_cancellation<Operation, Cancellation>(
+    operation: Operation,
+    cancellation: Cancellation,
+) -> ExitCode
+where
+    Operation: Future<Output = bool>,
+    Cancellation: Future<Output = io::Result<()>>,
+{
+    tokio::select! {
+        result = operation => {
+            if result { ExitCode::SUCCESS } else { ExitCode::FAILURE }
+        }
+        signal = cancellation => {
+            match signal {
+                Ok(()) => eprintln!("streaming cancelled"),
+                Err(error) => eprintln!("failed to listen for streaming cancellation: {error}"),
+            }
+            ExitCode::FAILURE
+        }
+    }
+}
+
 pub async fn run(
     client: &reqwest::Client,
     tokens: &TokenManager,
@@ -867,27 +890,25 @@ pub async fn run(
                 return ExitCode::FAILURE;
             }
         };
-        return if run_cli_reader(
-            StreamingRun {
-                client,
-                tokens,
-                destination,
-                try_skip_ntfs,
-                parallel,
-                market,
-                url: &source,
-                tx: &tx,
-            },
-            f,
-            l,
-            rx,
+        return run_with_cancellation(
+            run_cli_reader(
+                StreamingRun {
+                    client,
+                    tokens,
+                    destination,
+                    try_skip_ntfs,
+                    parallel,
+                    market,
+                    url: &source,
+                    tx: &tx,
+                },
+                f,
+                l,
+                rx,
+            ),
+            tokio::signal::ctrl_c(),
         )
-        .await
-        {
-            ExitCode::SUCCESS
-        } else {
-            ExitCode::FAILURE
-        };
+        .await;
     } else {
         let urls = if source.starts_with("http://") || source.starts_with("https://") {
             vec![source]
@@ -982,27 +1003,25 @@ pub async fn run(
         };
         let l = http_file.len();
 
-        return if run_cli_reader(
-            StreamingRun {
-                client,
-                tokens,
-                destination,
-                try_skip_ntfs,
-                parallel,
-                market,
-                url: &url,
-                tx: &tx,
-            },
-            http_file,
-            l,
-            rx,
+        return run_with_cancellation(
+            run_cli_reader(
+                StreamingRun {
+                    client,
+                    tokens,
+                    destination,
+                    try_skip_ntfs,
+                    parallel,
+                    market,
+                    url: &url,
+                    tx: &tx,
+                },
+                http_file,
+                l,
+                rx,
+            ),
+            tokio::signal::ctrl_c(),
         )
-        .await
-        {
-            ExitCode::SUCCESS
-        } else {
-            ExitCode::FAILURE
-        };
+        .await;
     }
 }
 
@@ -1443,7 +1462,9 @@ where
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::io::{Cursor, Write};
+    use std::io::{self, Cursor, Write};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::{
         PromotionState, SegmentFile, TRANSACTION_DIRECTORY_PREFIX, TRANSACTION_JOURNAL,
@@ -1454,6 +1475,31 @@ mod tests {
         recover_transaction_dir, recover_transactions, rollback_transaction,
         write_transaction_journal,
     };
+
+    #[tokio::test]
+    async fn streaming_cancellation_drops_operation_before_promotion() {
+        struct DropMarker(Arc<AtomicBool>);
+
+        impl Drop for DropMarker {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let dropped = Arc::new(AtomicBool::new(false));
+        let marker = DropMarker(Arc::clone(&dropped));
+        let status = super::run_with_cancellation(
+            async move {
+                let _marker = marker;
+                std::future::pending::<bool>().await
+            },
+            async { Ok::<(), io::Error>(()) },
+        )
+        .await;
+
+        assert_eq!(status, std::process::ExitCode::FAILURE);
+        assert!(dropped.load(Ordering::SeqCst));
+    }
 
     #[test]
     fn package_paths_accept_one_relative_separator_style() {
