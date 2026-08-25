@@ -3,7 +3,7 @@ use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use fs2::available_space;
 use futures_util::{StreamExt, stream};
@@ -20,7 +20,7 @@ use uuid::Uuid;
 use xodus::tokens::TokenManager;
 
 use crate::license::get_license;
-use crate::package::{get_content_id, get_packages, package_download_url};
+use crate::package::{get_content_id, get_packages, package_download_urls};
 
 struct Job {
     name: String,
@@ -631,8 +631,8 @@ pub async fn run(
             ExitCode::FAILURE
         };
     } else {
-        let vurl = if source.starts_with("http://") || source.starts_with("https://") {
-            source
+        let urls = if source.starts_with("http://") || source.starts_with("https://") {
+            vec![source]
         } else {
             let content_id = if Uuid::try_parse(&source).is_err() {
                 let content_id_task = get_content_id(client, source, market.clone()).await;
@@ -665,38 +665,58 @@ pub async fn run(
                 eprintln!("No .msixvc file found");
                 return ExitCode::FAILURE;
             };
-            match package_download_url(&file.cdn_root_paths, &file.relative_url) {
-                Ok(url) => url,
+            match package_download_urls(&file.cdn_root_paths, &file.relative_url) {
+                Ok(urls) => urls,
                 Err(error) => {
                     eprintln!("could not construct package URL: {error}");
                     return ExitCode::FAILURE;
                 }
             }
         };
-        let url = &vurl;
-        let mut pos: u64 = 0;
-        let http_file = streaming::HttpRead::open(
-            client.clone(),
-            url,
-            Some(|c: u64, _| {
-                if tx
-                    .try_send(ProgressEvent::Advanced {
-                        id: usize::MAX,
-                        delta: c.saturating_sub(pos),
-                    })
-                    .is_ok()
-                {
-                    pos = c;
+        let progress_position = Arc::new(AtomicU64::new(0));
+        let mut selected_url = None;
+        let mut http_file = None;
+        let mut last_error = None;
+        for candidate in &urls {
+            let progress_position = Arc::clone(&progress_position);
+            let progress_tx = tx.clone();
+            match streaming::HttpRead::open(
+                client.clone(),
+                candidate.clone(),
+                Some(move |c: u64, _| {
+                    let previous = progress_position.load(Ordering::Relaxed);
+                    if progress_tx
+                        .try_send(ProgressEvent::Advanced {
+                            id: usize::MAX,
+                            delta: c.saturating_sub(previous),
+                        })
+                        .is_ok()
+                    {
+                        progress_position.store(c, Ordering::Relaxed);
+                    }
+                }),
+            )
+            .await
+            {
+                Ok(file) => {
+                    selected_url = Some(candidate.clone());
+                    http_file = Some(file);
+                    break;
                 }
-            }),
-        )
-        .await;
-        let http_file = match http_file {
-            Ok(file) => file,
-            Err(err) => {
-                eprintln!("failed to open remote package: {err}");
-                return ExitCode::FAILURE;
+                Err(error) => last_error = Some(error),
             }
+        }
+        let Some(url) = selected_url else {
+            let error = last_error.map_or_else(
+                || "no CDN URL succeeded".to_owned(),
+                |error| error.to_string(),
+            );
+            eprintln!("failed to open remote package: {error}");
+            return ExitCode::FAILURE;
+        };
+        let Some(http_file) = http_file else {
+            eprintln!("failed to open remote package: no stream returned");
+            return ExitCode::FAILURE;
         };
         let l = http_file.len();
 
@@ -708,7 +728,7 @@ pub async fn run(
                 try_skip_ntfs,
                 parallel,
                 market,
-                url,
+                url: &url,
                 tx: &tx,
             },
             http_file,

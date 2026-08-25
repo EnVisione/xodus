@@ -10,7 +10,7 @@ use xodus::models::packagespc::PackageFile;
 use xodus::tokens::TokenManager;
 
 use crate::commands::streaming::open_package_output;
-use crate::package::{get_content_id, get_packages, package_download_url};
+use crate::package::{get_content_id, get_packages, package_download_urls};
 
 pub async fn run(
     client: &reqwest::Client,
@@ -57,8 +57,8 @@ pub async fn run(
     };
     println!();
     for file in files {
-        let url = match package_download_url(&file.cdn_root_paths, &file.relative_url) {
-            Ok(url) => url,
+        let urls = match package_download_urls(&file.cdn_root_paths, &file.relative_url) {
+            Ok(urls) => urls,
             Err(error) => {
                 eprintln!(
                     "could not construct package URL for {}: {error}",
@@ -68,7 +68,9 @@ pub async fn run(
             }
         };
         if dry_run {
-            println!("{}", url);
+            for url in &urls {
+                println!("{}", url);
+            }
             continue;
         }
 
@@ -83,17 +85,29 @@ pub async fn run(
         .progress_chars("#>-");
         let progress_bar = ProgressBar::new(file_size).with_style(progress_style);
 
-        let res = match client
-            .get(url)
-            .send()
-            .await
-            .and_then(reqwest::Response::error_for_status)
-        {
-            Ok(response) => response,
-            Err(error) => {
-                eprintln!("failed to request {}: {error}", file.file_name);
-                return ExitCode::FAILURE;
+        let mut response = None;
+        let mut last_error = None;
+        for url in &urls {
+            match client
+                .get(url)
+                .send()
+                .await
+                .and_then(reqwest::Response::error_for_status)
+            {
+                Ok(candidate) => {
+                    response = Some(candidate);
+                    break;
+                }
+                Err(error) => last_error = Some(error),
             }
+        }
+        let Some(res) = response else {
+            let error = last_error.map_or_else(
+                || "no CDN URL succeeded".to_owned(),
+                |error| error.to_string(),
+            );
+            eprintln!("failed to request {}: {error}", file.file_name);
+            return ExitCode::FAILURE;
         };
         let output = match open_package_output(Path::new("."), &file.file_name) {
             Ok(file) => file,
@@ -130,21 +144,21 @@ pub async fn run(
 
 #[cfg(test)]
 mod tests {
-    use crate::package::package_download_url;
+    use crate::package::package_download_urls;
 
     #[test]
-    fn package_download_url_rejects_missing_cdn_root() {
-        let error = package_download_url(&[], "/file.xvd")
+    fn package_download_urls_reject_missing_cdn_root() {
+        let error = package_download_urls(&[], "/file.xvd")
             .expect_err("a package without a CDN root must fail before HTTP");
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     }
 
     #[test]
-    fn package_download_url_preserves_the_relative_url() {
+    fn package_download_urls_preserve_the_relative_url() {
         let root = vec!["https://cdn.example/".to_owned()];
         assert_eq!(
-            package_download_url(&root, "file.xvd").expect("valid package URL"),
-            "https://cdn.example/file.xvd"
+            package_download_urls(&root, "file.xvd").expect("valid package URL"),
+            vec!["https://cdn.example/file.xvd"]
         );
     }
 
@@ -158,9 +172,25 @@ mod tests {
         ] {
             let roots = vec![root.to_owned()];
             assert!(
-                package_download_url(&roots, "file.xvd").is_err(),
+                package_download_urls(&roots, "file.xvd").is_err(),
                 "unsafe package URL accepted: {root}"
             );
         }
+    }
+
+    #[test]
+    fn package_download_urls_preserve_unique_root_order() {
+        let roots = vec![
+            "https://first.example/".to_owned(),
+            "https://second.example/".to_owned(),
+            "https://first.example/".to_owned(),
+        ];
+        assert_eq!(
+            package_download_urls(&roots, "file.xvd").expect("valid package URLs"),
+            vec![
+                "https://first.example/file.xvd",
+                "https://second.example/file.xvd"
+            ]
+        );
     }
 }
