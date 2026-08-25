@@ -3,11 +3,14 @@ pub static SERVICE_NAME: &str = "Xodus Service";
 pub fn init_secrets() -> Result<(), keyring_core::Error> {
     #[cfg(feature = "key-chain-file")]
     {
-        let store = keyring_core::sample::Store::new_with_backing(
-            secrets_backing_file()
-                .to_str()
-                .expect("Invalid secrets backing path"),
-        )?;
+        let backing_path = secrets_backing_file();
+        let backing_path = backing_path.to_str().ok_or_else(|| {
+            keyring_core::Error::Invalid(
+                "backing_path".to_owned(),
+                "path is not valid utf-8".to_owned(),
+            )
+        })?;
+        let store = keyring_core::sample::Store::new_with_backing(backing_path)?;
         keyring_core::set_default_store(store);
     }
 

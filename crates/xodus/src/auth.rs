@@ -22,9 +22,7 @@ fn get_app_params() -> XalAppParameters {
         auth_scopes: vec![Scope::new(
             xal::Constants::SCOPE_SERVICE_USER_AUTH.to_owned(),
         )],
-        redirect_uri: Some(
-            RedirectUrl::new(xal::Constants::OAUTH20_DESKTOP_REDIRECT_URL.into()).unwrap(),
-        ),
+        redirect_uri: RedirectUrl::new(xal::Constants::OAUTH20_DESKTOP_REDIRECT_URL.into()).ok(),
         client_secret: None,
     }
 }
@@ -185,8 +183,7 @@ pub async fn do_sisu(
         .await?;
     let resp = auth
         .sisu_authorize_rps(&user_token, &data.token, None)
-        .await
-        .expect("ok");
+        .await?;
     Ok((auth, resp, data))
 }
 

@@ -42,7 +42,7 @@ pub fn decrypt(data: String) -> ExitCode {
 
     clep_deobfuscate(&mut buffer);
 
-    let version = u32::from_le_bytes(buffer[0..4].try_into().unwrap());
+    let version = u32::from_le_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]);
     let smbios = &buffer[4..260];
     let disk_serial = &buffer[260..324];
 

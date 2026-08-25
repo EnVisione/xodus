@@ -113,7 +113,10 @@ impl WebviewRequest {
     }
 }
 
-pub fn login_request(client_id: String, market: String) -> WebviewRequest {
+pub fn login_request(
+    client_id: String,
+    market: String,
+) -> Result<WebviewRequest, Box<dyn std::error::Error>> {
     let uid = uuid::Uuid::new_v4();
     let url = format!(
         "https://login.live.com/ppsecure/InlineLogin.srf?id=80604&scid=3&mkt={market}&Platform=Windows10&clientid={client_id}&hosted=1"
@@ -123,7 +126,7 @@ pub fn login_request(client_id: String, market: String) -> WebviewRequest {
     headers.insert("cxh-capabilities", HeaderValue::from_static(r#"{"PrivatePropertyBag":1,"PasswordlessConnect":1,"PreferAssociate":1,"ChromelessUI":0}"#));
     headers.insert(
         "cxh-correlationId",
-        HeaderValue::from_str(&format!("{uid}")).unwrap(),
+        HeaderValue::from_str(&format!("{uid}"))?,
     );
     headers.insert("cxh-msaBinaryVersion", HeaderValue::from_static(r#"55"#));
     headers.insert(
@@ -147,7 +150,7 @@ pub fn login_request(client_id: String, market: String) -> WebviewRequest {
         HeaderValue::from_static(r#"CloudExperienceHost"#),
     );
 
-    WebviewRequest::new("Xodus login", url, headers)
+    Ok(WebviewRequest::new("Xodus login", url, headers))
 }
 
 pub fn finalize_request(url: String) -> WebviewRequest {

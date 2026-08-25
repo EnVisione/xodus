@@ -150,7 +150,7 @@ impl webview::SessionHandler for LoginHandler {
         runtime.open_session(webview::login_request(
             self.client_id.clone(),
             LOGIN_MARKET.to_string(),
-        ));
+        )?);
         Ok(())
     }
 
