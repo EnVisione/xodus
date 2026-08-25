@@ -32,7 +32,8 @@ impl<'a> RSTRequest<'a> {
         .header("Host", "login.live.com")
         .body(self.signed_xml)
         .send()
-        .await?;
+        .await?
+        .error_for_status()?;
 
         let response_text = read_response_text(response).await?;
         let envelope: soap::Envelope = quick_xml::de::from_str(&response_text)?;
