@@ -1,11 +1,16 @@
 use crate::models::xbox::{TitleMgtEndPoint, TitleMgtResponse};
 
-pub async fn get_title_management(client: &reqwest::Client) -> reqwest::Result<TitleMgtResponse> {
+use super::auth::{XboxApiError, decode_json_response};
+
+pub async fn get_title_management(
+    client: &reqwest::Client,
+) -> Result<TitleMgtResponse, XboxApiError> {
     let response = client
         .get("https://title.mgt.xboxlive.com/titles/default/endpoints?type=1")
         .send()
         .await?;
-    response.json().await
+    let response = response.error_for_status()?;
+    decode_json_response(response).await
 }
 
 pub fn get_endpoint<'a>(url: &str, response: &'a TitleMgtResponse) -> Option<&'a TitleMgtEndPoint> {

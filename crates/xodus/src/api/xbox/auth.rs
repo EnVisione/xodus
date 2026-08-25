@@ -66,7 +66,7 @@ fn append_json_response_chunk(body: &mut Vec<u8>, chunk: &[u8]) -> Result<(), Xb
     Ok(())
 }
 
-async fn decode_json_response<Response>(
+pub(super) async fn decode_json_response<Response>(
     mut response: reqwest::Response,
 ) -> Result<Response, XboxApiError>
 where
