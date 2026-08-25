@@ -10,7 +10,9 @@ use tokio::io::AsyncWriteExt;
 use xodus::models::packagespc::PackageFile;
 use xodus::tokens::TokenManager;
 
-use crate::commands::streaming::open_package_output;
+use crate::commands::streaming::{
+    new_transaction, open_package_output, promote_transaction, promotion_entries,
+};
 use crate::package::{get_content_id, get_packages, package_download_urls};
 
 fn validate_declared_download_length(expected: u64, declared: Option<u64>) -> io::Result<()> {
@@ -148,7 +150,22 @@ pub async fn run(
             eprintln!("refusing {}: {error}", file.file_name);
             return ExitCode::FAILURE;
         }
-        let output = match open_package_output(Path::new("."), &file.file_name) {
+        let (transaction, payload_root) = match new_transaction(Path::new(".")) {
+            Ok(transaction) => transaction,
+            Err(error) => {
+                eprintln!("could not create download transaction: {error}");
+                return ExitCode::FAILURE;
+            }
+        };
+        let mut promotion =
+            match promotion_entries(&[(file.file_name.clone(), file.file_name.clone())]) {
+                Ok(entries) => entries,
+                Err(error) => {
+                    eprintln!("refusing unsafe download path {}: {error}", file.file_name);
+                    return ExitCode::FAILURE;
+                }
+            };
+        let output = match open_package_output(&payload_root, &file.file_name) {
             Ok(file) => file,
             Err(error) => {
                 eprintln!("refusing unsafe download path {}: {error}", file.file_name);
@@ -186,6 +203,17 @@ pub async fn run(
                 "refusing {}: received {downloaded} bytes, expected {file_size}",
                 file.file_name
             );
+            return ExitCode::FAILURE;
+        }
+
+        if let Err(error) = output.sync_all().await {
+            eprintln!("failed to sync {}: {error}", file.file_name);
+            return ExitCode::FAILURE;
+        }
+        drop(output);
+        if let Err(error) = promote_transaction(transaction.path(), Path::new("."), &mut promotion)
+        {
+            eprintln!("failed to promote {}: {error}", file.file_name);
             return ExitCode::FAILURE;
         }
 

@@ -269,7 +269,7 @@ impl PromotionState {
 }
 
 #[derive(Debug)]
-struct PromotionEntry {
+pub(crate) struct PromotionEntry {
     staged_relative: PathBuf,
     final_relative: PathBuf,
     backup_relative: PathBuf,
@@ -277,7 +277,7 @@ struct PromotionEntry {
     state: PromotionState,
 }
 
-fn promotion_entries(specs: &[(String, String)]) -> io::Result<Vec<PromotionEntry>> {
+pub(crate) fn promotion_entries(specs: &[(String, String)]) -> io::Result<Vec<PromotionEntry>> {
     let mut seen = HashSet::new();
     let mut entries = Vec::with_capacity(specs.len());
     for (staged, final_name) in specs {
@@ -429,7 +429,7 @@ fn rollback_transaction(
     }
 }
 
-fn promote_transaction(
+pub(crate) fn promote_transaction(
     transaction_root: &Path,
     output_root: &Path,
     entries: &mut [PromotionEntry],
@@ -522,7 +522,7 @@ fn recover_transactions(output_root: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn new_transaction(output_root: &Path) -> io::Result<(TempDir, PathBuf)> {
+pub(crate) fn new_transaction(output_root: &Path) -> io::Result<(TempDir, PathBuf)> {
     let transaction = TempDirBuilder::new()
         .prefix(TRANSACTION_DIRECTORY_PREFIX)
         .tempdir_in(output_root)?;
