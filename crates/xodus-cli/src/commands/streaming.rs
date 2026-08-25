@@ -488,6 +488,28 @@ fn remove_file_if_present(path: &Path) -> io::Result<()> {
     }
 }
 
+fn restore_previous_file(backup_path: &Path, final_path: &Path) -> io::Result<()> {
+    let metadata = std::fs::symlink_metadata(backup_path)?;
+    if !metadata.file_type().is_file() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            format!(
+                "transaction backup is not a regular file: {}",
+                backup_path.display()
+            ),
+        ));
+    }
+
+    match std::fs::rename(backup_path, final_path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+            remove_file_if_present(final_path)?;
+            std::fs::rename(backup_path, final_path)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn sync_parent_directory(path: &Path) -> io::Result<()> {
     let Some(parent) = path.parent() else {
         return Ok(());
@@ -508,9 +530,7 @@ fn rollback_transaction(
         let final_path = output_root.join(&entry.final_relative);
         let backup_path = transaction_root.join(&entry.backup_relative);
         let result = if entry.had_previous {
-            remove_file_if_present(&final_path)
-                .and_then(|()| sync_parent_directory(&final_path))
-                .and_then(|()| std::fs::rename(&backup_path, &final_path))
+            restore_previous_file(&backup_path, &final_path)
                 .and_then(|()| sync_parent_directory(&backup_path))
                 .and_then(|()| sync_parent_directory(&final_path))
         } else if matches!(
@@ -1388,7 +1408,8 @@ mod tests {
         open_package_output, package_path_components, promote_transaction,
         promote_transaction_with_interruption, promotion_entries, promotion_entries_with_removals,
         promotion_entry_capacity, read_bounded_transaction_journal, read_transaction_journal,
-        recover_transaction_dir, recover_transactions, write_transaction_journal,
+        recover_transaction_dir, recover_transactions, rollback_transaction,
+        write_transaction_journal,
     };
 
     #[test]
@@ -1588,6 +1609,26 @@ mod tests {
             std::fs::read(output.join("content/game.bin")).unwrap(),
             b"old sidecar"
         );
+    }
+
+    #[test]
+    fn transaction_rollback_preserves_existing_file_when_backup_is_missing() {
+        let temporary = tempfile::tempdir().unwrap();
+        let output = temporary.path().join("output");
+        std::fs::create_dir(&output).unwrap();
+        let final_path = output.join("game.bin");
+        std::fs::write(&final_path, b"verified").unwrap();
+        let (transaction, _) = new_transaction(&output).unwrap();
+        let specs = vec![("game.bin".to_owned(), "game.bin".to_owned())];
+        let mut entries = promotion_entries(&specs).unwrap();
+        entries[0].had_previous = true;
+        entries[0].state = PromotionState::BackedUp;
+
+        let error = rollback_transaction(transaction.path(), &output, &mut entries)
+            .expect_err("missing backup must fail rollback");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(std::fs::read(final_path).unwrap(), b"verified");
     }
 
     #[test]
