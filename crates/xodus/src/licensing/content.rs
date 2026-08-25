@@ -11,6 +11,9 @@ use crate::models::licensing::{
     LicenseUserIdentity,
 };
 
+const MAX_LICENSE_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_LICENSE_VALUE_BYTES: usize = 16 * 1024 * 1024;
+
 #[derive(Debug, thiserror::Error)]
 pub enum LicenseContentError {
     #[error("request error: {0}")]
@@ -24,6 +27,15 @@ pub enum LicenseContentError {
     #[error("license response contains no content keys")]
     MissingContentKey,
 
+    #[error("license response body is {size} bytes, exceeding the limit {limit}")]
+    ResponseBodyTooLarge { size: usize, limit: usize },
+
+    #[error("license response is not valid json: {0}")]
+    InvalidJson(#[from] serde_json::Error),
+
+    #[error("license content value is {size} bytes, exceeding the limit {limit}")]
+    LicenseValueTooLarge { size: usize, limit: usize },
+
     #[error("license content key is not valid base64: {0}")]
     InvalidBase64(#[from] base64::DecodeError),
 
@@ -35,9 +47,64 @@ pub enum LicenseContentError {
 }
 
 fn decode_license_value(value: &str) -> Result<License, LicenseContentError> {
+    if value.len() > MAX_LICENSE_VALUE_BYTES {
+        return Err(LicenseContentError::LicenseValueTooLarge {
+            size: value.len(),
+            limit: MAX_LICENSE_VALUE_BYTES,
+        });
+    }
     let license = BASE64_STANDARD.decode(value)?;
     let license = String::from_utf8(license)?;
     Ok(quick_xml::de::from_str::<License>(&license)?)
+}
+
+fn validate_license_response_length(
+    content_length: Option<u64>,
+) -> Result<(), LicenseContentError> {
+    let Some(length) = content_length else {
+        return Ok(());
+    };
+    if length > MAX_LICENSE_RESPONSE_BYTES as u64 {
+        return Err(LicenseContentError::ResponseBodyTooLarge {
+            size: usize::try_from(length).unwrap_or(usize::MAX),
+            limit: MAX_LICENSE_RESPONSE_BYTES,
+        });
+    }
+    Ok(())
+}
+
+fn append_license_response_chunk(
+    body: &mut Vec<u8>,
+    chunk: &[u8],
+) -> Result<(), LicenseContentError> {
+    let next_size =
+        body.len()
+            .checked_add(chunk.len())
+            .ok_or(LicenseContentError::ResponseBodyTooLarge {
+                size: usize::MAX,
+                limit: MAX_LICENSE_RESPONSE_BYTES,
+            })?;
+    if next_size > MAX_LICENSE_RESPONSE_BYTES {
+        return Err(LicenseContentError::ResponseBodyTooLarge {
+            size: next_size,
+            limit: MAX_LICENSE_RESPONSE_BYTES,
+        });
+    }
+    body.extend_from_slice(chunk);
+    Ok(())
+}
+
+async fn decode_license_response(
+    mut response: reqwest::Response,
+) -> Result<LicenseContentResponse, LicenseContentError> {
+    validate_license_response_length(response.content_length())?;
+
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        append_license_response_chunk(&mut body, &chunk)?;
+    }
+
+    Ok(serde_json::from_slice(&body)?)
 }
 
 fn decode_license_content(content: &LicenseContent) -> Result<License, LicenseContentError> {
@@ -86,10 +153,7 @@ pub async fn get_license_content(
         .send()
         .await?;
 
-    let content_res = response
-        .error_for_status()?
-        .json::<LicenseContentResponse>()
-        .await?;
+    let content_res = decode_license_response(response.error_for_status()?).await?;
     let content = match content_res {
         LicenseContentResponse::Success { license } => license,
         LicenseContentResponse::SatisfactionFailure {
@@ -109,7 +173,8 @@ mod tests {
     use base64::Engine;
 
     use super::{
-        LicenseContent, LicenseContentError, decode_license_content, decode_license_value,
+        LicenseContent, LicenseContentError, append_license_response_chunk, decode_license_content,
+        decode_license_value, validate_license_response_length,
     };
     use crate::models::licensing::LicenseKeys;
 
@@ -143,6 +208,34 @@ mod tests {
         assert!(matches!(
             decode_license_value(&invalid_xml),
             Err(LicenseContentError::InvalidXml(_))
+        ));
+    }
+
+    #[test]
+    fn oversized_license_value_is_rejected_before_decode() {
+        let value = "A".repeat(super::MAX_LICENSE_VALUE_BYTES + 1);
+
+        assert!(matches!(
+            decode_license_value(&value),
+            Err(LicenseContentError::LicenseValueTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn oversized_license_response_is_rejected_before_json_decode() {
+        assert!(matches!(
+            validate_license_response_length(Some((super::MAX_LICENSE_RESPONSE_BYTES as u64) + 1)),
+            Err(LicenseContentError::ResponseBodyTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn oversized_chunked_license_response_is_rejected_before_json_decode() {
+        let mut body = vec![0_u8; super::MAX_LICENSE_RESPONSE_BYTES];
+
+        assert!(matches!(
+            append_license_response_chunk(&mut body, &[0]),
+            Err(LicenseContentError::ResponseBodyTooLarge { .. })
         ));
     }
 
