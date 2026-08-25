@@ -307,4 +307,29 @@ mod tests {
                     .starts_with(".xodus-streaming-txn-"))
         );
     }
+
+    #[test]
+    fn rejects_adversarial_path_without_writing_outside_destination() {
+        let temporary = tempfile::tempdir().expect("temporary directory must exist");
+        let destination = temporary.path().join("install");
+        let escape = temporary.path().join("escape.txt");
+
+        assert_eq!(
+            run(
+                fixture("xodus-fixture-adversarial-path.msixvc")
+                    .to_string_lossy()
+                    .into_owned(),
+                destination.to_string_lossy().into_owned(),
+            ),
+            std::process::ExitCode::FAILURE
+        );
+        assert!(
+            !escape.exists(),
+            "archive path must not escape its destination"
+        );
+        assert!(
+            !destination.exists(),
+            "rejected archive must not create a destination"
+        );
+    }
 }
