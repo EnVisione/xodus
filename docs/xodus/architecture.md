@@ -47,7 +47,7 @@ The service startup path now returns typed initialization, token, runtime-direct
 
 The login command now reports missing or wrong device token state, webview startup errors, unsupported response bodies, and user persistence failures through explicit exit paths. Native webview creation also validates the GTK container and propagates builder errors for Wayland and XWayland sessions.
 
-The CLI startup now reports HTTP client and credential-store initialization failures through a nonzero exit code instead of panicking before command dispatch.
+The CLI startup now reports HTTP client and credential-store initialization failures through a nonzero exit code instead of panicking before command dispatch. It does not enable reqwest connection-verbose logging, so authorization headers and response bodies are not emitted through transport tracing.
 
 Linux SMBIOS probing now validates the raw header length, UUID extent, string-table bounds, and version or serial indexes. Malformed firmware data falls back to the existing component error markers instead of panicking during device provisioning.
 
