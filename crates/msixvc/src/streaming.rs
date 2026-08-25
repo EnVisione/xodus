@@ -960,6 +960,7 @@ mod tests {
         body: Arc<Vec<u8>>,
         first_body_limit: Option<usize>,
         resume_start_adjustment: i64,
+        resume_content_length: Option<usize>,
         requests: Arc<Mutex<Vec<RequestRecord>>>,
         request_count: Arc<AtomicUsize>,
     }
@@ -992,6 +993,21 @@ mod tests {
         first_body_limit: Option<usize>,
         resume_start_adjustment: i64,
     ) -> io::Result<TestServer> {
+        spawn_server_with_resume_content_length(
+            body,
+            first_body_limit,
+            resume_start_adjustment,
+            None,
+        )
+        .await
+    }
+
+    async fn spawn_server_with_resume_content_length(
+        body: Vec<u8>,
+        first_body_limit: Option<usize>,
+        resume_start_adjustment: i64,
+        resume_content_length: Option<usize>,
+    ) -> io::Result<TestServer> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -999,6 +1015,7 @@ mod tests {
             body: Arc::new(body),
             first_body_limit,
             resume_start_adjustment,
+            resume_content_length,
             requests: requests.clone(),
             request_count: Arc::new(AtomicUsize::new(0)),
         };
@@ -1074,7 +1091,11 @@ mod tests {
                     (start as i64 + config.resume_start_adjustment) as u64
                 };
                 let body = config.body[adjusted_start as usize..].to_vec();
-                let content_length = body.len();
+                let content_length = if request_index == 0 {
+                    body.len()
+                } else {
+                    config.resume_content_length.unwrap_or(body.len())
+                };
                 (
                     "HTTP/1.1 206 Partial Content\r\n".to_owned(),
                     format!(
@@ -1525,6 +1546,34 @@ mod tests {
         assert_eq!(ranges.len(), 2);
         assert_eq!(ranges[0], None);
         assert_eq!(ranges[1].as_deref(), Some("bytes=96-"));
+    }
+
+    #[tokio::test]
+    async fn http_read_rejects_resumed_content_length_mismatch() {
+        let body = test_body();
+        let server = spawn_server_with_resume_content_length(
+            body.clone(),
+            Some(96),
+            0,
+            Some(body.len() - 96 + 1),
+        )
+        .await
+        .unwrap();
+        let mut reader = HttpRead::open(reqwest::Client::new(), &server.url, None::<fn(u64, u64)>)
+            .await
+            .unwrap();
+
+        let mut output = Vec::new();
+        let error = reader
+            .read_to_end(&mut output)
+            .await
+            .expect_err("a resumed content-length mismatch must fail before activation");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("content length"));
+        assert_eq!(output, body[..96]);
+        let ranges = server.request_ranges();
+        assert_eq!(ranges, vec![None, Some("bytes=96-".to_owned())]);
     }
 
     #[tokio::test]
