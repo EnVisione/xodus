@@ -33,6 +33,7 @@ use thiserror::Error;
 use zerocopy::{FromBytes, IntoBytes, transmute};
 
 const MAX_SPLICENSE_TLV_BYTES: usize = 64 * 1024 * 1024;
+const MAX_SPLICENSE_BASE64_INPUT_BYTES: usize = 64 * 1024 * 1024;
 const PACKED_CONTENT_KEY_BYTES: usize = 40;
 
 // pub struct Block<'a> {
@@ -228,8 +229,22 @@ pub enum SPLicenseParseError {
     #[error("SPLicense decode error: {0}")]
     DecodeError(#[from] SPLicenseDecodeError),
 
+    #[error("SPLicense base64 input is {size} bytes, exceeding the limit {limit}")]
+    EncodedPayloadTooLarge { size: usize, limit: usize },
+
     #[error("could not decode base64 string: {0}")]
     PayloadLengthMismatch(#[from] base64::DecodeError),
+}
+
+fn validate_base64_input_length(length: usize) -> Result<(), SPLicenseParseError> {
+    if length > MAX_SPLICENSE_BASE64_INPUT_BYTES {
+        return Err(SPLicenseParseError::EncodedPayloadTooLarge {
+            size: length,
+            limit: MAX_SPLICENSE_BASE64_INPUT_BYTES,
+        });
+    }
+
+    Ok(())
 }
 
 impl SPLicense {
@@ -416,6 +431,7 @@ impl SPLicense {
     }
 
     pub fn parse_base64(string: &str) -> Result<SPLicense, SPLicenseParseError> {
+        validate_base64_input_length(string.len())?;
         let data = BASE64_STANDARD.decode(string)?;
         Ok(SPLicense::decode(&*data)?)
     }
@@ -622,6 +638,19 @@ mod tests {
                 size,
                 limit: MAX_SPLICENSE_TLV_BYTES
             }) if size == (MAX_SPLICENSE_TLV_BYTES as u64) + 1
+        ));
+    }
+
+    #[test]
+    fn test_base64_input_limit_rejects_before_decode() {
+        let result = validate_base64_input_length(MAX_SPLICENSE_BASE64_INPUT_BYTES + 1);
+
+        assert!(matches!(
+            result,
+            Err(SPLicenseParseError::EncodedPayloadTooLarge {
+                size,
+                limit: MAX_SPLICENSE_BASE64_INPUT_BYTES
+            }) if size == MAX_SPLICENSE_BASE64_INPUT_BYTES + 1
         ));
     }
 
