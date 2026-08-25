@@ -470,6 +470,17 @@ pub enum XvdFileParseError {
 pub enum UserPackageFilesParseError {
     #[error(transparent)]
     Io(#[from] io::Error),
+    #[error(
+        "user data header end {header_end} exceeds declared user-data length {user_data_length}"
+    )]
+    UserDataHeaderBeyondUserData {
+        header_end: u64,
+        user_data_length: u64,
+    },
+    #[error(
+        "user data header length {header_length} is smaller than the required header size {minimum}"
+    )]
+    UserDataHeaderTooSmall { header_length: u32, minimum: u32 },
     #[error("package files header end overflows for user-data header length {header_length}")]
     PackageFilesHeaderEndOverflow { header_length: u32 },
     #[error(
@@ -548,6 +559,17 @@ pub enum SegmentMetadataParseError {
     Header(#[from] XvdSegmentMetadataHeaderParseError),
     #[error(transparent)]
     Io(#[from] io::Error),
+    #[error(
+        "segment metadata header end {header_end} exceeds declared metadata length {metadata_length}"
+    )]
+    SegmentMetadataHeaderBeyondDeclaredLength {
+        header_end: u64,
+        metadata_length: u64,
+    },
+    #[error(
+        "segment metadata header length {header_length} is smaller than the required header size {minimum}"
+    )]
+    SegmentMetadataHeaderTooSmall { header_length: u32, minimum: u32 },
     #[error(
         "segment metadata table end overflows for header length {header_length} and segment count {segment_count}"
     )]
@@ -1098,6 +1120,30 @@ fn package_files_header_end(header_length: u32) -> Result<u64, UserPackageFilesP
         .ok_or(UserPackageFilesParseError::PackageFilesHeaderEndOverflow { header_length })
 }
 
+fn validate_user_data_header_extent(
+    user_data_length: u64,
+) -> Result<(), UserPackageFilesParseError> {
+    let header_end = XvdUserDataHeader::SIZE as u64;
+    if header_end > user_data_length {
+        return Err(UserPackageFilesParseError::UserDataHeaderBeyondUserData {
+            header_end,
+            user_data_length,
+        });
+    }
+    Ok(())
+}
+
+fn validate_user_data_header_length(header_length: u32) -> Result<(), UserPackageFilesParseError> {
+    let minimum = XvdUserDataHeader::SIZE as u32;
+    if header_length < minimum {
+        return Err(UserPackageFilesParseError::UserDataHeaderTooSmall {
+            header_length,
+            minimum,
+        });
+    }
+    Ok(())
+}
+
 fn package_files_header_offset(
     user_data_offset: u64,
     header_length: u32,
@@ -1248,6 +1294,13 @@ fn validate_segment_metadata_table_extent(
     segment_count: u32,
     metadata_length: u64,
 ) -> Result<u64, SegmentMetadataParseError> {
+    let minimum = XvdSegmentMetadataHeader::SIZE as u32;
+    if header_length < minimum {
+        return Err(SegmentMetadataParseError::SegmentMetadataHeaderTooSmall {
+            header_length,
+            minimum,
+        });
+    }
     let segment_table_size = u64::from(segment_count)
         .checked_mul(XvdSegmentMetadataSegment::SIZE as u64)
         .ok_or(SegmentMetadataParseError::SegmentTableEndOverflow {
@@ -2401,6 +2454,8 @@ impl XvdFile {
         let mut files = HashMap::new();
 
         let user_data_offset = self.user_data_offset;
+        let user_data_length = u64::from(self.header.user_data_length);
+        validate_user_data_header_extent(user_data_length)?;
         file.seek(SeekFrom::Start(user_data_offset)).await?;
         let user_data_header = {
             let mut buf = XvdUserDataHeader::buffer();
@@ -2408,7 +2463,7 @@ impl XvdFile {
             XvdUserDataHeader::from_array(&buf)
         };
         if user_data_header.t == 0 {
-            let user_data_length = u64::from(self.header.user_data_length);
+            validate_user_data_header_length(user_data_header.length)?;
             let (package_files_header_offset, entry_table_offset, package_files_header_end) =
                 package_files_header_offset(
                     user_data_offset,
@@ -2482,6 +2537,15 @@ impl XvdFile {
         Reader: AsyncRead + AsyncSeek + Unpin,
     {
         let mut file = segment_metadata_reader(file);
+        let metadata_header_end = XvdSegmentMetadataHeader::SIZE as u64;
+        if metadata_header_end > segment_metadata.length {
+            return Err(
+                SegmentMetadataParseError::SegmentMetadataHeaderBeyondDeclaredLength {
+                    header_end: metadata_header_end,
+                    metadata_length: segment_metadata.length,
+                },
+            );
+        }
         file.seek(SeekFrom::Start(segment_metadata.offset)).await?;
         let segment_header = {
             let mut buf = XvdSegmentMetadataHeader::buffer();
@@ -3095,6 +3159,7 @@ mod tests {
         required_gpt_partition_start, reserve_xvc_region_entries, segment_file_name,
         segment_metadata_reader_capacity, sync_substream_absolute_target,
         validate_download_response_extent, validate_segment_metadata_table_extent,
+        validate_user_data_header_extent, validate_user_data_header_length,
         validate_xvc_region_hash_entry_addresses, verify_page_hash, write_all_with_retry,
         xvd_stream_absolute_seek_target,
     };
@@ -4116,6 +4181,51 @@ mod tests {
         assert_ne!(reader_capacity as u64, maximum_declared_length);
     }
 
+    #[test]
+    fn user_data_header_extent_rejects_a_short_declared_region() {
+        let error = validate_user_data_header_extent((USER_DATA_HEADER_SIZE - 1) as u64)
+            .expect_err("a short user-data region must fail before header I/O");
+
+        assert!(matches!(
+            error,
+            UserPackageFilesParseError::UserDataHeaderBeyondUserData {
+                header_end,
+                user_data_length,
+            } if header_end == USER_DATA_HEADER_SIZE as u64
+                && user_data_length == (USER_DATA_HEADER_SIZE - 1) as u64
+        ));
+    }
+
+    #[test]
+    fn user_data_header_length_rejects_a_short_header() {
+        let error = validate_user_data_header_length((USER_DATA_HEADER_SIZE - 1) as u32)
+            .expect_err("a short user-data header length must fail");
+
+        assert!(matches!(
+            error,
+            UserPackageFilesParseError::UserDataHeaderTooSmall { header_length, minimum }
+                if header_length == (USER_DATA_HEADER_SIZE - 1) as u32
+                    && minimum == USER_DATA_HEADER_SIZE as u32
+        ));
+    }
+
+    #[test]
+    fn segment_metadata_table_rejects_a_short_header_length() {
+        let error = validate_segment_metadata_table_extent(
+            (SEGMENT_METADATA_HEADER_SIZE - 1) as u32,
+            0,
+            SEGMENT_METADATA_HEADER_SIZE as u64,
+        )
+        .expect_err("a short segment metadata header length must fail");
+
+        assert!(matches!(
+            error,
+            SegmentMetadataParseError::SegmentMetadataHeaderTooSmall { header_length, minimum }
+                if header_length == (SEGMENT_METADATA_HEADER_SIZE - 1) as u32
+                    && minimum == SEGMENT_METADATA_HEADER_SIZE as u32
+        ));
+    }
+
     #[tokio::test]
     async fn parse_segment_metadata_uses_fixed_capacity_for_maximum_declared_length() {
         let xvd = XvdFile::parse(SyntheticXvdReader::synthetic_xvd_with_region_count(0))
@@ -4137,6 +4247,71 @@ mod tests {
         };
 
         assert!(matches!(error, SegmentMetadataParseError::Io(_)));
+    }
+
+    #[tokio::test]
+    async fn parse_segment_metadata_rejects_a_short_declared_header_before_io() {
+        let xvd = XvdFile::parse(SyntheticXvdReader::synthetic_xvd_with_region_count(0))
+            .await
+            .expect("synthetic XVD must parse");
+        let (reader, read_bytes) = SyntheticXvdReader::synthetic_segment_metadata_header(
+            SEGMENT_METADATA_HEADER_SIZE as u32,
+            0,
+        );
+        let error = match xvd
+            .parse_segment_metadata(
+                reader,
+                &UserPackageFile {
+                    offset: 0,
+                    length: (SEGMENT_METADATA_HEADER_SIZE - 1) as u64,
+                },
+            )
+            .await
+        {
+            Ok(_) => panic!("a short declared metadata header must fail before I/O"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            SegmentMetadataParseError::SegmentMetadataHeaderBeyondDeclaredLength {
+                header_end,
+                metadata_length,
+            } if header_end == SEGMENT_METADATA_HEADER_SIZE as u64
+                && metadata_length == (SEGMENT_METADATA_HEADER_SIZE - 1) as u64
+        ));
+        assert_eq!(read_bytes.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn parse_segment_metadata_rejects_a_short_header_length_before_table_reads() {
+        let xvd = XvdFile::parse(SyntheticXvdReader::synthetic_xvd_with_region_count(0))
+            .await
+            .expect("synthetic XVD must parse");
+        let (reader, read_bytes) = SyntheticXvdReader::synthetic_segment_metadata_header(0, 0);
+        let error = match xvd
+            .parse_segment_metadata(
+                reader,
+                &UserPackageFile {
+                    offset: 0,
+                    length: SEGMENT_METADATA_HEADER_SIZE as u64,
+                },
+            )
+            .await
+        {
+            Ok(_) => panic!("a short metadata header length must fail before table reads"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            SegmentMetadataParseError::SegmentMetadataHeaderTooSmall { header_length, minimum }
+                if header_length == 0 && minimum == SEGMENT_METADATA_HEADER_SIZE as u32
+        ));
+        assert_eq!(
+            read_bytes.load(Ordering::Relaxed),
+            SEGMENT_METADATA_HEADER_SIZE
+        );
     }
 
     #[test]
@@ -5574,6 +5749,52 @@ mod tests {
             USER_DATA_HEADER_SIZE,
             "an invalid package files header offset must not read table entries or insert records"
         );
+    }
+
+    #[tokio::test]
+    async fn parse_user_package_files_rejects_a_short_declared_header_before_io() {
+        let mut xvd = XvdFile::parse(SyntheticXvdReader::synthetic_xvd_with_region_count(0))
+            .await
+            .expect("synthetic XVD must parse");
+        xvd.user_data_offset = 0;
+        xvd.header.user_data_length = (USER_DATA_HEADER_SIZE - 1) as u32;
+        let (reader, read_bytes) = SyntheticXvdReader::synthetic_user_package_files(0, 0);
+        let error = match xvd.parse_user_package_files(reader).await {
+            Ok(_) => panic!("a short declared user-data header must fail before I/O"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            UserPackageFilesParseError::UserDataHeaderBeyondUserData {
+                header_end,
+                user_data_length,
+            } if header_end == USER_DATA_HEADER_SIZE as u64
+                && user_data_length == (USER_DATA_HEADER_SIZE - 1) as u64
+        ));
+        assert_eq!(read_bytes.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn parse_user_package_files_rejects_a_short_header_length_before_package_reads() {
+        let mut xvd = XvdFile::parse(SyntheticXvdReader::synthetic_xvd_with_region_count(0))
+            .await
+            .expect("synthetic XVD must parse");
+        xvd.user_data_offset = 0;
+        xvd.header.user_data_length =
+            (USER_DATA_HEADER_SIZE + USER_DATA_PACKAGE_FILES_HEADER_SIZE) as u32;
+        let (reader, read_bytes) = SyntheticXvdReader::synthetic_user_package_files(0, 0);
+        let error = match xvd.parse_user_package_files(reader).await {
+            Ok(_) => panic!("a short user-data header length must fail before package reads"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            UserPackageFilesParseError::UserDataHeaderTooSmall { header_length, minimum }
+                if header_length == 0 && minimum == USER_DATA_HEADER_SIZE as u32
+        ));
+        assert_eq!(read_bytes.load(Ordering::Relaxed), USER_DATA_HEADER_SIZE);
     }
 
     #[test]
