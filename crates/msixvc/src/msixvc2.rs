@@ -137,7 +137,18 @@ where
                 limit: MAX_METADATA_ENTRY_BYTES,
             });
         }
-        let mut metadata = Vec::with_capacity(file.size() as usize);
+        let metadata_size = usize::try_from(file.size()).map_err(|_| {
+            Msixvc2ParseError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "MSIXVC2 metadata size cannot be represented",
+            ))
+        })?;
+        let mut metadata = Vec::new();
+        metadata.try_reserve_exact(metadata_size).map_err(|error| {
+            Msixvc2ParseError::Io(std::io::Error::other(format!(
+                "MSIXVC2 metadata allocation failed: {error}"
+            )))
+        })?;
         file.read_to_end(&mut metadata)?;
     }
 

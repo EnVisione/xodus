@@ -10,6 +10,20 @@ use xodus::tokens::TokenManager;
 
 const MAX_CONTENT_ID_REDIRECTS: usize = 8;
 
+fn package_download_url_capacity(
+    cdn_root_count: usize,
+    background_cdn_root_count: usize,
+) -> io::Result<usize> {
+    cdn_root_count
+        .checked_add(background_cdn_root_count)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "package CDN root count overflows",
+            )
+        })
+}
+
 fn register_content_id_redirect(
     visited: &mut HashSet<String>,
     product: &str,
@@ -42,7 +56,11 @@ pub(crate) fn package_download_urls(
         ));
     }
 
-    let mut urls = Vec::with_capacity(cdn_root_paths.len() + background_cdn_root_paths.len());
+    let capacity =
+        package_download_url_capacity(cdn_root_paths.len(), background_cdn_root_paths.len())?;
+    let mut urls = Vec::new();
+    urls.try_reserve(capacity)
+        .map_err(|_| io::Error::other("package CDN URL allocation failed"))?;
     for root in cdn_root_paths.iter().chain(background_cdn_root_paths) {
         let url = format!("{root}{relative_url}");
         let parsed = reqwest::Url::parse(&url).map_err(|_| {
@@ -194,7 +212,20 @@ pub async fn get_packages(
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_CONTENT_ID_REDIRECTS, register_content_id_redirect};
+    use super::{
+        MAX_CONTENT_ID_REDIRECTS, package_download_url_capacity, register_content_id_redirect,
+    };
+
+    #[test]
+    fn package_download_url_capacity_rejects_overflow() {
+        assert_eq!(package_download_url_capacity(2, 3).unwrap(), 5);
+        assert_eq!(
+            package_download_url_capacity(usize::MAX, 1)
+                .expect_err("CDN root count overflow must fail")
+                .kind(),
+            std::io::ErrorKind::InvalidData
+        );
+    }
 
     #[test]
     fn content_id_redirects_accept_distinct_products() {
