@@ -1,21 +1,21 @@
 Objective:
-Complete every mandatory requirement XODUS-REQ-001 through XODUS-REQ-022 and every stable-release gate, excluding optional and future work; Phase 2 is in progress with XODUS-REQ-002 parser hardening next. Successful completion is permitted only when runtime verification passes, artifacts are bound to the authoritative default-branch commit, every evidence gate passes, and the final plan-wide audit finds no known mandatory repository-owned defect.
+Complete every mandatory requirement XODUS-REQ-001 through XODUS-REQ-022 and every stable-release gate, excluding optional and future work; Phase 2 continues with XODUS-REQ-002 parser hardening. Successful completion is permitted only when runtime verification passes, artifacts are bound to the authoritative default-branch commit, every evidence gate passes, and the final plan-wide audit finds no known mandatory repository-owned defect.
 
 Immediate checkpoint:
 Refresh and inspect `origin` without altering the remote. Verify `origin` is the intended repository; fetch `origin` without altering the remote; verify the fetched remote-tracking ref against the current remote default-branch head. Classify the local default branch as equal, behind, ahead, or diverged; fast-forward only when safe. Do not reset, force, discard, or overwrite unexpected history. Search local branches, remote branches, and repository-wide open pull requests; resume applicable work, otherwise branch from the verified authoritative baseline. Do not invent a branch while an applicable active branch exists. Create or resume an implementation branch before modifying tracked files.
 
-SRC-024 through SRC-035 passed checks: formatting, 27 msixvc tests, clean crate Clippy, CodeGraph sync, release build, workspace Clippy with four unrelated warnings, 43 filtered workspace test passes, and diff check. Phase 2 and XODUS-REQ-002 remain open; excluded account test prevents full-suite claim. Next replace package-controlled `String::from_utf16(buf.as_slice()).unwrap()` in `parse_segment_metadata` with typed invalid-filename failure. Preserve valid filename decoding; prove a malformed surrogate sequence fails before map insertion or filesystem mutation using deterministic in-memory evidence. Defer package-file count and offset validation, segment count and allocation, segment path arithmetic, hash-slice bounds, and downstream boundaries. No title package, download/stream, secret/keyring/browser/package-content, or runtime work. Do not begin XODUS-REQ-003 or Phase 3 until Phase 2 closes.
+SRC-024 through SRC-036 passed formatting, 29 msixvc tests, clean crate Clippy, CodeGraph sync, release build, four unrelated workspace Clippy warnings, 43 filtered workspace tests, and diff check. Phase 2 and XODUS-REQ-002 remain open; the excluded account test prevents a full-suite claim. Next replace package-length-derived `BufReader::with_capacity(segment_metadata.length as usize)` in `parse_segment_metadata` with a small fixed package-independent streaming capacity. Preserve valid parsing; prove a maximum declared metadata length cannot trigger a package-sized allocation before I/O using deterministic in-memory evidence and no filesystem mutation. Defer package-file count and offset validation, segment count and allocation, segment path arithmetic, hash-slice bounds, and downstream boundaries. No title package, download or stream, secret, keyring, browser, package-content, or runtime work. Do not begin XODUS-REQ-003 or Phase 3 until XODUS-REQ-002 closes.
 
 Perform one bounded inspection that ends as soon as each mandatory criterion is classified as implemented with valid evidence, incomplete, stale evidence, or externally blocked. Immediately execute the first incomplete or stale-evidence criterion. The map is not a deliverable: do not stop after producing it, do not rebuild it while unchanged evidence remains valid, and do not produce a narrative audit before implementation.
 
 Authoritative plan:
 /home/envy/Documents/Codex/2026-08-20/ca/work/xodus/docs/cachyos/plan.md
-Plan SHA-256: 4fb6a24f60a8bd4e2efe5d48e221834dba990230719f40de3c5e39cb42826856
-Validated handoff plan-set SHA-256: a647a45620c793286ea9691978ae076ca22f559ff0a64f504b282249de4b10e5
+Plan SHA-256: 41561a9a1b0cc1690e31c226047673d13f45f524adf3f9e049169cb5716e67ed
+Validated handoff plan-set SHA-256: ad3c29aeb3c4171080e972019de2aee59c82f567887f021ea809b09d04609e9b
 Completion endpoint: Xodus stable release is complete only when the signed public CachyOS release and repository local PKGBUILD install on the Tier 1 Lenovo Legion 9 18IAX10, Minecraft for Windows and Forza Horizon 5 each pass the authorized local login, entitlement, license, clean install, update, two consecutive launch, runtime, save, shutdown, repair, and uninstall workflows, Forza passes both absolute performance profiles, Tier 2 compatibility gates pass, MSIXVC2 and XSP update support pass, unsupported anti cheat titles hand off separately to Xbox cloud gaming, all mandatory security, recovery, documentation, and release evidence passes, and no cloud result substitutes for either local target.
 
 Observed checkout branch: envy/target-metadata-evidence
-Observed checkout commit: 4845b1b90ea6cacd0f4507ef9739430f5928491e
+Observed checkout commit: 178d755b3f3991d7eaf2b8a567965baba47836b8
 Repository root: /home/envy/Documents/Codex/2026-08-20/ca/work/xodus
 
 Authoritative remote:
@@ -27,7 +27,7 @@ Observed local default-branch commit: 5b77e06eaa5e3cea78af122436d35a9b02992834
 Observed local remote-tracking ref: origin/main
 Observed local remote-tracking commit: 5b77e06eaa5e3cea78af122436d35a9b02992834
 Current remote default-branch head: 5b77e06eaa5e3cea78af122436d35a9b02992834
-Remote-head evidence: git ls-remote read-only query observed 2026-08-25 at 04:42:26Z, corroborated by gh repo view EnVisione/xodus defaultBranchRef main
+Remote-head evidence: git ls-remote read-only query observed 2026-08-25 at 04:53:06Z, corroborated by gh repo view EnVisione/xodus defaultBranchRef main
 Authoritative working baseline: established
 Applicable implementation branch: envy/target-metadata-evidence
 Applicable open pull request: none identified at checkpoint
@@ -35,7 +35,7 @@ Applicable open pull request: none identified at checkpoint
 Verify that the plan, repository identity, package metadata, and remote describe the same project. Never switch revisions silently.
 
 Execution behavior:
-Inspect, implement, test, audit, fix, verify, integrate when required, verify resulting state, and continue through every remaining mandatory requirement. Protect valid evidence unless regression reopens it. Execute Phase 2 without stacking; after verified integration, execute later phases sequentially as prerequisites permit. For each defect, preserve evidence, fix the smallest root cause, add regression coverage, rerun affected gates, inspect adjacent behavior, and continue.
+Inspect, implement, test, audit, fix, verify, integrate when required, verify resulting state, and continue through every remaining mandatory requirement. Protect valid evidence until regression. Execute Phase 2 without stacking; after integration, execute later phases sequentially as prerequisites permit. For each defect, preserve evidence, fix the smallest root cause, add regression coverage, rerun affected gates, inspect adjacent behavior, and continue.
 
 Reuse evidence only while affected code, dependencies, configuration, environment, schemas, fixtures, and paths remain unchanged; otherwise mark it stale. Documentation changes do not substitute for implementation. Do not modify `plan.md` or status documents merely to restate a checkpoint, decision, blocker, or unchanged evidence.
 
@@ -49,7 +49,7 @@ Do not commit directly to main. Keep the default branch safe: permit a safe fast
 This blocker-tolerant run covers only: EXT-002 Complete target runtime, service, anti cheat, and lifecycle evidence; EXT-003 Versioned xgameruntime artifact; EXT-004 Versioned Xodus compatible Wine or Proton artifact; EXT-007 Scoped public release publication approval; EXT-010 Tier 2 CachyOS Hyprland NVIDIA compatibility hardware; and EXT-011 Authorized Minecraft and Forza update revision pairs. It grants no publication approval and does not broaden DEC-004.
 
 Verification and stopping:
-Use highest-fidelity real behavior proof across deterministic, security, corpus, real-package, runtime, performance, Tier 2, release, rollback, and recovery gates. Compilation and mocks cannot replace real behavior.
+Use highest-fidelity proof across deterministic, security, corpus, real-package, runtime, performance, Tier 2, release, rollback, and recovery gates. Compilation and mocks cannot replace real behavior.
 
 After integration, inspect the merged default-branch commit, rerun affected gates, and verify the authoritative remote branch, pull request, merge commit, artifact digest, release, and runtime identities. Inspect `git status`, `git diff --check`, and `git log`; leave no intended change stranded and no unexplained temporary, generated, unrelated, or secret-bearing file.
 

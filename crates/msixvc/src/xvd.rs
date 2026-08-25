@@ -26,8 +26,8 @@ use crate::math::{
 use crate::models::xvd::{
     PAGE_SIZE, PAGES_PER_BLOCK, XvcInfo, XvcRegionHeader, XvcRegionHeaderParseError, XvcRegionId,
     XvdHashEntry, XvdHeader, XvdHeaderParseError, XvdSegmentMetadataHeader,
-    XvdSegmentMetadataSegment, XvdSegmentMetadataSegmentFlags, XvdUserDataHeader,
-    XvdUserDataPackageFileEntry, XvdUserDataPackageFilesHeader,
+    XvdSegmentMetadataHeaderParseError, XvdSegmentMetadataSegment, XvdSegmentMetadataSegmentFlags,
+    XvdUserDataHeader, XvdUserDataPackageFileEntry, XvdUserDataPackageFilesHeader,
 };
 use crate::streaming_ntfs::collect_ntfs_stream_layouts;
 
@@ -337,6 +337,16 @@ pub enum UserPackageFilesParseError {
     InvalidFileName(#[source] std::string::FromUtf16Error),
 }
 
+#[derive(thiserror::Error, Debug)]
+pub enum SegmentMetadataParseError {
+    #[error(transparent)]
+    Header(#[from] XvdSegmentMetadataHeaderParseError),
+    #[error(transparent)]
+    Io(#[from] io::Error),
+    #[error("segment metadata file name contains invalid UTF-16")]
+    InvalidFileName(#[source] std::string::FromUtf16Error),
+}
+
 fn reserve_xvc_region_entries(
     num_pages: u64,
 ) -> Result<(Vec<u32>, Vec<[u8; 20]>), XvdFileParseError> {
@@ -403,6 +413,10 @@ fn package_file_name(fullname: &[u16]) -> Result<String, UserPackageFilesParseEr
         .unwrap_or(fullname.len());
 
     String::from_utf16(&fullname[..end]).map_err(UserPackageFilesParseError::InvalidFileName)
+}
+
+fn segment_file_name(fullname: &[u16]) -> Result<String, SegmentMetadataParseError> {
+    String::from_utf16(fullname).map_err(SegmentMetadataParseError::InvalidFileName)
 }
 
 fn validate_xvc_region_hash_entry_addresses(
@@ -698,7 +712,7 @@ impl XvdFile {
         &self,
         file: Reader,
         segment_metadata: &UserPackageFile,
-    ) -> Result<HashMap<String, SegmentFile>, Box<dyn std::error::Error>>
+    ) -> Result<HashMap<String, SegmentFile>, SegmentMetadataParseError>
     where
         Reader: AsyncRead + AsyncSeek + Unpin,
     {
@@ -735,7 +749,7 @@ impl XvdFile {
                 ))
                 .await?;
                 file.read_exact(buf.as_mut_bytes()).await?;
-                let file_name: String = String::from_utf16(buf.as_slice()).unwrap();
+                let file_name = segment_file_name(buf.as_slice())?;
                 let page_length = if segment.filesize == 0 {
                     1
                 } else {
@@ -1259,9 +1273,9 @@ mod tests {
     use tokio::io::{AsyncRead, AsyncSeek, ReadBuf};
 
     use super::{
-        MAX_XVC_REGION_HEADERS, UserPackageFilesParseError, XvdFile, XvdFileParseError,
-        hash_entry_read_offset, hash_page_index, package_file_name, reserve_xvc_region_entries,
-        validate_xvc_region_hash_entry_addresses,
+        MAX_XVC_REGION_HEADERS, SegmentMetadataParseError, UserPackageFilesParseError, XvdFile,
+        XvdFileParseError, hash_entry_read_offset, hash_page_index, package_file_name,
+        reserve_xvc_region_entries, segment_file_name, validate_xvc_region_hash_entry_addresses,
     };
 
     const XVD_HEADER_SIZE: usize = 4096;
@@ -1554,6 +1568,25 @@ mod tests {
         assert!(matches!(
             error,
             UserPackageFilesParseError::InvalidFileName(_)
+        ));
+    }
+
+    #[test]
+    fn segment_file_name_preserves_valid_utf16() {
+        let file_name = segment_file_name(&['a' as u16, 'b' as u16])
+            .expect("valid segment metadata file name must parse");
+
+        assert_eq!(file_name, "ab");
+    }
+
+    #[test]
+    fn segment_file_name_rejects_malformed_surrogate_before_map_insertion() {
+        let error = segment_file_name(&[0xD800])
+            .expect_err("malformed segment metadata file name must not parse");
+
+        assert!(matches!(
+            error,
+            SegmentMetadataParseError::InvalidFileName(_)
         ));
     }
 
