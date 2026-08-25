@@ -680,6 +680,61 @@ pub enum DownloadFileHttpError {
     },
 }
 
+#[derive(thiserror::Error, Debug)]
+pub enum ExtractFileError {
+    #[error(transparent)]
+    Io(#[from] io::Error),
+    #[error(
+        "extraction file end overflows for file offset {file_offset} and file length {file_length}"
+    )]
+    FileEndOverflow { file_offset: u64, file_length: u64 },
+    #[error(
+        "extraction encrypted section end overflows for section offset {section_offset} and section length {section_length}"
+    )]
+    SectionEndOverflow {
+        section_offset: u64,
+        section_length: u64,
+    },
+    #[error("extraction file end {file_end} exceeds encrypted section end {section_end}")]
+    FileBeyondSection { file_end: u64, section_end: u64 },
+    #[error(
+        "extraction file offset {file_offset} is before encrypted section offset {section_offset}"
+    )]
+    FileOffsetBeforeSection {
+        file_offset: u64,
+        section_offset: u64,
+    },
+    #[error("extraction page loop end overflows for start {page_start} and count {page_count}")]
+    PageLoopEndOverflow { page_start: u64, page_count: u64 },
+    #[error("extraction page {page_in_section} is before page start {page_start}")]
+    PageBeforeStart {
+        page_in_section: u64,
+        page_start: u64,
+    },
+    #[error("extraction progress byte offset overflows for completed pages {completed_pages}")]
+    ProgressByteOffsetOverflow { completed_pages: u64 },
+    #[error("extraction progress {progress_bytes} exceeds file length {file_length}")]
+    ProgressBeyondFile {
+        progress_bytes: u64,
+        file_length: u64,
+    },
+    #[error("extraction write length {write_length} cannot fit in usize")]
+    WriteLengthTooLarge { write_length: u64 },
+    #[error("extraction page index {page_in_section} cannot fit in usize")]
+    PageIndexTooLarge { page_in_section: u64 },
+    #[error(
+        "extraction data-unit index {page_in_section} is missing from {data_unit_count} section entries"
+    )]
+    DataUnitMissing {
+        page_in_section: u64,
+        data_unit_count: usize,
+    },
+    #[error("extraction data-unit index {page_in_section} cannot fit in u32")]
+    DataUnitIndexTooLarge { page_in_section: u64 },
+    #[error("extraction decryption state requires an encrypted section")]
+    MissingEncryptedSection,
+}
+
 fn reserve_xvc_region_entries(
     num_pages: u64,
 ) -> Result<(Vec<u32>, Vec<[u8; 20]>), XvdFileParseError> {
@@ -1283,6 +1338,13 @@ struct DownloadPagePlan {
     initial_request: DownloadRequestRange,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ExtractFilePlan {
+    page_start: u64,
+    page_count: u64,
+    page_loop_end: u64,
+}
+
 fn download_file_end(file_offset: u64, file_length: u64) -> Result<u64, DownloadFileHttpError> {
     file_offset
         .checked_add(file_length)
@@ -1290,6 +1352,130 @@ fn download_file_end(file_offset: u64, file_length: u64) -> Result<u64, Download
             file_offset,
             file_length,
         })
+}
+
+fn extract_file_end(file_offset: u64, file_length: u64) -> Result<u64, ExtractFileError> {
+    file_offset
+        .checked_add(file_length)
+        .ok_or(ExtractFileError::FileEndOverflow {
+            file_offset,
+            file_length,
+        })
+}
+
+fn extract_encrypted_section(
+    sections: &[EncryptedSectionInfo],
+    file_offset: u64,
+    file_end: u64,
+) -> Result<Option<&EncryptedSectionInfo>, ExtractFileError> {
+    let mut matching_section = None;
+
+    for section in sections {
+        let section_end = section
+            .section_offset
+            .checked_add(section.section_length)
+            .ok_or(ExtractFileError::SectionEndOverflow {
+                section_offset: section.section_offset,
+                section_length: section.section_length,
+            })?;
+        if matching_section.is_none()
+            && file_offset >= section.section_offset
+            && file_offset < section_end
+        {
+            if file_end > section_end {
+                return Err(ExtractFileError::FileBeyondSection {
+                    file_end,
+                    section_end,
+                });
+            }
+            matching_section = Some(section);
+        }
+    }
+
+    Ok(matching_section)
+}
+
+fn extract_file_offset_in_section(
+    file_offset: u64,
+    section: Option<&EncryptedSectionInfo>,
+) -> Result<u64, ExtractFileError> {
+    let Some(section) = section else {
+        return Ok(file_offset);
+    };
+
+    file_offset.checked_sub(section.section_offset).ok_or(
+        ExtractFileError::FileOffsetBeforeSection {
+            file_offset,
+            section_offset: section.section_offset,
+        },
+    )
+}
+
+fn extract_page_loop_end(page_start: u64, page_count: u64) -> Result<u64, ExtractFileError> {
+    page_start
+        .checked_add(page_count)
+        .ok_or(ExtractFileError::PageLoopEndOverflow {
+            page_start,
+            page_count,
+        })
+}
+
+fn extract_page_plan(
+    file_offset_in_section: u64,
+    file_length: u64,
+) -> Result<ExtractFilePlan, ExtractFileError> {
+    let page_start = file_offset_in_section / PAGE_SIZE as u64;
+    let page_count = file_length.div_ceil(PAGE_SIZE as u64);
+    let page_loop_end = extract_page_loop_end(page_start, page_count)?;
+
+    Ok(ExtractFilePlan {
+        page_start,
+        page_count,
+        page_loop_end,
+    })
+}
+
+fn extract_progress_bytes(
+    page_start: u64,
+    page_in_section: u64,
+    file_length: u64,
+) -> Result<u64, ExtractFileError> {
+    let completed_pages =
+        page_in_section
+            .checked_sub(page_start)
+            .ok_or(ExtractFileError::PageBeforeStart {
+                page_in_section,
+                page_start,
+            })?;
+    let progress_bytes = completed_pages
+        .checked_mul(PAGE_SIZE as u64)
+        .ok_or(ExtractFileError::ProgressByteOffsetOverflow { completed_pages })?;
+
+    Ok(progress_bytes.min(file_length))
+}
+
+fn extract_write_length(progress_bytes: u64, file_length: u64) -> Result<usize, ExtractFileError> {
+    let remaining =
+        file_length
+            .checked_sub(progress_bytes)
+            .ok_or(ExtractFileError::ProgressBeyondFile {
+                progress_bytes,
+                file_length,
+            })?;
+    let write_length = remaining.min(PAGE_SIZE as u64);
+
+    usize::try_from(write_length)
+        .map_err(|_| ExtractFileError::WriteLengthTooLarge { write_length })
+}
+
+fn extract_page_index(page_in_section: u64) -> Result<usize, ExtractFileError> {
+    usize::try_from(page_in_section)
+        .map_err(|_| ExtractFileError::PageIndexTooLarge { page_in_section })
+}
+
+fn extract_data_unit_index(page_in_section: u64) -> Result<u32, ExtractFileError> {
+    u32::try_from(page_in_section)
+        .map_err(|_| ExtractFileError::DataUnitIndexTooLarge { page_in_section })
 }
 
 fn download_encrypted_section(
@@ -2137,7 +2323,7 @@ impl XvdFile {
         full_key: [u8; 32],
         mut progress: Progress,
         decrypt_all: bool,
-    ) -> Result<(), Box<dyn std::error::Error>>
+    ) -> Result<(), ExtractFileError>
     where
         Reader: AsyncRead + Unpin,
         Writer: AsyncWrite + Unpin,
@@ -2147,17 +2333,13 @@ impl XvdFile {
             return Ok(());
         }
 
-        let s = &self.encrypted_section_infos.iter().find(|s| {
-            sfile.offset >= s.section_offset && sfile.offset < s.section_offset + s.section_length
-        });
+        let file_end = extract_file_end(sfile.offset, sfile.length)?;
+        let section =
+            extract_encrypted_section(&self.encrypted_section_infos, sfile.offset, file_end)?;
+        let file_offset_in_section = extract_file_offset_in_section(sfile.offset, section)?;
+        let page_plan = extract_page_plan(file_offset_in_section, sfile.length)?;
 
-        let mut tweak = None;
-        let mut tweak_cipher = None;
-        let mut data_cipher = None;
-
-        let file_offset_in_section;
-
-        if let Some(s) = s
+        let mut decryption = if let Some(section) = section
             && (!sfile.keep_encrypted || decrypt_all)
         {
             let mut tweak_key = [0u8; 16];
@@ -2165,62 +2347,45 @@ impl XvdFile {
             tweak_key.copy_from_slice(&full_key[..16]);
             data_key.copy_from_slice(&full_key[16..]);
 
-            tweak = Some(Tweak::new(0, s.header_id, s.vduid));
-            tweak_cipher = Some(Aes128::new((&tweak_key).into()));
-            data_cipher = Some(Aes128::new((&data_key).into()));
-            file_offset_in_section = sfile.offset - s.section_offset;
+            Some((
+                Tweak::new(0, section.header_id, section.vduid),
+                Aes128::new((&tweak_key).into()),
+                Aes128::new((&data_key).into()),
+            ))
         } else {
-            // TODO for data integrity we need a section for unencrypted sections...
-            file_offset_in_section = sfile.offset;
-        }
-        let page_start = file_offset_in_section / PAGE_SIZE as u64;
-        let page_count = sfile.length.div_ceil(PAGE_SIZE as u64);
+            None
+        };
 
         let mut page = [0u8; PAGE_SIZE];
 
-        for page_in_section in page_start..page_start + page_count {
-            progress(
-                min((page_in_section - page_start) * 4096, sfile.length),
-                sfile.length,
-            );
+        for page_in_section in page_plan.page_start..page_plan.page_loop_end {
+            let progress_bytes =
+                extract_progress_bytes(page_plan.page_start, page_in_section, sfile.length)?;
+            progress(progress_bytes, sfile.length);
             i.read_exact(&mut page).await?;
-            let to_write = min(
-                PAGE_SIZE,
-                sfile.length as usize
-                    - min(
-                        (page_in_section - page_start) as usize * 4096_usize,
-                        sfile.length as usize,
-                    ),
-            ) as usize;
-            let to_write = if let Some(tweak) = tweak.as_mut() {
-                tweak.update_data_unit(match &s.unwrap().data_units {
-                    Some(units) => *units.get(page_in_section as usize).ok_or_else(|| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            format!(
-                                "{} units {} page_in_section {} ({}+{})",
-                                "missing data unit",
-                                (*units).len(),
+            let write_length = extract_write_length(progress_bytes, sfile.length)?;
+            let to_write = if let Some((tweak, tweak_cipher, data_cipher)) = decryption.as_mut() {
+                let section = section.ok_or(ExtractFileError::MissingEncryptedSection)?;
+                let data_unit = match &section.data_units {
+                    Some(units) => {
+                        let page_index = extract_page_index(page_in_section)?;
+                        *units
+                            .get(page_index)
+                            .ok_or(ExtractFileError::DataUnitMissing {
                                 page_in_section,
-                                page_start,
-                                page_count
-                            ),
-                        )
-                    })?,
-                    None => page_in_section as u32,
-                });
-                decrypt_page_xts(
-                    &mut page,
-                    *tweak,
-                    tweak_cipher.as_ref().unwrap(),
-                    data_cipher.as_ref().unwrap(),
-                );
-                to_write
+                                data_unit_count: units.len(),
+                            })?
+                    }
+                    None => extract_data_unit_index(page_in_section)?,
+                };
+                tweak.update_data_unit(data_unit);
+                decrypt_page_xts(&mut page, *tweak, tweak_cipher, data_cipher);
+                write_length
             } else if sfile.keep_encrypted {
                 // Decryption needs full 4k blocks
                 PAGE_SIZE
             } else {
-                to_write
+                write_length
             };
             while let Err(err) = out.write_all(&page[..to_write]).await {
                 eprintln!("Error write file {} waiting 30s", err);
@@ -2239,7 +2404,7 @@ impl XvdFile {
         sfile: &SegmentFile,
         full_key: [u8; 32],
         progress: Progress,
-    ) -> Result<(), Box<dyn std::error::Error>>
+    ) -> Result<(), ExtractFileError>
     where
         Reader: AsyncRead + AsyncSeek + Unpin,
         Writer: AsyncWrite + Unpin,
@@ -2258,7 +2423,7 @@ impl XvdFile {
         sfile: &SegmentFile,
         full_key: [u8; 32],
         progress: Progress,
-    ) -> Result<(), Box<dyn std::error::Error>>
+    ) -> Result<(), ExtractFileError>
     where
         Reader: AsyncRead + Unpin,
         Writer: AsyncWrite + Unpin,
@@ -2287,12 +2452,14 @@ mod tests {
     use crate::streaming_ntfs::{NtfsDataRunReport, NtfsStreamLayoutReport};
 
     use super::{
-        DownloadFileHttpError, EncryptedSectionInfo, MAX_XVC_REGION_HEADERS,
+        DownloadFileHttpError, EncryptedSectionInfo, ExtractFileError, MAX_XVC_REGION_HEADERS,
         NtfsSegmentMetadataParseError, PAGE_SIZE, PopulateSegmentHashesError,
         SEGMENT_METADATA_READER_CAPACITY, SegmentFile, SegmentMetadataParseError, UserPackageFile,
         UserPackageFilesParseError, XvcRegionId, XvdFile, XvdFileParseError,
         collect_ntfs_segment_files, download_encrypted_section, download_file_end,
-        download_page_plan, download_request_range, hash_entry_read_offset, hash_page_index,
+        download_page_plan, download_request_range, extract_data_unit_index,
+        extract_encrypted_section, extract_file_end, extract_page_loop_end, extract_page_plan,
+        extract_progress_bytes, extract_write_length, hash_entry_read_offset, hash_page_index,
         next_download_page, next_segment_page_offset, ntfs_drive_extents, ntfs_partition_extents,
         package_file_name, required_gpt_partition_length, required_gpt_partition_start,
         reserve_xvc_region_entries, segment_file_name, segment_metadata_reader_capacity,
@@ -3511,6 +3678,126 @@ mod tests {
         assert_eq!(plan.page_length, PAGE_SIZE as u64);
         assert_eq!(plan.initial_request.start, 64);
         assert_eq!(plan.initial_request.end, 64 + PAGE_SIZE as u64 - 1);
+    }
+
+    #[test]
+    fn extraction_preflight_rejects_file_end_overflow_before_reader_or_write() {
+        let error = extract_file_end(u64::MAX, 1)
+            .expect_err("overflowing extraction file extent must fail before reader access");
+
+        assert!(matches!(
+            error,
+            ExtractFileError::FileEndOverflow {
+                file_offset: u64::MAX,
+                file_length: 1,
+            }
+        ));
+    }
+
+    #[test]
+    fn extraction_preflight_rejects_overflowing_section_before_reader_or_write() {
+        let sections = [EncryptedSectionInfo {
+            section_offset: u64::MAX,
+            section_length: 1,
+            header_id: XvcRegionId::Unknown,
+            vduid: [0; 8],
+            data_units: None,
+            first_segment_index: 0,
+            data_hashs: vec![],
+        }];
+        let error = extract_encrypted_section(&sections, u64::MAX, u64::MAX)
+            .expect_err("overflowing extraction section extent must fail before reader access");
+
+        assert!(matches!(
+            error,
+            ExtractFileError::SectionEndOverflow {
+                section_offset: u64::MAX,
+                section_length: 1,
+            }
+        ));
+    }
+
+    #[test]
+    fn extraction_preflight_rejects_file_beyond_section_before_reader_or_write() {
+        let sections = [EncryptedSectionInfo {
+            section_offset: 0,
+            section_length: PAGE_SIZE as u64,
+            header_id: XvcRegionId::Unknown,
+            vduid: [0; 8],
+            data_units: None,
+            first_segment_index: 0,
+            data_hashs: vec![],
+        }];
+        let error =
+            extract_encrypted_section(&sections, (PAGE_SIZE - 1) as u64, PAGE_SIZE as u64 + 1)
+                .expect_err("file beyond extraction section must fail before reader access");
+
+        assert!(matches!(
+            error,
+            ExtractFileError::FileBeyondSection {
+                file_end,
+                section_end,
+            } if file_end == PAGE_SIZE as u64 + 1 && section_end == PAGE_SIZE as u64
+        ));
+    }
+
+    #[test]
+    fn extraction_preflight_rejects_overflowing_page_and_progress_math_before_reader_or_write() {
+        let page_error = extract_page_loop_end(u64::MAX, 1)
+            .expect_err("overflowing extraction page loop must fail before reader access");
+        let progress_error = extract_progress_bytes(0, u64::MAX, u64::MAX)
+            .expect_err("overflowing extraction progress must fail before reader access");
+
+        assert!(matches!(
+            page_error,
+            ExtractFileError::PageLoopEndOverflow {
+                page_start: u64::MAX,
+                page_count: 1,
+            }
+        ));
+        assert!(matches!(
+            progress_error,
+            ExtractFileError::ProgressByteOffsetOverflow {
+                completed_pages: u64::MAX,
+            }
+        ));
+    }
+
+    #[test]
+    fn extraction_preflight_rejects_invalid_write_and_data_unit_conversions_before_write() {
+        let write_error = extract_write_length(2, 1)
+            .expect_err("progress beyond extraction file length must fail before write");
+        let data_unit_error = extract_data_unit_index(u64::from(u32::MAX) + 1)
+            .expect_err("out-of-range data-unit index must fail before write");
+
+        assert!(matches!(
+            write_error,
+            ExtractFileError::ProgressBeyondFile {
+                progress_bytes: 2,
+                file_length: 1,
+            }
+        ));
+        assert!(matches!(
+            data_unit_error,
+            ExtractFileError::DataUnitIndexTooLarge { page_in_section }
+                if page_in_section == u64::from(u32::MAX) + 1
+        ));
+    }
+
+    #[test]
+    fn extraction_preflight_preserves_a_valid_single_page_plan() {
+        let plan =
+            extract_page_plan(0, 1).expect("valid single-page extraction must produce a page plan");
+        let progress = extract_progress_bytes(plan.page_start, plan.page_start, 1)
+            .expect("first extraction page must begin with zero progress");
+        let write_length = extract_write_length(progress, 1)
+            .expect("single extraction byte must fit in the write span");
+
+        assert_eq!(plan.page_start, 0);
+        assert_eq!(plan.page_count, 1);
+        assert_eq!(plan.page_loop_end, 1);
+        assert_eq!(progress, 0);
+        assert_eq!(write_length, 1);
     }
 
     #[tokio::test]

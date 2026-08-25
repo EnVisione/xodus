@@ -4,20 +4,20 @@ Complete every mandatory requirement XODUS-REQ-001 through XODUS-REQ-022 and eve
 Immediate checkpoint:
 Refresh and inspect `origin` without altering the remote. Verify `origin` is the intended repository; fetch `origin` without altering the remote; verify the fetched remote-tracking ref against the current remote default-branch head. Classify the local default branch as equal, behind, ahead, or diverged; fast-forward only when safe. Do not reset, force, discard, or overwrite unexpected history. Search local branches, remote branches, and repository-wide open pull requests; resume applicable work, otherwise branch from the verified authoritative baseline. Do not invent a branch while an applicable active branch exists. Create or resume an implementation branch before modifying tracked files.
 
-SRC-048 is verified working-tree evidence, not committed state: typed HTTP downloader extent and range checks passed formatting, 63 `msixvc` tests, zero-warning target and workspace Clippy, release build, filtered 83-test suite, and diff inspection. Account test excluded; no unfiltered, package, account, runtime, secret, title-transfer, or external-service validation is claimed.
+SRC-049 is verified working-tree evidence, not committed state: typed extraction extent, page, progress, write-span, and index checks passed formatting, 69 `msixvc` tests, zero-warning target and workspace Clippy, release build, filtered 89-test suite, and diff inspection. Account test excluded; no unfiltered, package, account, runtime, secret, title-transfer, or external-service validation is claimed.
 
-Continue XODUS-REQ-002 in `extract_file_ex`. Expose one public typed extraction error through `extract_file` and `mount_mem_fd`. Before reader access, indexing, or output mutation, validate candidate encrypted-section ends and requested file end. Checked-derive file offset within its section, page-loop end, progress-byte offset, remaining write span, page index, and data-unit index. Distinguish section, file, page-span, progress, write-span, index-conversion, missing-section, and missing-data-unit failures. Pure-helper invalid fixtures must fail before any read or write; preserve one valid single-page extraction plan. Defer extraction I/O and HTTP response and retry semantics, `non_encrypted_prefix_len`, runtime arithmetic, property, fuzz, unsafe-reshape, and static-inventory work. Do not begin XODUS-REQ-003 or Phase 3.
+Continue XODUS-REQ-002 in `non_encrypted_prefix_len` through existing public typed `NtfsSegmentMetadataParseError`. Replace saturating requested-end, encrypted-section-end, and prefix-distance arithmetic with checked operations. Validate the requested partition range and every candidate encrypted-section extent before partition stream construction or NTFS reads. Preserve full-prefix, first-section truncation, and overlap-at-start behavior for valid inputs. Pure helpers must reject requested-end and section-end overflow and prove valid no-overlap, first-overlap, and overlap-at-start cases. Defer `SyncSubstream` and `XvdStream` offset arithmetic, extraction and HTTP response or retry semantics, other runtime arithmetic, property, fuzz, unsafe-reshape, and static-inventory work. Do not begin XODUS-REQ-003 or Phase 3.
 
 Perform one bounded inspection that ends as soon as each mandatory criterion is classified as implemented with valid evidence, incomplete, stale evidence, or externally blocked. Immediately execute the first incomplete or stale-evidence criterion. The map is not a deliverable. Do not stop after producing it or rebuild it while unchanged evidence remains valid. Do not produce a narrative audit before implementation.
 
 Authoritative plan:
 /home/envy/Documents/Codex/2026-08-20/ca/work/xodus/docs/cachyos/plan.md
-Plan SHA-256: bb30c6ac314914055bcc57eb958367cf7f5f1f8feb92b0337bd2d0e231015f67
-Validated handoff plan-set SHA-256: 2838631e4b4a76803453458da0b261069bcf7c4f6fc6d85f344ed64a8e1e06ae
+Plan SHA-256: 2340e93b0bfe82d7975148302e6c8f23fc7a9be1d8986c1f9020a8a2315bab79
+Validated handoff plan-set SHA-256: adf49646a92af084c812b141e9181283fcaa588ad3c44c880bfef2f8b6efe45f
 Completion endpoint: Xodus stable release is complete only when the signed public CachyOS release and repository local PKGBUILD install on the Tier 1 Lenovo Legion 9 18IAX10, Minecraft for Windows and Forza Horizon 5 each pass the authorized local login, entitlement, license, clean install, update, two consecutive launch, runtime, save, shutdown, repair, and uninstall workflows, Forza passes both absolute performance profiles, Tier 2 compatibility gates pass, MSIXVC2 and XSP update support pass, unsupported anti cheat titles hand off separately to Xbox cloud gaming, all mandatory security, recovery, documentation, and release evidence passes, and no cloud result substitutes for either local target.
 
 Observed checkout branch: envy/target-metadata-evidence
-Observed checkout commit: 47b82f7ecef21e10e2d47eec556fd3d76d9868cb
+Observed checkout commit: 1e9d5a216b65e6b3097a93fcc7e8831efa299eee
 Repository root: /home/envy/Documents/Codex/2026-08-20/ca/work/xodus
 
 Authoritative remote:
@@ -29,7 +29,7 @@ Observed local default-branch commit: 5b77e06eaa5e3cea78af122436d35a9b02992834
 Observed local remote-tracking ref: origin/main
 Observed local remote-tracking commit: 5b77e06eaa5e3cea78af122436d35a9b02992834
 Current remote default-branch head: 5b77e06eaa5e3cea78af122436d35a9b02992834
-Remote-head evidence: git ls-remote read-only query observed 2026-08-25 at 08:53:53Z
+Remote-head evidence: git ls-remote read-only query observed 2026-08-25 at 09:17:57Z
 Authoritative working baseline: established
 Applicable implementation branch: envy/target-metadata-evidence
 Applicable open pull request: none identified at checkpoint
@@ -42,7 +42,7 @@ Inspect, implement, test, audit, fix, verify, integrate when required, verify re
 Reuse evidence only while affected code, dependencies, configuration, environment, schemas, fixtures, and paths remain unchanged; otherwise mark it stale. Documentation changes do not substitute for implementation. Do not modify `plan.md` or status documents merely to restate a checkpoint, decision, blocker, or unchanged evidence.
 
 Guardrails and authority:
-DEC-001 through DEC-012 are locked; optional and future scope is excluded. Preserve tracked work, including SRC-048 and recovery paths. EXT-002A authorizes only Phase 2 entry; broader EXT-002 and later gates remain mandatory. Keep workspace Clippy warning-free without allowances, suppression, lint-level reduction, test weakening, or behavior loss.
+DEC-001 through DEC-012 are locked; optional and future scope is excluded. Preserve tracked work, including SRC-049 and recovery paths. EXT-002A authorizes only Phase 2 entry; broader EXT-002 and later gates remain mandatory. Keep workspace Clippy warning-free without allowances, suppression, lint-level reduction, test weakening, or behavior loss.
 
 Never weaken, skip, disable, delete, or narrow a valid test; suppress a valid failure; ignore a required exit code; reduce a required threshold. Never mark a required check allowed to fail. Never add a production bypass solely for tests or substitute mocked behavior for required real integration, signing, publication, recovery, or runtime evidence. If a test contradicts the plan or contract, prove it and replace it with equal or stronger coverage.
 
