@@ -187,7 +187,7 @@ pub async fn do_sisu(
     Ok((auth, resp, data))
 }
 
-#[ignore]
+#[ignore = "requires authorized Xbox service access and keychain state"]
 #[tokio::test]
 async fn test_minecraft_win_auth() {
     let client = reqwest::Client::new();
@@ -198,7 +198,16 @@ async fn test_minecraft_win_auth() {
         .await
         .expect("ok");
 
-    println!("title {}", resp.title_token.token);
-    println!("user {}", resp.user_token.token);
-    println!("webpage {}", resp.web_page);
+    assert!(
+        !resp.title_token.token.is_empty(),
+        "title token must not be empty"
+    );
+    assert!(
+        !resp.user_token.token.is_empty(),
+        "user token must not be empty"
+    );
+    assert!(
+        !resp.web_page.is_empty(),
+        "authorization page must not be empty"
+    );
 }
