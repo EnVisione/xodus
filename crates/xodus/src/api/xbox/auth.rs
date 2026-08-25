@@ -71,8 +71,12 @@ pub async fn request_xsts_token(
 }
 
 pub fn get_xsts_auth_header(xsts: XstsResponse) -> Result<String, std::io::Error> {
+    if xsts.token.is_empty() {
+        return Err(std::io::Error::other("XSTS response missing token"));
+    }
     let uhs = xsts
         .user_hash()
+        .filter(|hash| !hash.is_empty())
         .ok_or_else(|| std::io::Error::other("XSTS response missing xui claim"))?;
     Ok(format!("XBL3.0 x={uhs};{}", xsts.token))
 }
@@ -115,6 +119,34 @@ mod tests {
                 "NotAfter":"2026-01-01T00:00:00Z",
                 "Token":"token",
                 "DisplayClaims":{"Xui":[],"Xti":[]}
+            }"#,
+        )
+        .expect("synthetic XSTS response must deserialize");
+
+        assert!(get_xsts_auth_header(response).is_err());
+    }
+
+    #[test]
+    fn xsts_header_rejects_empty_token() {
+        let response: XstsResponse = serde_json::from_str(
+            r#"{
+                "NotAfter":"2026-01-01T00:00:00Z",
+                "Token":"",
+                "DisplayClaims":{"Xui":[{"Uhs":"user"}],"Xti":[]}
+            }"#,
+        )
+        .expect("synthetic XSTS response must deserialize");
+
+        assert!(get_xsts_auth_header(response).is_err());
+    }
+
+    #[test]
+    fn xsts_header_rejects_empty_user_hash() {
+        let response: XstsResponse = serde_json::from_str(
+            r#"{
+                "NotAfter":"2026-01-01T00:00:00Z",
+                "Token":"token",
+                "DisplayClaims":{"Xui":[{"Uhs":""}],"Xti":[]}
             }"#,
         )
         .expect("synthetic XSTS response must deserialize");
