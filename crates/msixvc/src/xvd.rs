@@ -2200,7 +2200,7 @@ impl XvdFile {
 
         let mut region_headers: Vec<XvcRegionHeader> = Vec::new();
 
-        // TODO: Check if we have proper content type
+        // XvdHeader::try_from_array validates the content type before metadata access.
         if xvd_header.xvc_data_length > 0 {
             file.seek(std::io::SeekFrom::Start(xvc_info_offset)).await?;
 
@@ -3089,6 +3089,7 @@ mod tests {
     const SEGMENT_METADATA_SEGMENT_COUNT_OFFSET: usize = 16;
     const FILETIME_OFFSET: usize = 0x210;
     const DRIVE_SIZE_OFFSET: usize = 0x218;
+    const XVD_CONTENT_TYPE_OFFSET: usize = 0x284;
     const XVC_DATA_LENGTH_OFFSET: usize = 0x290;
     const SYNTHETIC_DRIVE_SIZE: u64 = XVD_HEADER_SIZE as u64;
     const SYNTHETIC_DRIVE_DATA_OFFSET: u64 = 0x5000;
@@ -3420,6 +3421,28 @@ mod tests {
             error,
             XvdFileParseError::Io(error) if error.kind() == ErrorKind::Other
         ));
+    }
+
+    #[tokio::test]
+    async fn parse_rejects_invalid_content_type_before_metadata_access() {
+        let mut reader = SyntheticXvdReader::synthetic_xvd_header(false);
+        let read_bytes = Arc::clone(&reader.read_bytes);
+        reader.inner.get_mut()[XVD_CONTENT_TYPE_OFFSET..XVD_CONTENT_TYPE_OFFSET + 4]
+            .copy_from_slice(&u32::MAX.to_le_bytes());
+
+        let result = XvdFile::parse(reader).await;
+        let error = match result {
+            Ok(_) => panic!("an invalid XVD content type must not parse"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            XvdFileParseError::Header(
+                super::super::models::xvd::XvdHeaderParseError::InvalidXvdContentType(_)
+            )
+        ));
+        assert_eq!(read_bytes.load(Ordering::SeqCst), XVD_HEADER_SIZE);
     }
 
     #[tokio::test]
