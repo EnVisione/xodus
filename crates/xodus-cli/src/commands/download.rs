@@ -13,7 +13,8 @@ use xodus::models::packagespc::PackageFile;
 use xodus::tokens::TokenManager;
 
 use crate::commands::streaming::{
-    new_transaction, open_package_output, promote_transaction, promotion_entries,
+    acquire_transaction_lock, new_transaction, open_package_output, promote_transaction,
+    promotion_entries,
 };
 use crate::package::{get_content_id, get_packages, package_download_urls};
 
@@ -125,6 +126,17 @@ pub async fn run(
     else {
         log::error!("Selection failed");
         return ExitCode::FAILURE;
+    };
+    let _transaction_lock = if dry_run {
+        None
+    } else {
+        match acquire_transaction_lock(Path::new(".")) {
+            Ok(lock) => Some(lock),
+            Err(error) => {
+                eprintln!("could not acquire download transaction lock: {error}");
+                return ExitCode::FAILURE;
+            }
+        }
     };
     println!();
     for file in files {

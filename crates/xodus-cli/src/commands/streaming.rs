@@ -5,7 +5,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use fs2::available_space;
+use fs2::{FileExt, available_space};
 use futures_util::{StreamExt, stream};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use msixvc::streaming;
@@ -34,6 +34,7 @@ const TRANSACTION_DIRECTORY_PREFIX: &str = ".xodus-streaming-txn-";
 const TRANSACTION_PAYLOAD_DIRECTORY: &str = ".xodus-streaming-payload";
 const TRANSACTION_BACKUP_DIRECTORY: &str = ".xodus-streaming-backup";
 const TRANSACTION_JOURNAL: &str = ".xodus-streaming-journal";
+const TRANSACTION_LOCK_FILE: &str = ".xodus-streaming.lock";
 
 fn invalid_package_path(message: impl Into<String>) -> io::Error {
     io::Error::new(ErrorKind::InvalidData, message.into())
@@ -563,6 +564,17 @@ fn recover_transactions(output_root: &Path) -> io::Result<()> {
     Ok(())
 }
 
+pub(crate) fn acquire_transaction_lock(output_root: &Path) -> io::Result<std::fs::File> {
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(output_root.join(TRANSACTION_LOCK_FILE))?;
+    lock.try_lock_exclusive()?;
+    Ok(lock)
+}
+
 pub(crate) fn new_transaction(output_root: &Path) -> io::Result<(TempDir, PathBuf)> {
     let transaction = TempDirBuilder::new()
         .prefix(TRANSACTION_DIRECTORY_PREFIX)
@@ -860,6 +872,14 @@ where
         eprintln!("failed to create transaction root {}: {err}", out.display());
         return false;
     }
+
+    let _transaction_lock = match acquire_transaction_lock(out) {
+        Ok(lock) => lock,
+        Err(err) => {
+            eprintln!("failed to acquire package transaction lock: {err}");
+            return false;
+        }
+    };
 
     if let Err(err) = recover_transactions(out) {
         eprintln!("failed to recover a previous package transaction: {err}");
@@ -1210,10 +1230,10 @@ mod tests {
     use std::io::Write;
 
     use super::{
-        PromotionState, SegmentFile, TRANSACTION_JOURNAL, changed_jobs, new_transaction,
-        open_package_input, open_package_output, package_path_components, promote_transaction,
-        promotion_entries, promotion_entries_with_removals, read_transaction_journal,
-        recover_transaction_dir, write_transaction_journal,
+        PromotionState, SegmentFile, TRANSACTION_JOURNAL, acquire_transaction_lock, changed_jobs,
+        new_transaction, open_package_input, open_package_output, package_path_components,
+        promote_transaction, promotion_entries, promotion_entries_with_removals,
+        read_transaction_journal, recover_transaction_dir, write_transaction_journal,
     };
 
     #[test]
@@ -1447,5 +1467,14 @@ mod tests {
             .expect("legacy journal must be recoverable");
         assert_eq!(entries.len(), 1);
         assert!(!entries[0].remove_final);
+    }
+
+    #[test]
+    fn transaction_lock_rejects_concurrent_mutation() {
+        let temporary = tempfile::tempdir().unwrap();
+        let first = acquire_transaction_lock(temporary.path()).unwrap();
+        assert!(acquire_transaction_lock(temporary.path()).is_err());
+        drop(first);
+        assert!(acquire_transaction_lock(temporary.path()).is_ok());
     }
 }
