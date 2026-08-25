@@ -11,15 +11,25 @@ const LOGIN_MARKET: &str = "en-US";
 const USER_AUTH_SCOPE: &str = "scope=service::user.auth.xboxlive.com::MBI_SSL&api-version=2.0";
 
 pub async fn run(client: &reqwest::Client, tokens: &TokenManager) -> ExitCode {
-    let token = tokens.get_device_sts_token().unwrap();
+    let token = match tokens.get_device_sts_token() {
+        Ok(token) => token,
+        Err(error) => {
+            eprintln!("Failed to load device STS token: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
     let secrets::Token::Legacy(token) = token else {
         eprintln!("Invalid STS token");
         return ExitCode::FAILURE;
     };
     let handler = LoginHandler::new(client.clone(), token, tokens.clone());
-    let output = webview::run_sessions(handler)
-        .expect("failed to login")
-        .flatten();
+    let output = match webview::run_sessions(handler) {
+        Ok(output) => output.flatten(),
+        Err(error) => {
+            eprintln!("Failed to run login webview: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
     let issued_tokens = match output {
         Some(soap::BodyContent::RequestSecurityTokenResponseCollection(collection)) => {
             collection.security_tokens
@@ -29,7 +39,10 @@ pub async fn run(client: &reqwest::Client, tokens: &TokenManager) -> ExitCode {
             eprintln!("Didn't log in");
             vec![]
         }
-        _ => unreachable!(),
+        Some(_) => {
+            eprintln!("Unsupported login response");
+            return ExitCode::FAILURE;
+        }
     };
 
     for token in issued_tokens {
@@ -171,7 +184,7 @@ impl webview::SessionHandler for LoginHandler {
                         puid: data.puid,
                         username: data.username,
                     })
-                    .unwrap();
+                    .map_err(|error| Box::new(error) as Box<dyn std::error::Error>)?;
                 Ok(webview::HandlerControl::Complete(Some(da)))
             }
         }

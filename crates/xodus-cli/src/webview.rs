@@ -381,10 +381,13 @@ fn create_session<T: SessionHandler>(
     let webview = {
         use tao::platform::unix::WindowExtUnix;
         use wry::WebViewBuilderExtUnix;
-        builder.build_gtk(window.default_vbox().unwrap()).unwrap()
+        let vbox = window
+            .default_vbox()
+            .ok_or_else(|| std::io::Error::other("login window has no default GTK container"))?;
+        builder.build_gtk(vbox)?
     };
     #[cfg(not(target_os = "linux"))]
-    let webview = builder.build(&window).unwrap();
+    let webview = builder.build(&window)?;
 
     state.active_session = Some(session_id);
     state.active_webview = Some(webview);
