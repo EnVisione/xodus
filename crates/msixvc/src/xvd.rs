@@ -454,6 +454,19 @@ pub enum SegmentMetadataParseError {
     SegmentHashSliceEndOverflow { start: usize, length: usize },
     #[error("segment hash slice end {end} exceeds {data_hash_count} available section hashes")]
     SegmentHashSliceBeyondAvailableHashes { end: usize, data_hash_count: usize },
+    #[error(
+        "segment metadata section end overflows for section offset {section_offset} and section length {section_length}"
+    )]
+    SegmentSectionEndOverflow {
+        section_offset: u64,
+        section_length: u64,
+    },
+    #[error("segment page byte offset overflows for page offset {page_offset}")]
+    SegmentPageByteOffsetOverflow { page_offset: u64 },
+    #[error(
+        "segment page offset advancement overflows for page offset {page_offset} and page length {page_length}"
+    )]
+    SegmentPageAdvanceOverflow { page_offset: u64, page_length: u64 },
     #[error("segment metadata file name contains invalid UTF-16")]
     InvalidFileName(#[source] std::string::FromUtf16Error),
 }
@@ -792,6 +805,36 @@ fn segment_hash_slice_bounds(
     Ok(start..end)
 }
 
+fn segment_section_end(
+    section_offset: u64,
+    section_length: u64,
+) -> Result<u64, SegmentMetadataParseError> {
+    section_offset.checked_add(section_length).ok_or(
+        SegmentMetadataParseError::SegmentSectionEndOverflow {
+            section_offset,
+            section_length,
+        },
+    )
+}
+
+fn segment_page_byte_offset(page_offset: u64) -> Result<u64, SegmentMetadataParseError> {
+    page_offset
+        .checked_mul(PAGE_SIZE as u64)
+        .ok_or(SegmentMetadataParseError::SegmentPageByteOffsetOverflow { page_offset })
+}
+
+fn next_segment_page_offset(
+    page_offset: u64,
+    page_length: u64,
+) -> Result<u64, SegmentMetadataParseError> {
+    page_offset.checked_add(page_length).ok_or(
+        SegmentMetadataParseError::SegmentPageAdvanceOverflow {
+            page_offset,
+            page_length,
+        },
+    )
+}
+
 fn validate_xvc_region_hash_entry_addresses(
     xvd_type: u32,
     hash_tree_levels: u64,
@@ -1126,6 +1169,7 @@ impl XvdFile {
         let mut files = HashMap::new();
 
         for section in &self.encrypted_section_infos {
+            let section_end = segment_section_end(section.section_offset, section.section_length)?;
             let segment_page_start = section.section_offset.div_ceil(PAGE_SIZE as u64);
             let mut page_offset = segment_page_start;
             for segment_no in section.first_segment_index..segment_header.segment_count {
@@ -1147,11 +1191,11 @@ impl XvdFile {
                 } else {
                     segment.filesize.div_ceil(PAGE_SIZE as u64)
                 };
-                if page_offset * (PAGE_SIZE as u64)
-                    >= section.section_offset + section.section_length
-                {
+                let page_byte_offset = segment_page_byte_offset(page_offset)?;
+                if page_byte_offset >= section_end {
                     break;
                 }
+                let next_page_offset = next_segment_page_offset(page_offset, page_length)?;
                 let hash_slice = segment_hash_slice_bounds(
                     page_offset,
                     segment_page_start,
@@ -1162,7 +1206,7 @@ impl XvdFile {
                 files.insert(
                     file_name,
                     SegmentFile {
-                        offset: page_offset * PAGE_SIZE as u64,
+                        offset: page_byte_offset,
                         length: segment.filesize,
                         data_hashs,
                         keep_encrypted: segment
@@ -1170,7 +1214,7 @@ impl XvdFile {
                             .contains(XvdSegmentMetadataSegmentFlags::KEEP_ENCRYPTED_ON_DISK),
                     },
                 );
-                page_offset += page_length;
+                page_offset = next_page_offset;
             }
         }
         Ok(files)
@@ -1673,9 +1717,10 @@ mod tests {
     use super::{
         EncryptedSectionInfo, MAX_XVC_REGION_HEADERS, PAGE_SIZE, SEGMENT_METADATA_READER_CAPACITY,
         SegmentMetadataParseError, UserPackageFile, UserPackageFilesParseError, XvcRegionId,
-        XvdFile, XvdFileParseError, hash_entry_read_offset, hash_page_index, package_file_name,
-        reserve_xvc_region_entries, segment_file_name, segment_metadata_reader_capacity,
-        validate_segment_metadata_table_extent, validate_xvc_region_hash_entry_addresses,
+        XvdFile, XvdFileParseError, hash_entry_read_offset, hash_page_index,
+        next_segment_page_offset, package_file_name, reserve_xvc_region_entries, segment_file_name,
+        segment_metadata_reader_capacity, validate_segment_metadata_table_extent,
+        validate_xvc_region_hash_entry_addresses,
     };
 
     const XVD_HEADER_SIZE: usize = 4096;
@@ -2359,6 +2404,107 @@ mod tests {
                 data_hash_count: 0,
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn parse_segment_metadata_rejects_overflowing_section_end_before_path_read() {
+        let mut xvd = XvdFile::parse(SyntheticXvdReader::synthetic_xvd_with_region_count(0))
+            .await
+            .expect("synthetic XVD must parse");
+        xvd.encrypted_section_infos.push(EncryptedSectionInfo {
+            section_offset: u64::MAX,
+            section_length: 1,
+            header_id: XvcRegionId::Unknown,
+            vduid: [0; 8],
+            data_units: None,
+            first_segment_index: 0,
+            data_hashs: vec![[0; 20]],
+        });
+        let metadata_length = (SEGMENT_METADATA_HEADER_SIZE + 16) as u64;
+        let (reader, read_bytes) =
+            SyntheticXvdReader::synthetic_segment_metadata_with_single_segment(1, 0, 0, false);
+        let error = match xvd
+            .parse_segment_metadata(
+                reader,
+                &UserPackageFile {
+                    offset: 0,
+                    length: metadata_length,
+                },
+            )
+            .await
+        {
+            Ok(_) => panic!("overflowing section end must not parse"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            SegmentMetadataParseError::SegmentSectionEndOverflow {
+                section_offset: u64::MAX,
+                section_length: 1,
+            }
+        ));
+        assert_eq!(
+            read_bytes.load(Ordering::Relaxed),
+            metadata_length as usize,
+            "section end overflow must not read a segment path"
+        );
+    }
+
+    #[tokio::test]
+    async fn parse_segment_metadata_rejects_overflowing_page_byte_offset() {
+        let mut xvd = XvdFile::parse(SyntheticXvdReader::synthetic_xvd_with_region_count(0))
+            .await
+            .expect("synthetic XVD must parse");
+        xvd.encrypted_section_infos.push(EncryptedSectionInfo {
+            section_offset: u64::MAX - 1,
+            section_length: 1,
+            header_id: XvcRegionId::Unknown,
+            vduid: [0; 8],
+            data_units: None,
+            first_segment_index: 0,
+            data_hashs: vec![[0; 20]],
+        });
+        let metadata_length = (SEGMENT_METADATA_HEADER_SIZE + 16 + 2) as u64;
+        let (reader, _) = SyntheticXvdReader::synthetic_segment_metadata_with_single_segment(
+            1,
+            0,
+            PAGE_SIZE as u64,
+            true,
+        );
+        let error = match xvd
+            .parse_segment_metadata(
+                reader,
+                &UserPackageFile {
+                    offset: 0,
+                    length: metadata_length,
+                },
+            )
+            .await
+        {
+            Ok(_) => panic!("overflowing page byte offset must not parse"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            SegmentMetadataParseError::SegmentPageByteOffsetOverflow { .. }
+        ));
+    }
+
+    #[test]
+    fn next_segment_page_offset_rejects_overflow_without_mutation() {
+        let error = next_segment_page_offset(u64::MAX, 1)
+            .expect_err("overflowing segment page advancement must fail");
+
+        assert!(matches!(
+            error,
+            SegmentMetadataParseError::SegmentPageAdvanceOverflow {
+                page_offset: u64::MAX,
+                page_length: 1,
+            }
+        ));
+        assert_eq!(next_segment_page_offset(1, 1).unwrap(), 2);
     }
 
     #[tokio::test]
