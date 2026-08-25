@@ -94,6 +94,21 @@ fn validate_active_http_offset(next: u64, end_offset: u64, total: u64) -> io::Re
     Ok(())
 }
 
+fn validate_active_http_position(
+    logical_position: u64,
+    next_offset: u64,
+    end_offset: u64,
+    total: u64,
+) -> io::Result<()> {
+    if next_offset != logical_position {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "active stream position does not match logical position",
+        ));
+    }
+    validate_active_http_offset(next_offset, end_offset, total)
+}
+
 fn validate_reopened_http_stream(
     expected_start: u64,
     expected_total: u64,
@@ -340,15 +355,19 @@ impl<'t> AsyncRead for HttpRead<'t> {
             }
 
             let total = self.len;
+            let logical_position = self.pos;
             let Some(active) = self.active.as_mut() else {
                 return Poll::Ready(Err(Error::new(
                     ErrorKind::UnexpectedEof,
                     "missing active http stream",
                 )));
             };
-            if let Err(err) =
-                validate_active_http_offset(active.next_offset, active.end_offset, total)
-            {
+            if let Err(err) = validate_active_http_position(
+                logical_position,
+                active.next_offset,
+                active.end_offset,
+                total,
+            ) {
                 return Poll::Ready(Err(err));
             }
 
@@ -1127,6 +1146,14 @@ mod tests {
     }
 
     #[test]
+    fn http_read_rejects_active_position_drift() {
+        let error = super::validate_active_http_position(4, 3, 10, 10)
+            .expect_err("active position before logical position must fail");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
     fn prefix_cache_rejects_upstream_extent_beyond_declared_length() {
         let error = super::checked_cache_position(4, 1, 4)
             .expect_err("cache data beyond the declared length must fail");
@@ -1212,7 +1239,7 @@ mod tests {
             pos: 0,
             pending_open: None,
             active: Some(super::ActiveHttpStream {
-                next_offset: 1,
+                next_offset: 0,
                 end_offset: 2,
                 stream,
             }),
@@ -1291,6 +1318,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn http_read_completes_initial_response() {
+        let body = test_body();
+        let server = spawn_server(body.clone(), None, 0).await.unwrap();
+        let mut reader = HttpRead::open(reqwest::Client::new(), &server.url, None::<fn(u64, u64)>)
+            .await
+            .unwrap();
+
+        let mut output = Vec::new();
+        reader.read_to_end(&mut output).await.unwrap();
+
+        assert_eq!(output, body);
+        assert_eq!(server.request_ranges(), vec![None]);
+    }
+
+    #[tokio::test]
     async fn cached_backward_seek_uses_prefix() {
         let body = test_body();
         let server = spawn_server(body.clone(), None, 0).await.unwrap();
@@ -1325,6 +1367,24 @@ mod tests {
         assert_eq!(ranges[0], None);
         assert_eq!(ranges[1].as_deref(), Some("bytes=96-"));
         let _ = std::fs::remove_file(cache);
+    }
+
+    #[tokio::test]
+    async fn http_read_resumes_after_short_initial_response() {
+        let body = test_body();
+        let server = spawn_server(body.clone(), Some(96), 0).await.unwrap();
+        let mut reader = HttpRead::open(reqwest::Client::new(), &server.url, None::<fn(u64, u64)>)
+            .await
+            .unwrap();
+
+        let mut output = Vec::new();
+        reader.read_to_end(&mut output).await.unwrap();
+
+        assert_eq!(output, body);
+        let ranges = server.request_ranges();
+        assert_eq!(ranges.len(), 2);
+        assert_eq!(ranges[0], None);
+        assert_eq!(ranges[1].as_deref(), Some("bytes=96-"));
     }
 
     #[tokio::test]
