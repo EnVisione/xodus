@@ -10,12 +10,18 @@ pub async fn get_license(
     content_id: String,
     market: String,
 ) -> std::result::Result<(DeviceKey, SPLicense), String> {
-    let dev_token = tokens.get_device_sts_token().unwrap();
+    let dev_token = tokens
+        .get_device_sts_token()
+        .map_err(|error| format!("failed to load device STS token: {error}"))?;
     let Token::Legacy(dev_token) = dev_token else {
         return Err("Invalid STS token".to_string());
     };
-    let user = tokens.get_user().unwrap();
-    let user_token = tokens.get_user_sts_token().unwrap();
+    let user = tokens
+        .get_user()
+        .map_err(|error| format!("failed to load user profile: {error}"))?;
+    let user_token = tokens
+        .get_user_sts_token()
+        .map_err(|error| format!("failed to load user STS token: {error}"))?;
     let Token::Legacy(legacy) = user_token else {
         return Err("Unspported user token".to_string());
     };
@@ -28,7 +34,7 @@ pub async fn get_license(
         Some(soap::PolicyReference::mbi_ssl()),
     )
     .await
-    .unwrap();
+    .map_err(|error| format!("failed to exchange device token: {error}"))?;
 
     let user_token = xodus::api::live::exchange_user_token(
         client,
@@ -44,7 +50,7 @@ pub async fn get_license(
         )],
     )
     .await
-    .expect("Failed to get ms user token");
+    .map_err(|error| format!("failed to exchange user token: {error}"))?;
 
     let ms_device_token: Token =
         Token::try_from(ms_device_token).map_err(|error| error.to_string())?;
@@ -87,14 +93,16 @@ pub async fn get_license(
     .map_err(|err| err.to_string())?;
 
     let game_splicense = SPLicense::parse_base64(&game_license.splicense_block)
-        .expect("could not parse base64 game SPLicense");
+        .map_err(|error| format!("could not parse base64 game SPLicense: {error}"))?;
 
-    let dev_license = tokens.get_device_license().unwrap();
+    let dev_license = tokens
+        .get_device_license()
+        .map_err(|error| format!("failed to load device license: {error}"))?;
     let device_license = SPLicense::parse_base64(&dev_license.splicense)
-        .expect("could not parse base64 device SPLicense");
-    let key = device_license
+        .map_err(|error| format!("could not parse base64 device SPLicense: {error}"))?;
+    let encrypted_device_key = device_license
         .encrypted_device_key
-        .unwrap()
-        .derive_device_key();
+        .ok_or_else(|| "device SPLicense has no encrypted device key".to_string())?;
+    let key = encrypted_device_key.derive_device_key();
     Ok((key, game_splicense))
 }
