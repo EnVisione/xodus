@@ -3,31 +3,87 @@ use crate::models::xbox::{
 };
 use serde::{Serialize, de::DeserializeOwned};
 
+const MAX_XBOX_JSON_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+
+#[derive(Debug, thiserror::Error)]
+pub enum XboxApiError {
+    #[error("xbox request error: {0}")]
+    Request(#[from] reqwest::Error),
+    #[error("xbox response body is {size} bytes, exceeding the limit {limit}")]
+    ResponseBodyTooLarge { size: usize, limit: usize },
+    #[error("xbox response is not valid json: {0}")]
+    Json(#[from] serde_json::Error),
+}
+
 async fn post_json<Body, Response>(
     client: &reqwest::Client,
     endpoint: &str,
     body: &Body,
-) -> reqwest::Result<Response>
+) -> Result<Response, XboxApiError>
 where
     Body: Serialize,
     Response: DeserializeOwned,
 {
-    client
+    let response = client
         .post(endpoint)
         .header("Content-Type", "application/json")
         .header("x-xbl-contract-version", "1")
         .json(body)
         .send()
         .await?
-        .error_for_status()?
-        .json()
-        .await
+        .error_for_status()?;
+    decode_json_response(response).await
+}
+
+fn validate_json_response_length(content_length: Option<u64>) -> Result<(), XboxApiError> {
+    let Some(length) = content_length else {
+        return Ok(());
+    };
+    if length > MAX_XBOX_JSON_RESPONSE_BYTES as u64 {
+        return Err(XboxApiError::ResponseBodyTooLarge {
+            size: usize::try_from(length).unwrap_or(usize::MAX),
+            limit: MAX_XBOX_JSON_RESPONSE_BYTES,
+        });
+    }
+    Ok(())
+}
+
+fn append_json_response_chunk(body: &mut Vec<u8>, chunk: &[u8]) -> Result<(), XboxApiError> {
+    let next_size =
+        body.len()
+            .checked_add(chunk.len())
+            .ok_or(XboxApiError::ResponseBodyTooLarge {
+                size: usize::MAX,
+                limit: MAX_XBOX_JSON_RESPONSE_BYTES,
+            })?;
+    if next_size > MAX_XBOX_JSON_RESPONSE_BYTES {
+        return Err(XboxApiError::ResponseBodyTooLarge {
+            size: next_size,
+            limit: MAX_XBOX_JSON_RESPONSE_BYTES,
+        });
+    }
+    body.extend_from_slice(chunk);
+    Ok(())
+}
+
+async fn decode_json_response<Response>(
+    mut response: reqwest::Response,
+) -> Result<Response, XboxApiError>
+where
+    Response: DeserializeOwned,
+{
+    validate_json_response_length(response.content_length())?;
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        append_json_response_chunk(&mut body, &chunk)?;
+    }
+    Ok(serde_json::from_slice(&body)?)
 }
 
 pub async fn authenticate_xbox_user(
     client: &reqwest::Client,
     rps_ticket: String,
-) -> reqwest::Result<XstsResponse> {
+) -> Result<XstsResponse, XboxApiError> {
     let body = UserAuthRequest {
         relying_party: "http://auth.xboxlive.com".to_string(),
         token_type: "JWT".to_string(),
@@ -50,7 +106,7 @@ pub async fn request_xsts_token(
     client: &reqwest::Client,
     token: String,
     relying_party: &str,
-) -> reqwest::Result<XstsResponse> {
+) -> Result<XstsResponse, XboxApiError> {
     let body = XstsRequest {
         relying_party: Some(relying_party.to_string()),
         token_type: Some("JWT".to_string()),
@@ -86,7 +142,10 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
-    use super::{get_xsts_auth_header, post_json};
+    use super::{
+        XboxApiError, append_json_response_chunk, get_xsts_auth_header, post_json,
+        validate_json_response_length,
+    };
     use crate::models::xbox::XstsResponse;
 
     async fn response_server(status: &str, body: &str) -> (String, tokio::task::JoinHandle<()>) {
@@ -164,7 +223,9 @@ mod tests {
         )
         .await;
 
-        let error = result.expect_err("non-success status must fail");
+        let XboxApiError::Request(error) = result.expect_err("non-success status must fail") else {
+            panic!("non-success status must remain a request error");
+        };
         assert_eq!(
             error.status(),
             Some(reqwest::StatusCode::SERVICE_UNAVAILABLE)
@@ -182,7 +243,25 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_err(), "missing required XSTS fields must fail");
+        assert!(matches!(result, Err(XboxApiError::Json(_))));
         server.await.expect("test server must exit");
+    }
+
+    #[test]
+    fn oversized_xbox_response_length_is_rejected_before_json_decode() {
+        assert!(matches!(
+            validate_json_response_length(Some((super::MAX_XBOX_JSON_RESPONSE_BYTES as u64) + 1)),
+            Err(XboxApiError::ResponseBodyTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn oversized_xbox_chunk_is_rejected_before_json_decode() {
+        let mut body = vec![0_u8; super::MAX_XBOX_JSON_RESPONSE_BYTES];
+
+        assert!(matches!(
+            append_json_response_chunk(&mut body, &[0]),
+            Err(XboxApiError::ResponseBodyTooLarge { .. })
+        ));
     }
 }
