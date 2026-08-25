@@ -1013,6 +1013,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn applies_stream_rollback_with_source_and_target_hashes() {
+        let mut xsp = parse(ROLLBACK_XSP)
+            .await
+            .expect("valid synthetic rollback fixture");
+        xsp.entries = vec![XspPatchRecord::NewData {
+            block_number: 0,
+            block_count: 1,
+        }];
+        let base_hashes = [hash20(b"new!"), hash20(b"base")];
+        let target_hashes = [hash20(b"base")];
+        let base = XspBaseState {
+            content_id: xsp.header.content_id,
+            version: xsp.header.upgrade_from_version,
+            block_hashes: &base_hashes,
+        };
+        let input = XspUpdateInput {
+            expected_source_hashes: &base_hashes,
+            target_hashes: &target_hashes,
+            available_space: u64::MAX,
+            block_size: 4,
+        };
+        let mut base_reader = TestReader::new(b"new!base");
+        let mut new_data_reader = TestReader::new(b"base");
+        let mut output = TestWriter(Vec::new());
+
+        xsp.apply_rollback_stream(
+            &mut base_reader,
+            &mut new_data_reader,
+            &mut output,
+            base,
+            input,
+        )
+        .await
+        .expect("valid stream rollback should apply");
+
+        assert_eq!(output.0, b"base");
+    }
+
+    #[tokio::test]
     async fn stream_update_rejects_truncated_source_before_output() {
         let xsp = parse(VALID_XSP).await.expect("valid synthetic XSP fixture");
         let base_hashes = [hash20(b"base")];
