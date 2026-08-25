@@ -3131,6 +3131,69 @@ mod tests {
         assert_eq!(attempts.load(Ordering::SeqCst), 3);
     }
 
+    #[tokio::test]
+    async fn extract_file_verifies_page_hash_and_retries_output() {
+        let xvd = XvdFile::parse(SyntheticXvdReader::synthetic_xvd_with_region_count(0))
+            .await
+            .expect("synthetic XVD must parse");
+        let page = [7_u8; PAGE_SIZE];
+        let digest = Sha256::digest(page);
+        let mut page_hash = [0_u8; 20];
+        page_hash.copy_from_slice(&digest[..20]);
+        let mut reader = SyntheticXvdReader {
+            inner: Cursor::new(page.to_vec()),
+            fail_seeks: false,
+            read_bytes: Arc::new(AtomicUsize::new(0)),
+        };
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let mut writer = FailingAsyncWriter {
+            attempts: Arc::clone(&attempts),
+            failures: 2,
+        };
+        let file = SegmentFile {
+            offset: 0,
+            length: 1,
+            data_hashs: vec![page_hash],
+            keep_encrypted: false,
+        };
+
+        xvd.extract_file(&mut reader, &mut writer, &file, [0_u8; 32], |_, _| {})
+            .await
+            .expect("verified extraction must retry transient output failures");
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn extract_file_rejects_page_hash_mismatch_before_output() {
+        let xvd = XvdFile::parse(SyntheticXvdReader::synthetic_xvd_with_region_count(0))
+            .await
+            .expect("synthetic XVD must parse");
+        let mut reader = SyntheticXvdReader {
+            inner: Cursor::new(vec![7_u8; PAGE_SIZE]),
+            fail_seeks: false,
+            read_bytes: Arc::new(AtomicUsize::new(0)),
+        };
+        let mut writer = RecordingAsyncWriter(Vec::new());
+        let file = SegmentFile {
+            offset: 0,
+            length: 1,
+            data_hashs: vec![[0_u8; 20]],
+            keep_encrypted: false,
+        };
+
+        let error = xvd
+            .extract_file(&mut reader, &mut writer, &file, [0_u8; 32], |_, _| {})
+            .await
+            .expect_err("a page hash mismatch must fail before output");
+
+        assert!(matches!(
+            error,
+            ExtractFileError::DataHashMismatch { page_index: 0 }
+        ));
+        assert!(writer.0.is_empty());
+    }
+
     #[test]
     fn output_retry_policy_rejects_permanent_errors() {
         assert!(is_retryable_output_error(&Error::other("temporary")));
@@ -3165,6 +3228,8 @@ mod tests {
         attempts: Arc<AtomicUsize>,
         failures: usize,
     }
+
+    struct RecordingAsyncWriter(Vec<u8>);
 
     struct DriftingIo(Cursor<Vec<u8>>);
 
@@ -3218,6 +3283,25 @@ mod tests {
             } else {
                 Poll::Ready(Ok(buf.len()))
             }
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl AsyncWrite for RecordingAsyncWriter {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            self.0.extend_from_slice(buf);
+            Poll::Ready(Ok(buf.len()))
         }
 
         fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
