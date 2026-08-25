@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use super::base::ReferenceUri;
 
@@ -182,32 +183,44 @@ impl KeyInfoWrap {
         }
     }
 
-    pub fn as_signature(self) -> SignatureKeyInfo {
+    pub fn as_signature(self) -> Result<SignatureKeyInfo, KeyInfoError> {
         let Self {
             security_token_reference: Some(reference),
             ..
         } = self
         else {
-            panic!("Key is not named");
+            return Err(KeyInfoError::MissingSecurityTokenReference);
         };
 
-        SignatureKeyInfo {
+        Ok(SignatureKeyInfo {
             security_token_reference: reference,
-        }
+        })
     }
 
-    pub fn as_named(self) -> NamedKeyInfo {
+    pub fn as_named(self) -> Result<NamedKeyInfo, KeyInfoError> {
         let Self {
             ds,
             key_name,
             security_token_reference: _,
         } = self;
 
-        NamedKeyInfo {
+        let Some(key_name) = key_name else {
+            return Err(KeyInfoError::MissingKeyName);
+        };
+
+        Ok(NamedKeyInfo {
             ds: ds.unwrap_or_else(|| "http://www.w3.org/2000/09/xmldsig#".to_string()),
-            key_name: key_name.expect("Key is not named"),
-        }
+            key_name,
+        })
     }
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum KeyInfoError {
+    #[error("SOAP key info is missing a security token reference")]
+    MissingSecurityTokenReference,
+    #[error("SOAP key info is missing a key name")]
+    MissingKeyName,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -286,7 +299,7 @@ mod tests {
         let key_info: KeyInfoWrap =
             quick_xml::de::from_str(xml).expect("failed to deserialize key info");
 
-        let named = key_info.as_named();
+        let named = key_info.as_named().expect("valid named key info");
         assert_eq!(named.ds, "http://www.w3.org/2000/09/xmldsig#");
         assert_eq!(named.key_name, "http://Passport.NET/STS");
     }
@@ -302,7 +315,29 @@ mod tests {
         let key_info: KeyInfoWrap =
             quick_xml::de::from_str(xml).expect("failed to deserialize key info");
 
-        let signature = key_info.as_signature();
+        let signature = key_info.as_signature().expect("valid signature key info");
         assert_eq!(signature.security_token_reference.reference.uri, "#SignKey");
+    }
+
+    #[test]
+    fn key_info_wrap_rejects_missing_key_name() {
+        let error = KeyInfoWrap {
+            ds: None,
+            key_name: None,
+            security_token_reference: None,
+        }
+        .as_named()
+        .expect_err("missing key name must fail");
+
+        assert_eq!(error, KeyInfoError::MissingKeyName);
+    }
+
+    #[test]
+    fn key_info_wrap_rejects_missing_security_token_reference() {
+        let error = KeyInfoWrap::sts()
+            .as_signature()
+            .expect_err("missing security token reference must fail");
+
+        assert_eq!(error, KeyInfoError::MissingSecurityTokenReference);
     }
 }

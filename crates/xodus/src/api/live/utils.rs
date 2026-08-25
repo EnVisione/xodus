@@ -92,7 +92,7 @@ pub fn sign_xml(
 
     kmgr.add_key(bergshamra::Key::new(key, bergshamra::KeyUsage::Sign));
     let ctx = bergshamra::DsigContext::new(kmgr).with_strict_verification(false);
-    let signed = bergshamra::sign(&ctx, std::str::from_utf8(&min_xml).unwrap())?;
+    let signed = bergshamra::sign(&ctx, std::str::from_utf8(&min_xml)?)?;
     Ok(signed)
 }
 
@@ -103,25 +103,32 @@ pub fn decrypt_soap_encrypted_data<T: serde::de::DeserializeOwned>(
 ) -> Result<T, rst::RSTError> {
     let id = &encrypted_data
         .key_info
-        .as_signature()
+        .as_signature()?
         .security_token_reference
         .reference
         .uri;
 
-    let nonce = nonces.get(&id[1..]).ok_or(rst::RSTError::MissingNonce)?;
+    let nonce_id = id
+        .strip_prefix('#')
+        .ok_or(rst::RSTError::InvalidSecurityTokenReference)?;
+    let nonce = nonces.get(nonce_id).ok_or(rst::RSTError::MissingNonce)?;
     let nonce = BASE64_STANDARD.decode(nonce)?;
     let key = signature.hmac_key(&nonce).ok_or(rst::RSTError::HmacKey)?;
     let cipher_value = BASE64_STANDARD.decode(encrypted_data.cipher_data.cipher_value)?;
 
-    let (iv, encrypted) = cipher_value.split_at(16);
-    let iv: &[u8; 16] = iv.try_into().unwrap();
+    let (iv, encrypted) = cipher_value
+        .split_at_checked(16)
+        .ok_or(rst::RSTError::InvalidCiphertext)?;
+    let iv: &[u8; 16] = iv
+        .try_into()
+        .map_err(|_| rst::RSTError::InvalidCiphertext)?;
     let decryptor = Aes256CbcDec::new(&key.into(), iv.into());
     let mut block = [0; 8192];
 
-    decryptor
+    let plaintext = decryptor
         .decrypt_padded_b2b::<Pkcs7>(encrypted, &mut block)
-        .expect("Failed");
-    let result = std::str::from_utf8(&block).unwrap();
+        .map_err(|_| rst::RSTError::Decryption)?;
+    let result = std::str::from_utf8(plaintext)?;
     let data = quick_xml::de::from_str::<T>(result)?;
 
     Ok(data)

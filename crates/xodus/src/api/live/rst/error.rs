@@ -27,6 +27,16 @@ pub enum RSTError {
     MissingBinarySecret,
     #[error("Token binary secret has invalid decoded length {0}, expected 4096 bytes")]
     InvalidBinarySecretLength(usize),
+    #[error("Malformed SOAP key info: {0}")]
+    KeyInfo(#[from] crate::models::soap::KeyInfoError),
+    #[error("SOAP security token reference has an invalid URI")]
+    InvalidSecurityTokenReference,
+    #[error("SOAP encrypted payload is shorter than its IV")]
+    InvalidCiphertext,
+    #[error("SOAP encrypted payload could not be decrypted")]
+    Decryption,
+    #[error("SOAP decrypted payload is not valid UTF 8")]
+    InvalidUtf8(#[from] std::str::Utf8Error),
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -37,6 +47,8 @@ pub enum RSTBuilderError {
     Deserialization(#[from] quick_xml::DeError),
     #[error("Error processing XML for signing {0:?}")]
     Bergshamra(#[from] bergshamra::Error),
+    #[error("Canonical XML is not valid UTF 8")]
+    InvalidUtf8(#[from] std::str::Utf8Error),
     #[error("Builder was provided with invalid set of tokens")]
     UnsupportedTokenCombination,
 }
