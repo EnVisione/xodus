@@ -296,6 +296,8 @@ pub enum XvdFileParseError {
     },
     #[error("XVC key ID {key_id} is not supported")]
     UnsupportedXvcKeyId { key_id: u8 },
+    #[error("XVC region offset {offset} is before user data offset {user_data_offset}")]
+    RegionOffsetBeforeUserData { offset: u64, user_data_offset: u64 },
 }
 
 #[derive(Debug)]
@@ -426,6 +428,13 @@ impl XvdFile {
                 None => continue,
                 Some(0) => (),
                 Some(key_id) => return Err(XvdFileParseError::UnsupportedXvcKeyId { key_id }),
+            }
+
+            if h.offset < user_data_offset {
+                return Err(XvdFileParseError::RegionOffsetBeforeUserData {
+                    offset: h.offset,
+                    user_data_offset,
+                });
             }
 
             let start_page = offset_to_page_number(h.offset - user_data_offset);
@@ -1148,6 +1157,10 @@ mod tests {
         }
 
         fn synthetic_xvd_with_region_key_id(key_id: u16) -> Self {
+            Self::synthetic_xvd_with_region_key_id_and_offset(key_id, XVC_INFO_OFFSET as u64)
+        }
+
+        fn synthetic_xvd_with_region_key_id_and_offset(key_id: u16, region_offset: u64) -> Self {
             let mut reader = Self::synthetic_xvd_with_region_count(1);
             let xvc_info_start = XVC_INFO_OFFSET;
             reader.inner.get_mut()[xvc_info_start + XVC_INFO_VERSION_OFFSET
@@ -1164,7 +1177,7 @@ mod tests {
                 .copy_from_slice(&key_id.to_le_bytes());
             reader.inner.get_mut()[region_start + XVC_REGION_OFFSET_OFFSET
                 ..region_start + XVC_REGION_OFFSET_OFFSET + 8]
-                .copy_from_slice(&(XVC_INFO_OFFSET as u64).to_le_bytes());
+                .copy_from_slice(&region_offset.to_le_bytes());
             reader
         }
     }
@@ -1259,5 +1272,26 @@ mod tests {
         XvdFile::parse(SyntheticXvdReader::synthetic_xvd_with_region_key_id(0))
             .await
             .expect("synthetic XVC key ID zero must remain supported");
+    }
+
+    #[tokio::test]
+    async fn parse_rejects_xvc_region_offset_before_user_data() {
+        let region_offset = (XVC_INFO_OFFSET - XVD_HEADER_SIZE) as u64;
+        let result = XvdFile::parse(
+            SyntheticXvdReader::synthetic_xvd_with_region_key_id_and_offset(0, region_offset),
+        )
+        .await;
+        let error = match result {
+            Ok(_) => panic!("region offset before user data must not parse an XVD"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            XvdFileParseError::RegionOffsetBeforeUserData {
+                offset,
+                user_data_offset,
+            } if offset == region_offset && user_data_offset == XVC_INFO_OFFSET as u64
+        ));
     }
 }
