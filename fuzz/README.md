@@ -12,4 +12,4 @@ RUSTUP_TOOLCHAIN=nightly cargo fuzz run parse_inputs corpus ../crates/msixvc/tes
 
 Discovered crashes must be copied into the corpus, reduced to a deterministic regression test under `crates/msixvc`, and retained with the sanitized fixture manifest.
 
-The verified campaign used cargo fuzz 0.13.2 and nightly rustc 1.100.0 nightly. It completed 10,000 coverage guided executions against 11 tracked MSIXVC2 and XSP fixture files, reached 1,633 inline coverage counters and 4,336 feature counters, added 279 new units, retained no crash artifact, and exited without a sanitizer failure. Generated non-crash corpus inputs are disposable unless deliberately reviewed and committed.
+The verified campaign used cargo fuzz 0.13.2 and nightly rustc 1.100.0 nightly. The current run completed 10,000 coverage guided executions against 11 tracked MSIXVC2 and XSP fixture files, reached 1,645 inline coverage counters and 4,588 feature counters, added 366 new units, retained no crash artifact, and exited without a sanitizer failure. Generated non-crash corpus inputs are disposable unless deliberately reviewed and committed.
