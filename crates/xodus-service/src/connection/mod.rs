@@ -39,7 +39,8 @@ pub fn encode_error_message(
     msg_type: u16,
     code: &str,
 ) -> Result<Vec<u8>, ProtocolError> {
-    let payload = format!("<XodusError><Code>{code}</Code></XodusError>").into_bytes();
+    let escaped_code = quick_xml::escape::escape(code);
+    let payload = format!("<XodusError><Code>{escaped_code}</Code></XodusError>").into_bytes();
     encode_message(magic, msg_type, payload)
 }
 
@@ -79,5 +80,14 @@ mod tests {
         let encoded = encode_error_message(0x58445350, 4, "unsupported_operation")
             .expect("error response must encode");
         assert!(encoded.ends_with(b"<XodusError><Code>unsupported_operation</Code></XodusError>"));
+    }
+
+    #[test]
+    fn error_encoding_escapes_xml_text() {
+        let encoded = encode_error_message(0x58445350, 4, "bad<&\"'")
+            .expect("escaped error response must encode");
+        assert!(
+            encoded.ends_with(b"<XodusError><Code>bad&lt;&amp;&quot;&apos;</Code></XodusError>")
+        );
     }
 }
