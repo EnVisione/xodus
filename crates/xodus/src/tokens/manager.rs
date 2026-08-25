@@ -178,3 +178,119 @@ impl TokenManager {
         backend.set(key, &serde_json::to_vec(&TokenStore { tokens })?)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{PASSPORT_STS, TokenManager, TokenStoreError};
+    use crate::models::secrets::{Device, Token, User};
+
+    fn device() -> Device {
+        Device {
+            puid: "puid".to_owned(),
+            hwid: "hwid".to_owned(),
+            device_id: "device".to_owned(),
+            splicense: "license".to_owned(),
+            username: "user@example.test".to_owned(),
+            password: "password".to_owned(),
+        }
+    }
+
+    #[test]
+    fn persists_scoped_tokens_and_user_state() {
+        let manager = TokenManager::with_memory();
+
+        manager
+            .save_device_token(PASSPORT_STS.to_owned(), Token::Compact("device".to_owned()))
+            .expect("device token must persist");
+        manager
+            .save_device_token(
+                "https://device.example.test".to_owned(),
+                Token::Compact("other".to_owned()),
+            )
+            .expect("second device token must preserve the first");
+        manager
+            .save_user_token(PASSPORT_STS.to_owned(), Token::Compact("user".to_owned()))
+            .expect("user token must persist");
+        manager
+            .save_user(&User {
+                puid: "puid".to_owned(),
+                username: "user@example.test".to_owned(),
+            })
+            .expect("user state must persist");
+
+        assert!(matches!(
+            manager.get_device_sts_token().expect("device token must load"),
+            Token::Compact(value) if value == "device"
+        ));
+        assert!(matches!(
+            manager
+                .get_device_token_for("https://device.example.test")
+                .expect("scoped device token must load"),
+            Some(Token::Compact(value)) if value == "other"
+        ));
+        assert!(matches!(
+            manager.get_user_sts_token().expect("user token must load"),
+            Token::Compact(value) if value == "user"
+        ));
+        assert_eq!(
+            manager.get_user().expect("user state must load").username,
+            "user@example.test"
+        );
+    }
+
+    #[test]
+    fn corrupted_persistent_state_returns_typed_error_without_overwrite() {
+        let manager = TokenManager::with_memory();
+        manager
+            .persistent
+            .set(super::keys::DEVICE_TOKENS, b"not-json")
+            .expect("corrupt fixture must persist");
+
+        let error = manager
+            .save_device_token(PASSPORT_STS.to_owned(), Token::Compact("new".to_owned()))
+            .expect_err("corrupt token state must stop the write");
+        assert!(matches!(error, TokenStoreError::Serde(_)));
+        assert!(matches!(
+            manager.get_device_token_for(PASSPORT_STS),
+            Err(TokenStoreError::Serde(_))
+        ));
+    }
+
+    #[test]
+    fn logout_clears_tokens_user_and_optional_device_license() {
+        let manager = TokenManager::with_memory();
+        manager
+            .save_device_license(&device())
+            .expect("device license must persist");
+        manager
+            .save_device_token(PASSPORT_STS.to_owned(), Token::Compact("device".to_owned()))
+            .expect("device token must persist");
+        manager
+            .save_user_token(PASSPORT_STS.to_owned(), Token::Compact("user".to_owned()))
+            .expect("user token must persist");
+        manager
+            .save_user(&User {
+                puid: "puid".to_owned(),
+                username: "user@example.test".to_owned(),
+            })
+            .expect("user state must persist");
+
+        manager
+            .remove_device_license()
+            .expect("device license logout must succeed");
+        manager
+            .remove_persistent()
+            .expect("persistent logout must succeed");
+
+        assert!(matches!(
+            manager.get_device_license(),
+            Err(TokenStoreError::NotFound)
+        ));
+        assert!(matches!(
+            manager.get_device_token_for(PASSPORT_STS),
+            Ok(None)
+        ));
+        assert!(matches!(manager.get_user_token_for(PASSPORT_STS), Ok(None)));
+        assert!(matches!(manager.get_user(), Err(TokenStoreError::NotFound)));
+    }
+}

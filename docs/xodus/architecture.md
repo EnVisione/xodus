@@ -57,6 +57,8 @@ Linux SMBIOS probing now validates the raw header length, UUID extent, string-ta
 
 The in-memory token backend now reports poisoned mutex state as a typed storage error. Expired entries are removed on read, and neither expiry handling nor lock poisoning uses an unchecked mutex operation.
 
+TokenManager lifecycle regressions now cover scoped device and user token persistence, corrupted token-store recovery without overwriting the existing value, and logout clearing token, user, and optional device-license state. These tests use only the memory backend and do not inspect or modify a real keyring.
+
 License acquisition and CIK export now propagate token, exchange, entitlement, SPLicense, key derivation, directory, file, and flush failures with nonzero command results. CIK paths are joined beneath the requested export directory and existing files are truncated before replacement.
 
 Content license responses now require a successful HTTP status, a nonempty key list, valid base64, valid UTF-8, and valid license XML. Malformed or incomplete service data returns typed `LicenseContentError` variants instead of indexing or decoding through unchecked operations.
