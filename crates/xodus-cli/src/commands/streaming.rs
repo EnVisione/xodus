@@ -159,6 +159,33 @@ fn open_package_output(root: &Path, package_path: &str) -> io::Result<std::fs::F
     ))
 }
 
+fn promote_cache(cache_path: &Path, final_path: &Path) -> io::Result<()> {
+    match std::fs::rename(cache_path, final_path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+            let backup_path = final_path.with_file_name(".xodus-streaming-previous.msixvc");
+            match std::fs::remove_file(&backup_path) {
+                Ok(()) => {}
+                Err(remove_error) if remove_error.kind() == ErrorKind::NotFound => {}
+                Err(remove_error) => return Err(remove_error),
+            }
+            std::fs::rename(final_path, &backup_path)?;
+            match std::fs::rename(cache_path, final_path) {
+                Ok(()) => std::fs::remove_file(backup_path),
+                Err(error) => {
+                    if let Err(restore_error) = std::fs::rename(&backup_path, final_path) {
+                        return Err(io::Error::other(format!(
+                            "cache promotion failed: {error}; restoring the previous package failed: {restore_error}"
+                        )));
+                    }
+                    Err(error)
+                }
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
 enum ProgressEvent {
     Started { id: usize, name: String, total: u64 },
     Advanced { id: usize, delta: u64 },
@@ -668,6 +695,11 @@ where
                         write_failed.store(true, Ordering::Relaxed);
                         return;
                     }
+                    if let Err(err) = fout.sync_all().await {
+                        eprintln!("failed to sync {}: {err}", job.name);
+                        write_failed.store(true, Ordering::Relaxed);
+                        return;
+                    }
                     tx.send(ProgressEvent::Finished { id }).await.ok();
                 } else {
                     if let Err(err) = remote_xvd_ref
@@ -685,6 +717,11 @@ where
                         write_failed.store(true, Ordering::Relaxed);
                         return;
                     }
+                    if let Err(err) = fout.sync_all().await {
+                        eprintln!("failed to sync {}: {err}", job.name);
+                        write_failed.store(true, Ordering::Relaxed);
+                        return;
+                    }
                     tx.send(ProgressEvent::Finished { id }).await.ok();
                 }
             }
@@ -695,8 +732,18 @@ where
         return false;
     }
 
-    std::fs::remove_file(&final_path).ok();
-    if let Err(err) = std::fs::rename(&cache_path, &final_path) {
+    let cache_file = match std::fs::File::open(&cache_path) {
+        Ok(file) => file,
+        Err(err) => {
+            eprintln!("failed to reopen package cache for sync: {err}");
+            return false;
+        }
+    };
+    if let Err(err) = cache_file.sync_all() {
+        eprintln!("failed to sync package cache: {err}");
+        return false;
+    }
+    if let Err(err) = promote_cache(&cache_path, &final_path) {
         eprintln!("failed to promote package cache: {err}");
         return false;
     }
@@ -707,7 +754,7 @@ where
 mod tests {
     use std::io::Write;
 
-    use super::{open_package_output, package_path_components};
+    use super::{open_package_output, package_path_components, promote_cache};
 
     #[test]
     fn package_paths_accept_one_relative_separator_style() {
@@ -770,5 +817,19 @@ mod tests {
 
         assert!(open_package_output(&root, r"escape\payload.bin").is_err());
         assert!(!outside.join("payload.bin").exists());
+    }
+
+    #[test]
+    fn cache_promotion_replaces_the_current_package_without_predelete() {
+        let temporary = tempfile::tempdir().unwrap();
+        let cache = temporary.path().join("cache.msixvc");
+        let current = temporary.path().join("current.msixvc");
+        std::fs::write(&cache, b"new").unwrap();
+        std::fs::write(&current, b"old").unwrap();
+
+        promote_cache(&cache, &current).unwrap();
+
+        assert_eq!(std::fs::read(&current).unwrap(), b"new");
+        assert!(!cache.exists());
     }
 }

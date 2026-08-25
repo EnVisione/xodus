@@ -53,4 +53,6 @@ The legacy package download command now rejects missing CDN roots and invalid si
 
 The CLI run and streaming commands now report path, parser, cache, license, key-unpack, extraction, descriptor, process, and promotion failures as nonzero results. Endpoint selection rejects malformed globs and hostless URLs without panicking. The streaming path also rejects missing CDN roots, overflowing package totals, unsafe path shortening, and invalid local cache metadata.
 
+Completed segment files and the package cache are synchronized before promotion. Cache promotion does not predelete the current package on CachyOS and uses a restore path when the platform reports an existing-destination rename conflict. Multi-file sidecar journaling, crash injection, rollback, and full transaction recovery remain Phase 2 work.
+
 MSIXVC parser hardening, complete integrity validation, atomic promotion, rollback policy, and transaction recovery remain Phase 2 work. The account backed Xbox Live development token test is not part of ordinary offline verification and currently requires an explicit bounded opt in.
