@@ -25,6 +25,8 @@ The public DisplayCatalog result and the authenticated `GetBasePackage` result a
 
 The download command now accepts `--version-id` and uses the packages service `GetSpecificBasePackage/{content_id}/{version_id}` route to retrieve an exact previously recorded package revision. URL path segments are constructed through the URL API, so empty or control-bearing identifiers fail before authentication or network activity. This is the repository-owned acquisition path needed for a later source-to-target update exercise when an installed package manifest supplies its Microsoft `VersionId`.
 
+The remote `streaming` command accepts the same `--version-id` selector and streams that exact revision through the existing bounded HTTP and transaction path. A local `file://` source remains unchanged and does not contact the package service.
+
 The current latest-package response does not expose a source `VersionId` for every listed XSP descriptor. The selector therefore does not infer a source identity from an XSP filename or claim that an update has been applied. A real update still requires an authorized source revision, the current target revision, the matching XSP, and transaction, integrity, rollback, and recovery evidence. The service route shape is documented in the public [packagespc retrieval example](https://gist.github.com/rtm516/725fa1e38aafd2600976113ccc45a496).
 
 ### Isolated Minecraft Package Inspection

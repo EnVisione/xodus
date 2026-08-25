@@ -88,6 +88,12 @@ enum SubCommand {
         parallel: Option<usize>,
         #[arg(short, long)]
         market: Option<String>,
+        #[arg(
+            long,
+            value_name = "VERSION_ID",
+            help = "Retrieve a specific package version through GetSpecificBasePackage"
+        )]
+        version_id: Option<String>,
     },
     #[cfg(unix)]
     #[command(about = "Run a Game with xodus wine")]
@@ -279,15 +285,19 @@ async fn run_inner(args: CliArgs) -> ExitCode {
             try_skip_ntfs,
             market,
             parallel,
+            version_id,
         } => {
             commands::streaming::run(
                 &client,
                 &tokens,
-                source,
-                destination,
-                try_skip_ntfs,
-                parallel,
-                market,
+                commands::streaming::StreamingRequest {
+                    source,
+                    destination,
+                    try_skip_ntfs,
+                    parallel,
+                    market,
+                    version_id,
+                },
             )
             .await
         }

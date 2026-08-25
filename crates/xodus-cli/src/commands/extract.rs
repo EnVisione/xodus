@@ -14,11 +14,14 @@ pub async fn run(
     streaming::run(
         client,
         tokens,
-        "file://".to_owned() + &path,
-        destination,
-        false,
-        None,
-        Some(market),
+        streaming::StreamingRequest {
+            source: "file://".to_owned() + &path,
+            destination,
+            try_skip_ntfs: false,
+            parallel: None,
+            market: Some(market),
+            version_id: None,
+        },
     )
     .await
 }

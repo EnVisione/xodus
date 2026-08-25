@@ -21,7 +21,7 @@ use uuid::Uuid;
 use xodus::tokens::TokenManager;
 
 use crate::license::get_license;
-use crate::package::{get_content_id, get_packages, package_download_urls};
+use crate::package::{get_content_id, get_packages, get_specific_packages, package_download_urls};
 
 struct Job {
     name: String,
@@ -875,15 +875,28 @@ where
     }
 }
 
+pub struct StreamingRequest {
+    pub source: String,
+    pub destination: String,
+    pub try_skip_ntfs: bool,
+    pub parallel: Option<usize>,
+    pub market: Option<String>,
+    pub version_id: Option<String>,
+}
+
 pub async fn run(
     client: &reqwest::Client,
     tokens: &TokenManager,
-    source: String,
-    destination: String,
-    try_skip_ntfs: bool,
-    parallel: Option<usize>,
-    market: Option<String>,
+    request: StreamingRequest,
 ) -> ExitCode {
+    let StreamingRequest {
+        source,
+        destination,
+        try_skip_ntfs,
+        parallel,
+        market,
+        version_id,
+    } = request;
     let (tx, rx) = tokio::sync::mpsc::channel::<ProgressEvent>(256);
     if source.starts_with("file://") {
         let fsrc = source.strip_prefix("file://").unwrap_or_default();
@@ -938,7 +951,11 @@ pub async fn run(
             } else {
                 source
             };
-            let package_result = get_packages(client, tokens, content_id.clone()).await;
+            let package_result = if let Some(version_id) = version_id {
+                get_specific_packages(client, tokens, content_id.clone(), version_id).await
+            } else {
+                get_packages(client, tokens, content_id.clone()).await
+            };
             let Ok(package) = package_result else {
                 let Err(err) = package_result else {
                     eprintln!("Unknown Error");
