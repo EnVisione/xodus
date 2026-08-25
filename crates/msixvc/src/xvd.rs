@@ -329,6 +329,14 @@ pub enum XvdFileParseError {
     HashPageIndexOverflow { start_page: u64, page: u64 },
 }
 
+#[derive(thiserror::Error, Debug)]
+pub enum UserPackageFilesParseError {
+    #[error(transparent)]
+    Io(#[from] io::Error),
+    #[error("package file name contains invalid UTF-16")]
+    InvalidFileName(#[source] std::string::FromUtf16Error),
+}
+
 fn reserve_xvc_region_entries(
     num_pages: u64,
 ) -> Result<(Vec<u32>, Vec<[u8; 20]>), XvdFileParseError> {
@@ -386,6 +394,15 @@ fn hash_page_index(start_page: u64, page: u64) -> Result<u64, XvdFileParseError>
     start_page
         .checked_add(page)
         .ok_or(XvdFileParseError::HashPageIndexOverflow { start_page, page })
+}
+
+fn package_file_name(fullname: &[u16]) -> Result<String, UserPackageFilesParseError> {
+    let end = fullname
+        .iter()
+        .position(|&c| c == 0)
+        .unwrap_or(fullname.len());
+
+    String::from_utf16(&fullname[..end]).map_err(UserPackageFilesParseError::InvalidFileName)
 }
 
 fn validate_xvc_region_hash_entry_addresses(
@@ -633,7 +650,7 @@ impl XvdFile {
     pub async fn parse_user_package_files<Reader>(
         &self,
         mut file: Reader,
-    ) -> Result<HashMap<String, UserPackageFile>, Box<dyn std::error::Error>>
+    ) -> Result<HashMap<String, UserPackageFile>, UserPackageFilesParseError>
     where
         Reader: AsyncRead + AsyncSeek + Unpin,
     {
@@ -663,12 +680,7 @@ impl XvdFile {
                 off += XvdUserDataPackageFileEntry::SIZE as u64;
                 let o = user_data_package_file_entry.offset;
                 let s: u32 = user_data_package_file_entry.size;
-                let fullname = user_data_package_file_entry.file_path;
-                let end = fullname
-                    .iter()
-                    .position(|&c| c == 0)
-                    .unwrap_or(fullname.len());
-                let pfull_name: String = String::from_utf16(&fullname[..end]).unwrap();
+                let pfull_name = package_file_name(&user_data_package_file_entry.file_path)?;
 
                 files.insert(
                     pfull_name,
@@ -1247,8 +1259,9 @@ mod tests {
     use tokio::io::{AsyncRead, AsyncSeek, ReadBuf};
 
     use super::{
-        MAX_XVC_REGION_HEADERS, XvdFile, XvdFileParseError, hash_entry_read_offset,
-        hash_page_index, reserve_xvc_region_entries, validate_xvc_region_hash_entry_addresses,
+        MAX_XVC_REGION_HEADERS, UserPackageFilesParseError, XvdFile, XvdFileParseError,
+        hash_entry_read_offset, hash_page_index, package_file_name, reserve_xvc_region_entries,
+        validate_xvc_region_hash_entry_addresses,
     };
 
     const XVD_HEADER_SIZE: usize = 4096;
@@ -1522,6 +1535,25 @@ mod tests {
                 start_page: u64::MAX,
                 page: 1,
             }
+        ));
+    }
+
+    #[test]
+    fn package_file_name_preserves_valid_utf16_prefix() {
+        let file_name = package_file_name(&['a' as u16, 'b' as u16, 0, 'c' as u16])
+            .expect("valid UTF-16 package file name must parse");
+
+        assert_eq!(file_name, "ab");
+    }
+
+    #[test]
+    fn package_file_name_rejects_malformed_surrogate_before_map_insertion() {
+        let error = package_file_name(&[0xD800, 0])
+            .expect_err("malformed UTF-16 package file name must not parse");
+
+        assert!(matches!(
+            error,
+            UserPackageFilesParseError::InvalidFileName(_)
         ));
     }
 
