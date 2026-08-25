@@ -34,27 +34,37 @@ fn make_temp_file(folder: &str) -> std::io::Result<std::fs::File> {
 }
 
 #[cfg(target_os = "macos")]
-async fn prepare(lfiles: &HashMap<String, SegmentFile>) -> (impl AsyncFnOnce(), String) {
-    let disk_size: u64 = lfiles
+async fn prepare(
+    lfiles: &HashMap<String, SegmentFile>,
+) -> Result<(impl AsyncFnOnce(), String), std::io::Error> {
+    let disk_size = lfiles
         .iter()
         .filter(|f| f.1.keep_encrypted)
-        .map(|f| f.1.length + 4 * PAGE_SIZE as u64)
-        .reduce(|o, s| o + s)
-        .unwrap();
+        .try_fold(0_u64, |total, f| {
+            f.1.length
+                .checked_add(4 * PAGE_SIZE as u64)
+                .and_then(|size| total.checked_add(size))
+        })
+        .ok_or_else(|| std::io::Error::other("temporary disk size overflow"))?;
 
-    let device_s = String::from_utf8(
-        Command::new("/usr/bin/hdiutil")
-            .arg("attach")
-            .arg("-nomount")
-            .arg(format!("ram://{}", disk_size.div_ceil(256)))
-            .output()
-            .await
-            .unwrap()
-            .stdout,
-    )
-    .unwrap();
-
+    let output = Command::new("/usr/bin/hdiutil")
+        .arg("attach")
+        .arg("-nomount")
+        .arg(format!("ram://{}", disk_size.div_ceil(256)))
+        .output()
+        .await?;
+    if !output.status.success() {
+        return Err(std::io::Error::other(format!(
+            "hdiutil attach failed with {}",
+            output.status
+        )));
+    }
+    let device_s = String::from_utf8(output.stdout)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
     let device = device_s.trim();
+    if device.is_empty() {
+        return Err(std::io::Error::other("hdiutil returned an empty device"));
+    }
 
     let vol = uuid::Uuid::new_v4().to_string();
 
@@ -63,12 +73,19 @@ async fn prepare(lfiles: &HashMap<String, SegmentFile>) -> (impl AsyncFnOnce(), 
         .arg(vol)
         .arg(device)
         .status()
-        .await
-        .unwrap();
-    assert!(fmt.success());
+        .await?;
+    if !fmt.success() {
+        return Err(std::io::Error::other(format!(
+            "newfs_hfs failed with {fmt}"
+        )));
+    }
 
-    let mount_dir_obj = tempdir().unwrap();
-    let mount_dir = mount_dir_obj.path().to_str().unwrap();
+    let mount_dir_obj = tempdir()?;
+    let mount_dir = mount_dir_obj
+        .path()
+        .to_str()
+        .ok_or_else(|| std::io::Error::other("temporary mount path is not valid utf-8"))?
+        .to_owned();
 
     let mnt = Command::new("/sbin/mount")
         .arg("-t")
@@ -77,39 +94,49 @@ async fn prepare(lfiles: &HashMap<String, SegmentFile>) -> (impl AsyncFnOnce(), 
         .arg("nobrowse")
         .arg("-v")
         .arg(device)
-        .arg(mount_dir)
+        .arg(&mount_dir)
         .status()
-        .await
-        .unwrap();
-    assert!(mnt.success());
-    let mount_dir_cl = mount_dir.to_string();
+        .await?;
+    if !mnt.success() {
+        return Err(std::io::Error::other(format!("mount failed with {mnt}")));
+    }
+    let mount_dir_cl = mount_dir.clone();
     let device_cl = device.to_string();
-    (
+    Ok((
         async move || {
-            let mnt = Command::new("/sbin/umount")
+            match Command::new("/sbin/umount")
                 .arg("-f")
-                .arg(mount_dir_cl)
+                .arg(&mount_dir_cl)
                 .status()
                 .await
-                .unwrap();
-            assert!(mnt.success());
+            {
+                Ok(status) if status.success() => {}
+                Ok(status) => eprintln!("umount failed with {status}"),
+                Err(err) => eprintln!("failed to unmount temporary volume: {err}"),
+            }
 
-            let mnt = Command::new("/usr/bin/hdiutil")
+            match Command::new("/usr/bin/hdiutil")
                 .arg("detach")
                 .arg("-force")
                 .arg(&device_cl)
                 .status()
                 .await
-                .unwrap();
-            assert!(mnt.success());
+            {
+                Ok(status) if status.success() => {}
+                Ok(status) => eprintln!("hdiutil detach failed with {status}"),
+                Err(err) => eprintln!("failed to detach temporary volume: {err}"),
+            }
+            drop(mount_dir_obj);
         },
-        mount_dir.to_owned(),
-    )
+        mount_dir,
+    ))
 }
 
 #[cfg(not(target_os = "macos"))]
-async fn prepare(_lfiles: &HashMap<String, SegmentFile>) -> (impl AsyncFnOnce(), String) {
-    (async || {}, "".to_owned())
+async fn prepare(
+    _lfiles: &HashMap<String, SegmentFile>,
+) -> Result<(impl AsyncFnOnce(), String), std::io::Error> {
+    Ok((async || {}, "".to_owned()))
 }
 
 pub async fn run(
@@ -231,7 +258,13 @@ pub async fn run(
 
     let mut fds = vec![];
 
-    let (cleanup, mount_dir) = prepare(&lfiles).await;
+    let (cleanup, mount_dir) = match prepare(&lfiles).await {
+        Ok(result) => result,
+        Err(err) => {
+            eprintln!("failed to prepare temporary execution volume: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
 
     for file in &lfiles {
         if !file.1.keep_encrypted {
