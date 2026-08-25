@@ -31,7 +31,7 @@ The XVD HTTP download path requires partial-content responses with an exact incl
 
 When a segment carries data-integrity hashes, both HTTP download and local extraction verify the complete encrypted 4 KiB page against the first 20 bytes of its SHA-256 digest before decryption or output writes. Missing hash entries and mismatches return typed errors, so an unverified page cannot be promoted. Segments without an integrity table retain the format's explicit no-hash behavior.
 
-The shared binary parser now builds nested generic-array chunk references through checked slice bounds instead of an unsafe layout transmute. A nested-array regression proves that the parser preserves chunk order and rejects no valid fixed-size input while keeping the type-level reader extent contract.
+The shared binary parser now builds nested generic-array chunk references through checked slice bounds instead of an unsafe layout transmute. The layout invariant is that `GenericArray` stores contiguous elements with the alignment of its element type, so each borrowed chunk remains a complete aligned view of the original array. Nested-array and aligned-element regressions prove chunk size, alignment, order, and round-trip values while keeping the type-level reader extent contract.
 
 Xbox package authentication now propagates token, exchange, HTTP status, JSON, unsupported-response, empty-collection, and missing-user-claim failures as typed results. It no longer panics on a malformed or incomplete service response before package metadata access.
 

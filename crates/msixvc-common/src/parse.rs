@@ -275,6 +275,10 @@ impl BinaryParse for i8 {
 
 /// Splits a reference to a `GenericArray<T, Size>` into references to `N`
 /// chunks of length `M` each, where `Size = N * M`.
+///
+/// `GenericArray` stores its elements contiguously with the alignment of `T`.
+/// Each `from_slice` call therefore borrows one complete, aligned chunk from
+/// the original array without copying or changing its layout.
 #[inline]
 fn unflatten_ref<T, N, M>(
     array: &GenericArray<T, Prod<N, M>>,
@@ -417,5 +421,42 @@ mod tests {
 
         assert_eq!(parsed[0].into_array(), [1, 2]);
         assert_eq!(parsed[1].into_array(), [3, 4]);
+    }
+
+    #[repr(align(8))]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct AlignedByte(u8);
+
+    #[test]
+    fn generic_array_chunks_preserve_size_alignment_and_values() {
+        type Chunk = GenericArray<AlignedByte, typenum::U2>;
+        type Chunks = GenericArray<AlignedByte, typenum::U4>;
+
+        let data = Chunks::from_array([
+            AlignedByte(1),
+            AlignedByte(2),
+            AlignedByte(3),
+            AlignedByte(4),
+        ]);
+        let chunks = unflatten_ref::<AlignedByte, typenum::U2, typenum::U2>(&data);
+
+        assert_eq!(
+            std::mem::size_of::<Chunk>(),
+            2 * std::mem::size_of::<AlignedByte>()
+        );
+        assert_eq!(
+            std::mem::size_of_val(&data),
+            2 * std::mem::size_of::<Chunk>()
+        );
+        assert_eq!(chunks[0].as_slice(), &[AlignedByte(1), AlignedByte(2)]);
+        assert_eq!(chunks[1].as_slice(), &[AlignedByte(3), AlignedByte(4)]);
+        assert_eq!(
+            chunks[0].as_ptr() as usize % std::mem::align_of::<AlignedByte>(),
+            0
+        );
+        assert_eq!(
+            chunks[1].as_ptr() as usize % std::mem::align_of::<AlignedByte>(),
+            0
+        );
     }
 }
