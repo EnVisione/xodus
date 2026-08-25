@@ -121,7 +121,7 @@ fn is_windows_reserved_name(component: &str) -> bool {
     )
 }
 
-fn open_package_output(root: &Path, package_path: &str) -> io::Result<std::fs::File> {
+pub(crate) fn open_package_output(root: &Path, package_path: &str) -> io::Result<std::fs::File> {
     let components = package_path_components(package_path)?;
     let mut directory = std::fs::File::open(root)?;
     if !directory.metadata()?.is_dir() {

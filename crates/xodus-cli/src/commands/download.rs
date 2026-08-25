@@ -1,4 +1,5 @@
 use std::io;
+use std::path::Path;
 use std::process::ExitCode;
 
 use futures_util::StreamExt;
@@ -9,6 +10,7 @@ use tokio::io::AsyncWriteExt;
 use xodus::models::packagespc::PackageFile;
 use xodus::tokens::TokenManager;
 
+use crate::commands::streaming::open_package_output;
 use crate::package::{get_content_id, get_packages};
 
 fn package_download_url(
@@ -104,19 +106,14 @@ pub async fn run(
                 return ExitCode::FAILURE;
             }
         };
-        let mut output = match tokio::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&file.file_name)
-            .await
-        {
+        let output = match open_package_output(Path::new("."), &file.file_name) {
             Ok(file) => file,
             Err(error) => {
-                eprintln!("failed to create {}: {error}", file.file_name);
+                eprintln!("refusing unsafe download path {}: {error}", file.file_name);
                 return ExitCode::FAILURE;
             }
         };
+        let mut output = tokio::fs::File::from_std(output);
         let mut stream = res.bytes_stream();
 
         while let Some(chunk) = stream.next().await {
