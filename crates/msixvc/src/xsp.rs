@@ -1097,6 +1097,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stream_update_rejects_truncated_new_data_before_output() {
+        let xsp = parse(VALID_XSP).await.expect("valid synthetic XSP fixture");
+        let base_hashes = [hash20(b"base")];
+        let target_hashes = [hash20(b"new!"), hash20(b"base")];
+        let base = XspBaseState {
+            content_id: xsp.header.content_id,
+            version: xsp.header.upgrade_from_version,
+            block_hashes: &base_hashes,
+        };
+        let input = XspUpdateInput {
+            expected_source_hashes: &base_hashes,
+            target_hashes: &target_hashes,
+            available_space: u64::MAX,
+            block_size: 4,
+        };
+        let mut base_reader = TestReader::new(b"base");
+        let mut new_data_reader = TestReader::new(b"bad");
+        let mut output = TestWriter(Vec::new());
+
+        let error = xsp
+            .apply_update_stream(
+                &mut base_reader,
+                &mut new_data_reader,
+                &mut output,
+                base,
+                input,
+            )
+            .await
+            .expect_err("truncated new data must fail before output");
+
+        assert!(matches!(
+            error,
+            XspStreamApplyError::NewDataBlockTooShort { block: 0 }
+        ));
+        assert!(output.0.is_empty());
+    }
+
+    #[tokio::test]
     async fn stream_update_rejects_target_hash_mismatch_after_staging() {
         let xsp = parse(VALID_XSP).await.expect("valid synthetic XSP fixture");
         let base_hashes = [hash20(b"base")];
