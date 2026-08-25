@@ -3116,6 +3116,21 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn output_write_retries_transient_failures_before_success() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let mut writer = FailingAsyncWriter {
+            attempts: Arc::clone(&attempts),
+            failures: 2,
+        };
+
+        write_all_with_retry(&mut writer, b"data")
+            .await
+            .expect("transient output failures must retry before success");
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    }
+
     #[test]
     fn output_retry_policy_rejects_permanent_errors() {
         assert!(is_retryable_output_error(&Error::other("temporary")));
