@@ -444,31 +444,35 @@ impl Deref for HmacBinarySecret {
     }
 }
 
-#[derive(Debug, Error)]
-#[error("the ciphertext couldn't be authenticated")]
-pub struct ContentKeyAuthenticationFailed;
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum ContentKeyAuthenticationFailed {
+    #[error("the ciphertext couldn't be authenticated")]
+    AuthenticationFailed,
+
+    #[error("the unwrapped content key has invalid length {length}")]
+    InvalidOutputLength { length: usize },
+
+    #[error("the wrapped content key has an invalid shape")]
+    InvalidWrappedKey,
+}
 
 impl PackedContentKey {
     pub fn unpack(&self, key: &DeviceKey) -> Result<ContentKey, ContentKeyAuthenticationFailed> {
         let packer = aes_keywrap::Aes128KeyWrapAligned::new(key);
 
-        match packer.decapsulate(&self.0) {
-            Ok(unpaked) => Ok(ContentKey(unpaked.try_into().unwrap())),
-
-            // These errors do not make sense for decapsulate
-            Err(aes_keywrap::KeywrapError::InvalidExpectedLen)
-            | Err(aes_keywrap::KeywrapError::Unpadded) => unreachable!(),
-
-            // The input is always 40 bytes, so these errors are not possible
-            Err(aes_keywrap::KeywrapError::NotAligned)
-            | Err(aes_keywrap::KeywrapError::TooSmall)
-            | Err(aes_keywrap::KeywrapError::TooBig) => unreachable!(),
-
-            // The only possible error is a failure in the authentication of the key
-            Err(aes_keywrap::KeywrapError::AuthenticationFailed) => {
-                Err(ContentKeyAuthenticationFailed)
+        let unwrapped = packer.decapsulate(&self.0).map_err(|error| match error {
+            aes_keywrap::KeywrapError::AuthenticationFailed => {
+                ContentKeyAuthenticationFailed::AuthenticationFailed
             }
-        }
+            _ => ContentKeyAuthenticationFailed::InvalidWrappedKey,
+        })?;
+        let unwrapped_length = unwrapped.len();
+        let unwrapped = unwrapped.try_into().map_err(|_| {
+            ContentKeyAuthenticationFailed::InvalidOutputLength {
+                length: unwrapped_length,
+            }
+        })?;
+        Ok(ContentKey(unwrapped))
     }
 }
 
@@ -512,6 +516,16 @@ mod tests {
         assert!(matches!(
             result,
             Err(SPLicenseDecodeError::InvalidPackedContentKeyIdLength { id_len: 8 })
+        ));
+    }
+
+    #[test]
+    fn test_packed_content_key_unwrap_reports_authentication_failure() {
+        let result = PackedContentKey([0; 40]).unpack(&DeviceKey([0; 16]));
+
+        assert!(matches!(
+            result,
+            Err(ContentKeyAuthenticationFailed::AuthenticationFailed)
         ));
     }
 
