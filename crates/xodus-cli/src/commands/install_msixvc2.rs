@@ -274,4 +274,37 @@ mod tests {
             b"verified"
         );
     }
+
+    #[test]
+    fn rejects_integrity_mismatch_without_promoting_existing_state() {
+        let temporary = tempfile::tempdir().expect("temporary destination must exist");
+        let destination = temporary.path().join("install");
+        std::fs::create_dir(&destination).expect("destination must be created");
+        std::fs::write(destination.join("keep.txt"), b"verified")
+            .expect("existing state must be writable");
+
+        assert_eq!(
+            run(
+                fixture("xodus-fixture-integrity-mismatch.msixvc")
+                    .to_string_lossy()
+                    .into_owned(),
+                destination.to_string_lossy().into_owned(),
+            ),
+            std::process::ExitCode::FAILURE
+        );
+        assert_eq!(
+            std::fs::read(destination.join("keep.txt")).expect("existing state must remain"),
+            b"verified"
+        );
+        assert!(
+            !destination
+                .read_dir()
+                .expect("destination must be readable")
+                .any(|entry| entry
+                    .expect("directory entry must be readable")
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".xodus-streaming-txn-"))
+        );
+    }
 }
