@@ -976,10 +976,40 @@ fn validate_http_response_scheme(
     request_url: &reqwest::Url,
     response_url: &reqwest::Url,
 ) -> std::io::Result<()> {
+    if !response_url.username().is_empty() || response_url.password().is_some() {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "http response URL must not contain credentials",
+        ));
+    }
     if request_url.scheme() == "https" && response_url.scheme() != "https" {
         return Err(Error::new(
             ErrorKind::InvalidData,
             "https request redirected to an insecure scheme",
+        ));
+    }
+    if request_url.scheme() == "http" && response_url.scheme() == "http" {
+        let host = response_url.host_str().ok_or_else(|| {
+            Error::new(
+                ErrorKind::InvalidData,
+                "http response URL must include a host",
+            )
+        })?;
+        let is_loopback = host.eq_ignore_ascii_case("localhost")
+            || host
+                .parse::<IpAddr>()
+                .is_ok_and(|address| address.is_loopback());
+        if !is_loopback {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "loopback http request redirected to nonlocal http",
+            ));
+        }
+    }
+    if response_url.scheme() != "https" && response_url.scheme() != "http" {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "http response URL uses an unsupported scheme",
         ));
     }
     Ok(())
@@ -1366,6 +1396,34 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "https request redirected to an insecure scheme"
+        );
+    }
+
+    #[test]
+    fn http_read_rejects_credential_bearing_redirect() {
+        let request_url = reqwest::Url::parse("https://cdn.example/file").unwrap();
+        let response_url = reqwest::Url::parse("https://user:password@cdn.example/file").unwrap();
+        let error = super::validate_http_response_scheme(&request_url, &response_url)
+            .expect_err("redirects must not introduce URL credentials");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            error.to_string(),
+            "http response URL must not contain credentials"
+        );
+    }
+
+    #[test]
+    fn http_read_rejects_loopback_redirect_to_nonlocal_http() {
+        let request_url = reqwest::Url::parse("http://127.0.0.1:8080/file").unwrap();
+        let response_url = reqwest::Url::parse("http://cdn.example/file").unwrap();
+        let error = super::validate_http_response_scheme(&request_url, &response_url)
+            .expect_err("loopback fixtures must not redirect to nonlocal http");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            error.to_string(),
+            "loopback http request redirected to nonlocal http"
         );
     }
 
