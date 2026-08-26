@@ -73,10 +73,10 @@ pub enum Error {
     #[error("Token expired")]
     TokenExpired(DateTime<Utc>),
     /// XSTS response did not contain a usable user hash
-    #[error("XSTS response missing user hash")]
+    #[error("xsts response missing user hash")]
     MissingXstsUserHash,
     /// XSTS response did not contain a usable token
-    #[error("XSTS response missing token")]
+    #[error("xsts response missing token")]
     MissingXstsToken,
     /// Unknown error
     #[error("unknown xal error")]

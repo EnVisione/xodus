@@ -109,14 +109,14 @@ impl AuthPromptData {
         }
     }
 
-    /// Returns the authentication URL
-    pub fn authentication_url(&self) -> Url {
+    /// Returns the authentication URL or a typed URL parsing error.
+    pub fn authentication_url(&self) -> Result<Url, Error> {
         match self {
-            AuthPromptData::RedirectUrl { url, .. } => Url::parse(url.as_str()).unwrap(),
+            AuthPromptData::RedirectUrl { url, .. } => Ok(url.url().clone()),
             AuthPromptData::DeviceCode {
                 full_verificiation_url,
                 ..
-            } => Url::parse(full_verificiation_url.secret()).unwrap(),
+            } => Ok(Url::parse(full_verificiation_url.secret())?),
         }
     }
 }
@@ -741,5 +741,47 @@ impl Flows {
         };
 
         Ok(ts)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use oauth2::{EndUserVerificationUrl, VerificationUriComplete};
+
+    use super::{AuthPromptData, Error};
+
+    #[test]
+    fn redirect_prompt_uses_the_validated_url() {
+        let prompt = AuthPromptData::RedirectUrl {
+            prompt: "sign in".to_owned(),
+            url: EndUserVerificationUrl::new("https://example.test/login".to_owned())
+                .expect("test URL must parse"),
+            expect_url: true,
+        };
+
+        assert_eq!(
+            prompt
+                .authentication_url()
+                .expect("validated URL must be returned")
+                .as_str(),
+            "https://example.test/login"
+        );
+    }
+
+    #[test]
+    fn malformed_device_prompt_url_returns_an_error_without_panicking() {
+        let prompt = AuthPromptData::DeviceCode {
+            prompt: "sign in".to_owned(),
+            url: EndUserVerificationUrl::new("https://example.test/login".to_owned())
+                .expect("test URL must parse"),
+            code: oauth2::UserCode::new("code".to_owned()),
+            full_verificiation_url: VerificationUriComplete::new("not a URL".to_owned()),
+            expect_url: false,
+        };
+
+        let result = std::panic::catch_unwind(|| prompt.authentication_url())
+            .expect("malformed device URL must not panic");
+
+        assert!(matches!(result, Err(Error::UrlParseError(_))));
     }
 }

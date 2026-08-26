@@ -299,7 +299,7 @@ impl XalAuthenticator {
             match k.as_ref() {
                 "expires_in" => {
                     let expires_in = v.parse::<u64>().map_err(|_| {
-                        Error::InvalidRedirectUrl("Invalid expires_in value".to_string())
+                        Error::InvalidRedirectUrl("invalid expires_in value".to_string())
                     })?;
                     kv_pairs.insert(k.to_string(), json!(expires_in));
                 }
@@ -438,7 +438,7 @@ impl XalAuthenticator {
         self.app_params
             .redirect_uri
             .clone()
-            .map(|url| Url::parse(&url).unwrap())
+            .map(|url| url.url().clone())
     }
 
     /// Create an internal [`oauth2::Client`]
