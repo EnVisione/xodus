@@ -892,6 +892,13 @@ pub enum DownloadFileHttpError {
         received_bytes: u64,
         page_length: u64,
     },
+    #[error(
+        "download pending response buffer has {pending_length} bytes, exceeding page size {page_size}"
+    )]
+    PendingBufferExceeded {
+        pending_length: usize,
+        page_size: usize,
+    },
     #[error("download HTTP response status {status} is not partial content")]
     UnexpectedResponseStatus { status: u16 },
     #[error("download HTTP response is missing Content-Range")]
@@ -1733,6 +1740,18 @@ fn download_file_end(file_offset: u64, file_length: u64) -> Result<u64, Download
         .ok_or(DownloadFileHttpError::FileEndOverflow {
             file_offset,
             file_length,
+        })
+}
+
+fn checked_download_pending_capacity(
+    pending_length: usize,
+) -> Result<usize, DownloadFileHttpError> {
+    PAGE_SIZE
+        .checked_sub(pending_length)
+        .filter(|capacity| *capacity > 0)
+        .ok_or(DownloadFileHttpError::PendingBufferExceeded {
+            pending_length,
+            page_size: PAGE_SIZE,
         })
 }
 
@@ -2921,73 +2940,79 @@ impl XvdFile {
             v = next_download_received_byte_count(v, data.len(), page_plan.page_length)?;
             progress(min(v, sfile.length), sfile.length);
 
-            pending.extend_from_slice(&data);
+            let mut data = data.as_ref();
+            while !data.is_empty() {
+                let pending_capacity = checked_download_pending_capacity(pending.len())?;
+                let take = data.len().min(pending_capacity);
+                pending.extend_from_slice(&data[..take]);
+                data = &data[take..];
 
-            while pending.len() >= 4096 {
-                if page_in_section >= page_plan.page_loop_end || remaining == 0 {
-                    break;
-                }
-                let chunk = pending.split_to(4096);
-                page.copy_from_slice(&chunk);
-                let hash_page_index = page_in_section.checked_sub(page_plan.page_start).ok_or(
-                    DownloadFileHttpError::PageBeforeStart {
-                        page_in_section,
-                        page_start: page_plan.page_start,
-                    },
-                )?;
-                match verify_page_hash(&page, &sfile.data_hashs, hash_page_index) {
-                    Ok(()) => {}
-                    Err(PageHashFailure::IndexTooLarge) => {
-                        return Err(DownloadFileHttpError::PageHashIndexTooLarge {
-                            page_index: hash_page_index,
-                        });
+                while pending.len() >= PAGE_SIZE {
+                    if page_in_section >= page_plan.page_loop_end || remaining == 0 {
+                        break;
                     }
-                    Err(PageHashFailure::Missing { hash_count }) => {
-                        return Err(DownloadFileHttpError::DataHashMissing {
-                            page_index: hash_page_index,
-                            hash_count,
-                        });
-                    }
-                    Err(PageHashFailure::Mismatch) => {
-                        return Err(DownloadFileHttpError::DataHashMismatch {
-                            page_index: hash_page_index,
-                        });
-                    }
-                }
-                let to_write_remaining = remaining.min(PAGE_SIZE as u64) as usize;
-                let to_write = if let Some(tweak) = tweak.as_mut() {
-                    let s = s.ok_or(DownloadFileHttpError::MissingEncryptedSection)?;
-                    let data_unit = match &s.data_units {
-                        Some(units) => {
-                            let page_index = download_page_index(page_in_section)?;
-                            *units.get(page_index).ok_or(
-                                DownloadFileHttpError::DataUnitMissing {
-                                    page_in_section,
-                                    data_unit_count: units.len(),
-                                },
-                            )?
+                    let chunk = pending.split_to(4096);
+                    page.copy_from_slice(&chunk);
+                    let hash_page_index = page_in_section.checked_sub(page_plan.page_start).ok_or(
+                        DownloadFileHttpError::PageBeforeStart {
+                            page_in_section,
+                            page_start: page_plan.page_start,
+                        },
+                    )?;
+                    match verify_page_hash(&page, &sfile.data_hashs, hash_page_index) {
+                        Ok(()) => {}
+                        Err(PageHashFailure::IndexTooLarge) => {
+                            return Err(DownloadFileHttpError::PageHashIndexTooLarge {
+                                page_index: hash_page_index,
+                            });
                         }
-                        None => download_data_unit_index(page_in_section)?,
+                        Err(PageHashFailure::Missing { hash_count }) => {
+                            return Err(DownloadFileHttpError::DataHashMissing {
+                                page_index: hash_page_index,
+                                hash_count,
+                            });
+                        }
+                        Err(PageHashFailure::Mismatch) => {
+                            return Err(DownloadFileHttpError::DataHashMismatch {
+                                page_index: hash_page_index,
+                            });
+                        }
+                    }
+                    let to_write_remaining = remaining.min(PAGE_SIZE as u64) as usize;
+                    let to_write = if let Some(tweak) = tweak.as_mut() {
+                        let s = s.ok_or(DownloadFileHttpError::MissingEncryptedSection)?;
+                        let data_unit = match &s.data_units {
+                            Some(units) => {
+                                let page_index = download_page_index(page_in_section)?;
+                                *units.get(page_index).ok_or(
+                                    DownloadFileHttpError::DataUnitMissing {
+                                        page_in_section,
+                                        data_unit_count: units.len(),
+                                    },
+                                )?
+                            }
+                            None => download_data_unit_index(page_in_section)?,
+                        };
+                        tweak.update_data_unit(data_unit);
+                        let tweak_cipher = tweak_cipher
+                            .as_ref()
+                            .ok_or(DownloadFileHttpError::MissingCipher)?;
+                        let data_cipher = data_cipher
+                            .as_ref()
+                            .ok_or(DownloadFileHttpError::MissingCipher)?;
+                        decrypt_page_xts(&mut page, *tweak, tweak_cipher, data_cipher);
+                        to_write_remaining
+                    } else if sfile.keep_encrypted {
+                        // Decryption needs full 4k blocks
+                        PAGE_SIZE
+                    } else {
+                        to_write_remaining
                     };
-                    tweak.update_data_unit(data_unit);
-                    let tweak_cipher = tweak_cipher
-                        .as_ref()
-                        .ok_or(DownloadFileHttpError::MissingCipher)?;
-                    let data_cipher = data_cipher
-                        .as_ref()
-                        .ok_or(DownloadFileHttpError::MissingCipher)?;
-                    decrypt_page_xts(&mut page, *tweak, tweak_cipher, data_cipher);
-                    to_write_remaining
-                } else if sfile.keep_encrypted {
-                    // Decryption needs full 4k blocks
-                    PAGE_SIZE
-                } else {
-                    to_write_remaining
-                };
-                write_all_with_retry(out, &page[..to_write]).await?;
-                remaining -= to_write_remaining as u64;
+                    write_all_with_retry(out, &page[..to_write]).await?;
+                    remaining -= to_write_remaining as u64;
 
-                page_in_section = next_download_page(page_in_section)?;
+                    page_in_section = next_download_page(page_in_section)?;
+                }
             }
         }
         if remaining > 0 {
@@ -3168,9 +3193,9 @@ mod tests {
         OUTPUT_WRITE_RETRY_LIMIT, PAGE_SIZE, PageHashFailure, PopulateSegmentHashesError,
         SEGMENT_METADATA_READER_CAPACITY, SegmentFile, SegmentMetadataParseError, SyncSubstream,
         UserPackageFile, UserPackageFilesParseError, XvcRegionId, XvdFile, XvdFileParseError,
-        XvdSegmentMetadataSegment, XvdStream, collect_ntfs_segment_files,
-        consume_download_retry_budget, download_encrypted_section, download_file_end,
-        download_page_plan, download_request_range, extract_data_unit_index,
+        XvdSegmentMetadataSegment, XvdStream, checked_download_pending_capacity,
+        collect_ntfs_segment_files, consume_download_retry_budget, download_encrypted_section,
+        download_file_end, download_page_plan, download_request_range, extract_data_unit_index,
         extract_encrypted_section, extract_file_end, extract_page_loop_end, extract_page_plan,
         extract_progress_bytes, extract_write_length, hash_entry_read_offset, hash_page_index,
         is_retryable_download_error, is_retryable_download_status, is_retryable_output_error,
@@ -3441,6 +3466,25 @@ mod tests {
             ErrorKind::InvalidInput,
             "permanent",
         )));
+    }
+
+    #[test]
+    fn download_pending_buffer_capacity_is_bounded_to_one_page() {
+        assert_eq!(
+            checked_download_pending_capacity(0).expect("empty pending buffer must fit"),
+            PAGE_SIZE
+        );
+        assert_eq!(
+            checked_download_pending_capacity(PAGE_SIZE - 1)
+                .expect("one byte of pending capacity must remain"),
+            1
+        );
+        let error = checked_download_pending_capacity(PAGE_SIZE)
+            .expect_err("a full pending buffer must not accept more bytes");
+        assert!(matches!(
+            error,
+            DownloadFileHttpError::PendingBufferExceeded { .. }
+        ));
     }
 
     const SEGMENT_METADATA_HEADER_LENGTH_OFFSET: usize = 12;
