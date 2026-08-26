@@ -3,7 +3,10 @@ name: Rust check
 on:
   pull_request:
   push:
-    branches: [main]
+    branches:
+      - main
+      - 'envy/**'
+  workflow_dispatch:
 
 jobs:
   fmt:
