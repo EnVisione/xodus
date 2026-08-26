@@ -1265,6 +1265,22 @@ mod tests {
     }
 
     #[test]
+    fn http_read_rejects_logical_position_overflow() {
+        let error = super::checked_http_position(u64::MAX, 1, u64::MAX)
+            .expect_err("logical position overflow must fail");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn http_read_rejects_active_offset_overflow() {
+        let error = super::checked_active_http_offset(u64::MAX, 1, u64::MAX)
+            .expect_err("active offset overflow must fail");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
     fn http_read_rejects_active_offset_beyond_extent() {
         let error = super::validate_active_http_offset(11, 10, 10)
             .expect_err("active offset beyond extent must fail");
