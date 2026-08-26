@@ -31,6 +31,10 @@ The bounded package and command checks found these relevant components installed
 
 These components establish a usable CachyOS graphics and Wine baseline. They do not prove Xodus target compatibility, protected executable behavior, or Game Runtime behavior.
 
+## Cryptographic Provider Selection
+
+Xodus selects the AWS-LC provider for Linux builds, including the Tier 1 CachyOS target. Non-Linux builds select the RustCrypto provider because `kryptering` 0.5.0 currently rejects AWS-LC outside Linux. This fallback keeps portable targets buildable but is not a stable macOS or other non-Linux support claim. The RustCrypto dependency brings the unresolved `RUSTSEC-2023-0071` RSA timing advisory, which is explicitly waived in `deny.toml` for this non-release portability path. The waiver must be removed when a supported constant-time provider is available on those targets.
+
 ## Missing or Unverified Runtime Prerequisites
 
 No local `xgameruntime`, `XGameRuntime`, WineGDK, or GDK Proton artifact was found in the bounded search of system libraries, local compatibility tools, and standard local runtime paths. The installed Wine and Proton packages are not treated as substitutes for the pinned EXT-003 and EXT-004 artifacts because their exact Game Runtime surface, patch provenance, and protected executable compatibility are not established.

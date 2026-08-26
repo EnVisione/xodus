@@ -21,7 +21,6 @@ keyring-core = { version = "1.0.0", features = ["sample"] }
 zerocopy = { version = "0.8.55", features = ["derive"] }
 bergshamra-c14n = "0.8.0"
 hmac = "0.13.0"
-bergshamra = { version = "0.8.0", default-features = false, features = ["aws-lc"] }
 sha2 = "0.11.0"
 cbc = "0.2.1"
 url = "2.5.8"
@@ -32,20 +31,22 @@ globset = "0.4.19"
 thiserror = "2.0.19"
 num-bigint-dig = "0.9.1"
 num-integer = "0.1.46"
-kryptering = { version = "0.5.0", default-features = false, features = ["aws-lc"] }
 zeroize = "1.8.2"
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 smbios-lib = "0.9.4"
+bergshamra = { version = "0.8.0", default-features = false, features = ["rustcrypto"] }
+kryptering = { version = "0.5.0", default-features = false, features = ["rustcrypto"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+bergshamra = { version = "0.8.0", default-features = false, features = ["aws-lc"] }
 dbus-secret-service-keyring-store = { version = "1.0.0", features = ["crypto-openssl"]}
+kryptering = { version = "0.5.0", default-features = false, features = ["aws-lc"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 apple-native-keyring-store = { version = "1.0.0", features = ["keychain"]}
 
 [dev-dependencies]
-bergshamra = { version = "0.8.0", default-features = false, features = ["aws-lc"] }
 ed25519-dalek = "3.0.0"
 
 [build-dependencies]
