@@ -7,8 +7,8 @@ use std::process::ExitCode;
 use msixvc::msixvc2::{inspect, visit_entries};
 
 use crate::commands::streaming::{
-    acquire_transaction_lock, new_transaction, open_package_output, promote_transaction,
-    promotion_entries_with_removals, recover_transactions,
+    acquire_transaction_lock, ensure_package_root, new_transaction, open_package_output,
+    promote_transaction, promotion_entries_with_removals, recover_transactions,
 };
 
 const MAX_INSTALL_UNCOMPRESSED_BYTES: u64 = 1_u64 << 40;
@@ -144,7 +144,7 @@ where
             .map(|entry| (entry.name.clone(), entry.name.clone())),
     );
     let output_root = Path::new(&destination);
-    if let Err(error) = std::fs::create_dir_all(output_root) {
+    if let Err(error) = ensure_package_root(output_root) {
         eprintln!("MSIXVC2 install could not create destination: {error}");
         return ExitCode::FAILURE;
     }

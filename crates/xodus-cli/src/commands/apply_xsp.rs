@@ -7,8 +7,8 @@ use msixvc::xvd::XvdFile;
 use tokio::fs::File;
 
 use crate::commands::streaming::{
-    acquire_transaction_lock, new_transaction, open_package_output, promote_transaction,
-    promotion_entries, recover_transactions,
+    acquire_transaction_lock, ensure_package_root, new_transaction, open_package_output,
+    promote_transaction, promotion_entries, recover_transactions,
 };
 
 const MAX_HASH_MANIFEST_BYTES: usize = 64 * 1024 * 1024;
@@ -208,7 +208,7 @@ where
             return ExitCode::FAILURE;
         }
     };
-    if let Err(error) = std::fs::create_dir_all(output_root) {
+    if let Err(error) = ensure_package_root(output_root) {
         eprintln!("XSP update could not create destination: {error}");
         return ExitCode::FAILURE;
     }

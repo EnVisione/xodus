@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::io::{self, ErrorKind, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -100,6 +100,83 @@ fn open_package_root(root: &Path, message: &'static str) -> io::Result<std::fs::
         return Err(io::Error::new(ErrorKind::InvalidInput, message));
     }
     Ok(directory)
+}
+
+pub(crate) fn ensure_package_root(root: &Path) -> io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        let mut components = root.components().peekable();
+        let mut directory = if matches!(components.peek(), Some(Component::RootDir)) {
+            components.next();
+            std::fs::File::from(
+                open_resolved(
+                    CWD,
+                    "/",
+                    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+                    Mode::empty(),
+                    ROOT_RESOLVE_FLAGS,
+                )
+                .map_err(io::Error::from)?,
+            )
+        } else {
+            open_package_root(Path::new("."), "package root is not a directory")?
+        };
+
+        for component in components {
+            let name = match component {
+                Component::CurDir => continue,
+                Component::Normal(name) => name,
+                Component::ParentDir => {
+                    directory = std::fs::File::from(
+                        open_resolved(
+                            &directory,
+                            "..",
+                            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+                            Mode::empty(),
+                            ROOT_RESOLVE_FLAGS,
+                        )
+                        .map_err(io::Error::from)?,
+                    );
+                    continue;
+                }
+                Component::Prefix(_) | Component::RootDir => {
+                    return Err(invalid_package_path(
+                        "package root contains an unsupported path component",
+                    ));
+                }
+            };
+
+            match mkdirat(&directory, name, Mode::RWXU) {
+                Ok(()) | Err(Errno::EXIST) => {}
+                Err(error) => return Err(error.into()),
+            }
+            directory = std::fs::File::from(
+                open_resolved(
+                    &directory,
+                    name,
+                    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+                    Mode::empty(),
+                    ROOT_RESOLVE_FLAGS,
+                )
+                .map_err(io::Error::from)?,
+            );
+        }
+
+        if !directory.metadata()?.is_dir() {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "package root is not a directory",
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        std::fs::create_dir_all(root)?;
+        open_package_root(root, "package root is not a directory")?;
+        Ok(())
+    }
 }
 
 fn package_path_components(path: &str) -> io::Result<Vec<&str>> {
@@ -1329,7 +1406,7 @@ where
     } = run;
     let out: &Path = Path::new(&destination);
 
-    if let Err(err) = std::fs::create_dir_all(out) {
+    if let Err(err) = ensure_package_root(out) {
         eprintln!("failed to create transaction root {}: {err}", out.display());
         return false;
     }
@@ -1718,12 +1795,12 @@ mod tests {
     use super::{
         PromotionState, SegmentFile, TRANSACTION_DIRECTORY_PREFIX, TRANSACTION_JOURNAL,
         TRANSACTION_JOURNAL_TEMP, TRANSACTION_LOCK_FILE, acquire_transaction_lock, changed_jobs,
-        checked_progress_length, new_transaction, open_package_input, open_package_output,
-        package_path_components, promote_transaction, promote_transaction_with_interruption,
-        promotion_entries, promotion_entries_with_removals, promotion_entry_capacity,
-        read_bounded_transaction_journal, read_transaction_journal, recover_transaction_dir,
-        recover_transactions, rollback_transaction, validate_streaming_space,
-        write_transaction_journal,
+        checked_progress_length, ensure_package_root, new_transaction, open_package_input,
+        open_package_output, package_path_components, promote_transaction,
+        promote_transaction_with_interruption, promotion_entries, promotion_entries_with_removals,
+        promotion_entry_capacity, read_bounded_transaction_journal, read_transaction_journal,
+        recover_transaction_dir, recover_transactions, rollback_transaction,
+        validate_streaming_space, write_transaction_journal,
     };
 
     #[test]
@@ -1932,6 +2009,38 @@ mod tests {
         assert!(acquire_transaction_lock(&root).is_err());
         assert!(!outside.join("payload.bin").exists());
         assert!(!outside.join(TRANSACTION_LOCK_FILE).exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn ensure_package_root_refuses_symlinked_parent_before_creation() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let outside = temporary.path().join("outside");
+        let link = temporary.path().join("link");
+        std::fs::create_dir(&outside).unwrap();
+        symlink(&outside, &link).unwrap();
+
+        assert!(ensure_package_root(&link.join("created")).is_err());
+        assert!(!outside.join("created").exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn ensure_package_root_creates_missing_components_without_symlinks() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("nested").join("root");
+
+        ensure_package_root(&root).unwrap();
+
+        assert!(root.is_dir());
+        assert!(
+            !std::fs::symlink_metadata(&root)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
     }
 
     #[cfg(unix)]
