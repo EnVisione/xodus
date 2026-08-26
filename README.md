@@ -115,6 +115,8 @@ Commands:
   extract     Extract locally stored msixvc file
   inspect     Inspect a local MSIXVC2 archive without extracting it
   install-msixvc2  Install a validated local MSIXVC2 archive transactionally
+  repair-msixvc2  Repair a local MSIXVC2 archive transactionally
+  uninstall-msixvc2  Uninstall files represented by a local MSIXVC2 archive transactionally
   login       
   streaming   Download and extract the game through streaming algorithm
   clep        Generate or decrypt base64-encoded CLEP challenge data

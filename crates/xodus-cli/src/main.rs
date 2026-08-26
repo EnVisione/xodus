@@ -60,6 +60,16 @@ enum SubCommand {
         path: String,
         destination: String,
     },
+    #[command(about = "Repair a local MSIXVC2 archive transactionally")]
+    RepairMsixvc2 {
+        path: String,
+        destination: String,
+    },
+    #[command(about = "Uninstall files represented by a local MSIXVC2 archive transactionally")]
+    UninstallMsixvc2 {
+        path: String,
+        destination: String,
+    },
     #[command(about = "Apply a validated local XSP update transactionally")]
     ApplyXsp {
         descriptor: String,
@@ -191,6 +201,8 @@ async fn run_inner(args: CliArgs) -> ExitCode {
             | SubCommand::SpLicense { .. }
             | SubCommand::Inspect { .. }
             | SubCommand::InstallMsixvc2 { .. }
+            | SubCommand::RepairMsixvc2 { .. }
+            | SubCommand::UninstallMsixvc2 { .. }
             | SubCommand::ApplyXsp { .. }
     );
     if needs_secret_store && let Err(error) = xodus::secrets::init_secrets() {
@@ -212,6 +224,8 @@ async fn run_inner(args: CliArgs) -> ExitCode {
             | SubCommand::Logout { .. }
             | SubCommand::Inspect { .. }
             | SubCommand::InstallMsixvc2 { .. }
+            | SubCommand::RepairMsixvc2 { .. }
+            | SubCommand::UninstallMsixvc2 { .. }
             | SubCommand::ApplyXsp { .. }
     );
     if needs_device_credentials
@@ -267,6 +281,12 @@ async fn run_inner(args: CliArgs) -> ExitCode {
         SubCommand::Inspect { path } => commands::inspect::run(path),
         SubCommand::InstallMsixvc2 { path, destination } => {
             commands::install_msixvc2::run(path, destination)
+        }
+        SubCommand::RepairMsixvc2 { path, destination } => {
+            commands::install_msixvc2::repair(path, destination)
+        }
+        SubCommand::UninstallMsixvc2 { path, destination } => {
+            commands::uninstall_msixvc2::run(path, destination)
         }
         SubCommand::ApplyXsp {
             descriptor,

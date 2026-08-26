@@ -113,10 +113,27 @@ fn collect_stale_package_files_in(
 }
 
 pub fn run(path: String, destination: String) -> ExitCode {
-    run_with_hook(path, destination, || false)
+    run_with_hook_and_label(path, destination, || false, "installed")
 }
 
+pub fn repair(path: String, destination: String) -> ExitCode {
+    run_with_hook_and_label(path, destination, || false, "repaired")
+}
+
+#[cfg(test)]
 fn run_with_hook<F>(path: String, destination: String, mut should_interrupt: F) -> ExitCode
+where
+    F: FnMut() -> bool,
+{
+    run_with_hook_and_label(path, destination, &mut should_interrupt, "installed")
+}
+
+fn run_with_hook_and_label<F>(
+    path: String,
+    destination: String,
+    mut should_interrupt: F,
+    operation: &str,
+) -> ExitCode
 where
     F: FnMut() -> bool,
 {
@@ -238,7 +255,7 @@ where
     }
 
     println!(
-        "installed {} MSIXVC2 files into {}",
+        "{operation} {} MSIXVC2 files into {}",
         archive.entries.len(),
         output_root.display()
     );
@@ -251,7 +268,7 @@ mod tests {
 
     use crate::commands::streaming::recover_transactions;
 
-    use super::{open_archive, run, run_with_hook, validate_available_space};
+    use super::{open_archive, repair, run, run_with_hook, validate_available_space};
 
     fn fixture(name: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -373,6 +390,35 @@ mod tests {
                         .starts_with(".xodus-streaming-txn-")
                 }),
             "failed replacement must not leave a staging transaction"
+        );
+    }
+
+    #[test]
+    fn repairs_existing_fixture_and_restores_modified_file() {
+        let temporary = tempfile::tempdir().expect("temporary destination must exist");
+        let destination = temporary.path().join("install");
+        let archive = fixture("xodus-fixture-base.msixvc");
+
+        assert_eq!(
+            run(
+                archive.to_string_lossy().into_owned(),
+                destination.to_string_lossy().into_owned(),
+            ),
+            std::process::ExitCode::SUCCESS
+        );
+        let manifest = destination.join("UserData/AppxManifest.xml");
+        std::fs::write(&manifest, b"corrupted").expect("installed file must be writable");
+
+        assert_eq!(
+            repair(
+                archive.to_string_lossy().into_owned(),
+                destination.to_string_lossy().into_owned(),
+            ),
+            std::process::ExitCode::SUCCESS
+        );
+        assert_ne!(
+            std::fs::read(manifest).expect("repaired file must be readable"),
+            b"corrupted"
         );
     }
 
