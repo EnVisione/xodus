@@ -8,7 +8,7 @@ Branch: `envy/target-metadata-evidence`
 
 Baseline commit under test: `c24293f`
 
-This record captures verification performed in the local workspace. It is not evidence of live Microsoft service access, game entitlement, package acquisition, target runtime compatibility, or a stable release.
+This record captures verification performed in the local workspace. It includes a bounded live account and metadata check, but it is not evidence of package acquisition, target runtime compatibility, or a stable release.
 
 ## Passing Gates
 
@@ -30,7 +30,26 @@ The following commands completed successfully:
 | `target/debug/xodus-cli --version` | passed. `xodus-cli 0.1.0` |
 | `git diff --check` | passed |
 
-The account tests remain explicitly opt in because they require authorized Xbox service access and local keychain state. They were not retried after the recorded missing token failure.
+The remaining account tests remain explicitly opt in because they require authorized Xbox service access and local keychain state. The Minecraft authorization test was run separately after the persisted sign in state became available and passed.
+
+## Live Account and Metadata Checks
+
+The previously ignored account test was run once with the persisted local sign in state:
+
+```text
+cargo test -p xodus auth::test_minecraft_win_auth -- --ignored
+```
+
+Result: one test passed. No token or account data was printed or retained.
+
+Fresh release binary metadata checks reached the Microsoft package service for both targets:
+
+```text
+target/release/xodus-cli download 9NBLGGH2JHXJ --market neutral --dry-run
+target/release/xodus-cli download 9NNX1VVR3KNQ --market neutral --dry-run
+```
+
+Both returned `package CDN root rejected, requires HTTPS` before file selection or package transfer. No package bytes, signed URLs, or credentials were retained. This confirms current account access and isolates the remaining acquisition failure to the service supplied CDN route.
 
 ## Expected Baseline Result
 

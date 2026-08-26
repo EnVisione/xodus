@@ -31,6 +31,14 @@ xodus-cli download 9NBLGGH2JHXJ --market neutral --dry-run
 
 The corrected DisplayCatalog path reached authenticated package metadata instead of returning the previous 404. The current response then failed the repository's existing CDN policy because its first reported root was non-HTTPS. The error is now reported as `package CDN root rejected, requires HTTPS` without echoing the root value. No signed URL, package byte, file selection, or filesystem mutation occurred. The client continues to fail closed; it does not silently downgrade to HTTP. The earlier August 24 dry-run result remains historical evidence for that run and does not establish a current successful dry run.
 
+The same fresh release binary and persisted account state were then used for Forza Horizon 5:
+
+```text
+xodus-cli download 9NNX1VVR3KNQ --market neutral --dry-run
+```
+
+Forza reached authenticated package metadata and returned the same `package CDN root rejected, requires HTTPS` result before file selection or package transfer. This confirms the failure is shared package service transport behavior, not a missing account session. No package bytes, signed URLs, or credentials were retained.
+
 Public packagespc examples document legacy Xbox package roots using HTTP, which is consistent with the current rejection but does not authorize weakening the repository's HTTPS boundary. The reproducible release blocker is tracked in [issue 14](https://github.com/EnVisione/xodus/issues/14). Resolving that compatibility gap requires an owner-approved secure transport decision or a service-side HTTPS endpoint. Until then, current package acquisition remains blocked after metadata retrieval.
 
 On August 26, 2026, the same bounded routing checks were repeated with direct connections using `curl --noproxy '*'`. `assets1.xboxlive.com`, `d1.xboxlive.com`, and `d2.xboxlive.com` presented a certificate for `fallback.tls.fastly.net`, while `assets2.xboxlive.com` returned a TLS internal error. The direct results match the proxied checks, so the failure is not attributable only to the workstation proxy. `dlassets-ssl.xboxlive.com` presented a Microsoft wildcard certificate but returned `404 Not Found` for the routing probe, and no package-path equivalence has been established. No package bytes, credentials, signed URLs, or protected content were requested or retained.
