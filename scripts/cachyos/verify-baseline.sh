@@ -133,7 +133,7 @@ reproduce_workspace_checks() {
     cargo check --workspace --all-targets
     cargo clippy --workspace --all-targets --all-features
     cargo test --workspace --all-targets --no-run
-    cargo test --workspace --all-targets -- --skip test_get_xbox_live_dev_token --skip test_minecraft_win_auth
+    cargo test --workspace --all-targets -- --test-threads=1 --skip test_get_xbox_live_dev_token --skip test_minecraft_win_auth
     cargo build --release --workspace
 }
 

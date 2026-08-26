@@ -14,9 +14,9 @@
 
 ## Current Baseline Refresh
 
-On August 25, 2026, `baseline.json` was refreshed at signed checkpoint `70ffb4458053903966c528cf02e946d712f5de9e`, binding source revision `00ec5a719959d352d5002153fe00bb9c6900d7ff` after the verified parser fuzz and MSIXVC2 capacity coverage. The refresh binds the current branch, fork and upstream heads, Cargo lock and metadata digests, package database digest, and observed CachyOS graphics state. The original Phase 001 record above remains historical evidence for the merged baseline and is not changed into a Phase 2 completion claim.
+On August 25, 2026, `baseline.json` was refreshed at signed source checkpoint `5ba0c47553eed3340e71a850da6f6bcd6bf6fee0`, binding that source revision after the verified parser fuzz, MSIXVC2 capacity, and direct package download capacity coverage. The refresh binds the current branch, fork and upstream heads, Cargo lock and metadata digests, package database digest, and observed CachyOS graphics state. The original Phase 001 record above remains historical evidence for the merged baseline and is not changed into a Phase 2 completion claim.
 
-The refreshed verifier passed `--source`, `--environment`, and `--all`. The complete workspace reproduction includes the current parser, transaction, install capacity, and recovery tests, zero warning workspace Clippy, and the release build. These results refresh baseline evidence only and do not establish account, retail package, target runtime, performance, Tier 2, or release completion.
+The refreshed verifier passed `--source`, `--environment`, and `--all`. The complete workspace reproduction includes the current parser, transaction, install capacity, direct download capacity, and recovery tests, zero warning workspace Clippy, and the release build. Workspace tests run with one test thread so subprocess crash and transaction-lock fixtures cannot race each other. These results refresh baseline evidence only and do not establish account, retail package, target runtime, performance, Tier 2, or release completion.
 
 ## Commands and Results
 
@@ -38,7 +38,7 @@ cargo metadata --format-version 1 --no-deps
 cargo check --workspace --all-targets
 cargo clippy --workspace --all-targets --all-features
 cargo test --workspace --all-targets --no-run
-cargo test --workspace --all-targets -- --skip test_get_xbox_live_dev_token --skip test_minecraft_win_auth
+cargo test --workspace --all-targets -- --test-threads=1 --skip test_get_xbox_live_dev_token --skip test_minecraft_win_auth
 cargo build --release --workspace
 ```
 
