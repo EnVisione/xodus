@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 use std::io::{self, Error, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::mem::size_of;
+use std::net::IpAddr;
 
 use aes::Aes128;
 use aes::cipher::KeyInit;
@@ -914,6 +915,12 @@ pub enum DownloadFileHttpError {
     InvalidRequestUrl,
     #[error("download HTTPS request redirected to an insecure scheme")]
     InsecureResponseScheme,
+    #[error("download response URL contains credentials")]
+    CredentialedResponseUrl,
+    #[error("download loopback HTTP request redirected to nonlocal HTTP")]
+    NonlocalHttpResponse,
+    #[error("download response URL uses an unsupported scheme")]
+    UnsupportedResponseScheme,
     #[error(
         "download response start {actual_start} does not match requested start {expected_start}"
     )]
@@ -2050,10 +2057,52 @@ fn validate_download_response_scheme(
     request_url: &reqwest::Url,
     response_url: &reqwest::Url,
 ) -> Result<(), DownloadFileHttpError> {
+    if !response_url.username().is_empty() || response_url.password().is_some() {
+        return Err(DownloadFileHttpError::CredentialedResponseUrl);
+    }
     if request_url.scheme() == "https" && response_url.scheme() != "https" {
         return Err(DownloadFileHttpError::InsecureResponseScheme);
     }
+    if request_url.scheme() == "http" && response_url.scheme() == "http" {
+        let host = response_url
+            .host_str()
+            .ok_or(DownloadFileHttpError::UnsupportedResponseScheme)?;
+        let is_loopback = host.eq_ignore_ascii_case("localhost")
+            || host
+                .parse::<IpAddr>()
+                .is_ok_and(|address| address.is_loopback());
+        if !is_loopback {
+            return Err(DownloadFileHttpError::NonlocalHttpResponse);
+        }
+    }
+    if response_url.scheme() != "https" && response_url.scheme() != "http" {
+        return Err(DownloadFileHttpError::UnsupportedResponseScheme);
+    }
     Ok(())
+}
+
+fn validate_download_request_url(url: &reqwest::Url) -> Result<(), DownloadFileHttpError> {
+    if !url.username().is_empty() || url.password().is_some() || url.host_str().is_none() {
+        return Err(DownloadFileHttpError::InvalidRequestUrl);
+    }
+    match url.scheme() {
+        "https" => Ok(()),
+        "http" => {
+            let host = url
+                .host_str()
+                .ok_or(DownloadFileHttpError::InvalidRequestUrl)?;
+            if host.eq_ignore_ascii_case("localhost")
+                || host
+                    .parse::<IpAddr>()
+                    .is_ok_and(|address| address.is_loopback())
+            {
+                Ok(())
+            } else {
+                Err(DownloadFileHttpError::InvalidRequestUrl)
+            }
+        }
+        _ => Err(DownloadFileHttpError::InvalidRequestUrl),
+    }
 }
 
 fn is_retryable_download_error(error: &DownloadFileHttpError) -> bool {
@@ -2099,6 +2148,7 @@ async fn open_download_response(
 ) -> Result<(reqwest::Response, u64), DownloadFileHttpError> {
     let request_url =
         reqwest::Url::parse(url).map_err(|_| DownloadFileHttpError::InvalidRequestUrl)?;
+    validate_download_request_url(&request_url)?;
     let response = timeout(
         stall_timeout,
         client
@@ -3248,11 +3298,12 @@ mod tests {
         ntfs_partition_extents, package_file_name, required_gpt_partition_length,
         required_gpt_partition_start, reserve_segment_path, reserve_xvc_region_entries,
         segment_file_name, segment_metadata_reader_capacity, sync_substream_absolute_target,
-        validate_download_response_encoding, validate_download_response_extent,
-        validate_download_response_scheme, validate_package_files_table_cursor,
-        validate_segment_metadata_table_extent, validate_user_data_header_extent,
-        validate_user_data_header_length, validate_xvc_region_hash_entry_addresses,
-        verify_page_hash, write_all_with_retry, xvd_stream_absolute_seek_target,
+        validate_download_request_url, validate_download_response_encoding,
+        validate_download_response_extent, validate_download_response_scheme,
+        validate_package_files_table_cursor, validate_segment_metadata_table_extent,
+        validate_user_data_header_extent, validate_user_data_header_length,
+        validate_xvc_region_hash_entry_addresses, verify_page_hash, write_all_with_retry,
+        xvd_stream_absolute_seek_target,
     };
 
     const XVD_HEADER_SIZE: usize = 4096;
@@ -5573,6 +5624,48 @@ mod tests {
         let http = reqwest::Url::parse("http://127.0.0.1/package").unwrap();
         validate_download_response_scheme(&http, &http)
             .expect("local http fixtures must remain available");
+    }
+
+    #[test]
+    fn download_request_url_requires_secure_or_loopback_http() {
+        for source in [
+            "http://cdn.example/package",
+            "https://user:password@cdn.example/package",
+            "ftp://cdn.example/package",
+        ] {
+            let url = reqwest::Url::parse(source).expect("test URL must parse");
+            let error = validate_download_request_url(&url)
+                .expect_err("unsafe download URLs must fail before network activity");
+            assert!(matches!(error, DownloadFileHttpError::InvalidRequestUrl));
+        }
+
+        for source in [
+            "https://cdn.example/package",
+            "http://localhost:8080/package",
+            "http://127.0.0.1:8080/package",
+        ] {
+            let url = reqwest::Url::parse(source).expect("test URL must parse");
+            validate_download_request_url(&url)
+                .expect("secure and loopback download URLs must remain supported");
+        }
+    }
+
+    #[test]
+    fn download_response_scheme_rejects_credentials_and_nonlocal_http() {
+        let https = reqwest::Url::parse("https://cdn.example/package").unwrap();
+        let credentialed =
+            reqwest::Url::parse("https://user:password@cdn.example/package").unwrap();
+        assert!(matches!(
+            validate_download_response_scheme(&https, &credentialed),
+            Err(DownloadFileHttpError::CredentialedResponseUrl)
+        ));
+
+        let local_http = reqwest::Url::parse("http://127.0.0.1/package").unwrap();
+        let remote_http = reqwest::Url::parse("http://cdn.example/package").unwrap();
+        assert!(matches!(
+            validate_download_response_scheme(&local_http, &remote_http),
+            Err(DownloadFileHttpError::NonlocalHttpResponse)
+        ));
     }
 
     #[test]
