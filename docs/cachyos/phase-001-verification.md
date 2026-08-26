@@ -14,9 +14,9 @@
 
 ## Current Baseline Refresh
 
-On August 25, 2026, `baseline.json` was refreshed at signed source checkpoint `416d4128865ff48051c39b6465a478f83fd1dc43`, binding that source revision after the verified parser fuzz, MSIXVC2 capacity, direct package download capacity, and remote streaming capacity coverage. The refresh binds the current branch, fork and upstream heads, Cargo lock and metadata digests, package database digest, and observed CachyOS graphics state. The original Phase 001 record above remains historical evidence for the merged baseline and is not changed into a Phase 2 completion claim.
+On August 25, 2026, `baseline.json` was refreshed at signed source checkpoint `b8dd35b67de849bbac2d2a30b7ee941900702ec7`, binding that source revision after the verified parser fuzz, MSIXVC2 capacity, direct package download capacity, remote streaming capacity, and XSP update capacity coverage. The refresh binds the current branch, fork and upstream heads, Cargo lock and metadata digests, package database digest, and observed CachyOS graphics state. The original Phase 001 record above remains historical evidence for the merged baseline and is not changed into a Phase 2 completion claim.
 
-The refreshed verifier passed `--source`, `--environment`, and `--all`. The complete workspace reproduction includes the current parser, transaction, install capacity, direct download capacity, remote streaming capacity, and recovery tests, zero warning workspace Clippy, and the release build. Workspace tests run with one test thread so subprocess crash and transaction-lock fixtures cannot race each other. These results refresh baseline evidence only and do not establish account, retail package, target runtime, performance, Tier 2, or release completion.
+The refreshed verifier passed `--source`, `--environment`, and `--all`. The complete workspace reproduction includes the current parser, transaction, install capacity, direct download capacity, remote streaming capacity, XSP update capacity, and recovery tests, zero warning workspace Clippy, and the release build. Workspace tests run with one test thread so subprocess crash and transaction-lock fixtures cannot race each other. These results refresh baseline evidence only and do not establish account, retail package, target runtime, performance, Tier 2, or release completion.
 
 ## Commands and Results
 
