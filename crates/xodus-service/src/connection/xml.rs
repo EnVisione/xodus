@@ -72,8 +72,8 @@ pub async fn handle(
     let data = match parse_message(context, message_type, buffer).await {
         Ok(buf) => encode_message(crate::XML_MAGIC, response_message_type(message_type), buf)
             .map_err(std::io::Error::other)?,
-        Err(err) => {
-            log::error!("Failed parsing message: {err}");
+        Err(_err) => {
+            log::error!("XML IPC request failed with a redacted parse error");
             encode_error_message(
                 crate::XML_MAGIC,
                 response_message_type(message_type),

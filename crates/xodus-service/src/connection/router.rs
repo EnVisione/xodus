@@ -137,7 +137,7 @@ pub async fn route(
         };
 
         if let Err(err) = res {
-            log::error!("IPC message failed: {err}");
+            log::error!("IPC message failed with error kind {:?}", err.kind());
         }
     }
 }
