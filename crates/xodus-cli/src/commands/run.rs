@@ -73,6 +73,102 @@ fn select_entrypoint<'a>(
     })
 }
 
+fn build_wine_environment<'a, I>(
+    fds: I,
+    nt_prefix: &str,
+    entrypoint: &str,
+) -> io::Result<(String, String)>
+where
+    I: Clone + IntoIterator<Item = (&'a str, i32)>,
+{
+    const MAP_PREFIX: &str = ":\\??\\Z:";
+    const NT_PATH_PREFIX: &str = "\\??\\Z:";
+
+    if nt_prefix.contains('|') {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "wine path prefix contains the descriptor map separator",
+        ));
+    }
+
+    let mut environment_length = 0usize;
+    let mut entrypoint_length = None;
+    for (package_path, descriptor) in fds.clone() {
+        let suffix = package_path.trim_start_matches('\\');
+        let path_length = NT_PATH_PREFIX
+            .len()
+            .checked_add(nt_prefix.len())
+            .and_then(|length| length.checked_add(1))
+            .and_then(|length| length.checked_add(suffix.len()))
+            .ok_or_else(|| {
+                io::Error::new(
+                    ErrorKind::InvalidData,
+                    "wine entrypoint path length overflows memory index",
+                )
+            })?;
+        let item_length = descriptor
+            .to_string()
+            .len()
+            .checked_add(MAP_PREFIX.len())
+            .and_then(|length| length.checked_add(nt_prefix.len()))
+            .and_then(|length| length.checked_add(1))
+            .and_then(|length| length.checked_add(suffix.len()))
+            .ok_or_else(|| {
+                io::Error::new(
+                    ErrorKind::InvalidData,
+                    "wine descriptor map length overflows memory index",
+                )
+            })?;
+        environment_length = environment_length
+            .checked_add(usize::from(environment_length != 0))
+            .and_then(|length| length.checked_add(item_length))
+            .ok_or_else(|| {
+                io::Error::new(
+                    ErrorKind::InvalidData,
+                    "wine descriptor map length overflows memory index",
+                )
+            })?;
+        if package_path == entrypoint {
+            entrypoint_length = Some(path_length);
+        }
+    }
+
+    let entrypoint_length = entrypoint_length.ok_or_else(|| {
+        io::Error::new(
+            ErrorKind::NotFound,
+            "wine entrypoint is not present in the descriptor map",
+        )
+    })?;
+    let mut environment = String::new();
+    environment
+        .try_reserve_exact(environment_length)
+        .map_err(|_| io::Error::other("could not allocate the wine descriptor map"))?;
+    let mut entrypoint_path = String::new();
+    entrypoint_path
+        .try_reserve_exact(entrypoint_length)
+        .map_err(|_| io::Error::other("could not allocate the wine entrypoint path"))?;
+
+    for (index, (package_path, descriptor)) in fds.into_iter().enumerate() {
+        let suffix = package_path.trim_start_matches('\\');
+        if index != 0 {
+            environment.push('|');
+        }
+        environment.push_str(&descriptor.to_string());
+        environment.push_str(MAP_PREFIX);
+        environment.push_str(nt_prefix);
+        environment.push('\\');
+        environment.push_str(suffix);
+        if package_path == entrypoint {
+            entrypoint_path.push_str(NT_PATH_PREFIX);
+            entrypoint_path.push_str(nt_prefix);
+            entrypoint_path.push('\\');
+            entrypoint_path.push_str(suffix);
+        }
+    }
+
+    Ok((environment, entrypoint_path))
+}
+
 #[cfg(target_os = "linux")]
 fn make_temp_file(_folder: &str) -> std::io::Result<std::fs::File> {
     let fd = memfd_create("xodus", MemfdFlags::CLOEXEC).map_err(std::io::Error::from)?;
@@ -326,7 +422,7 @@ pub async fn run(
         }
     };
 
-    let mut fds = vec![];
+    let mut fds = Vec::new();
 
     let (cleanup, mount_dir) = match prepare(&lfiles).await {
         Ok(result) => result,
@@ -335,6 +431,13 @@ pub async fn run(
             return ExitCode::FAILURE;
         }
     };
+
+    let encrypted_file_count = lfiles.values().filter(|file| file.keep_encrypted).count();
+    if let Err(err) = fds.try_reserve_exact(encrypted_file_count) {
+        eprintln!("failed to allocate executable descriptor map: {err}");
+        cleanup().await;
+        return ExitCode::FAILURE;
+    }
 
     for file in &lfiles {
         if !file.1.keep_encrypted {
@@ -388,36 +491,28 @@ pub async fn run(
         fds.push((file.0, stdf));
     }
 
-    let mut env_value = String::new();
     let nt_prefix = out_absolute.to_string_lossy().replace("/", "\\");
     let nt_prefix = nt_prefix.trim_end_matches('\\');
 
-    let mut nt_entry = None;
-
-    for fd in &fds {
-        if !env_value.is_empty() {
-            env_value.push('|');
+    let (env_value, nt_entry) = match build_wine_environment(
+        fds.iter()
+            .map(|(package_path, file)| (package_path.as_str(), file.as_raw_fd())),
+        nt_prefix,
+        entrypoint,
+    ) {
+        Ok(values) => values,
+        Err(err) => {
+            eprintln!("failed to prepare wine descriptor map: {err}");
+            cleanup().await;
+            return ExitCode::FAILURE;
         }
+    };
 
-        let nt_suffix = fd.0.trim_start_matches('\\');
-        let nt_path = format!("\\??\\Z:{}\\{}", nt_prefix, nt_suffix);
-        if entrypoint == fd.0 {
-            nt_entry = Some(nt_path)
-        }
-
-        env_value.push_str(&format!(
-            "{}:\\??\\Z:{}\\{}",
-            fd.1.as_raw_fd(),
-            nt_prefix,
-            nt_suffix
-        ))
-    }
-
-    let Some(nt_entry) = nt_entry else {
-        eprintln!("Could not find .exe");
+    if nt_entry.is_empty() {
+        eprintln!("wine descriptor map did not produce an entrypoint");
         cleanup().await;
         return ExitCode::FAILURE;
-    };
+    }
 
     let mut wn = match Command::new(wine)
         .arg(nt_entry)
@@ -474,7 +569,7 @@ mod tests {
 
     use msixvc::xvd::SegmentFile;
 
-    use super::{child_exit_code, expected_hash_count, select_entrypoint};
+    use super::{build_wine_environment, child_exit_code, expected_hash_count, select_entrypoint};
 
     fn segment(keep_encrypted: bool) -> SegmentFile {
         SegmentFile {
@@ -563,5 +658,40 @@ mod tests {
             .expect_err("unencrypted entrypoint must fail");
 
         assert_eq!(error.kind(), ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn wine_environment_map_uses_nt_paths_and_selected_entrypoint() {
+        let files = [("Game.exe", 7), ("data.bin", 8)];
+
+        let (environment, entrypoint) =
+            build_wine_environment(files.iter().copied(), r"C:\Games", "Game.exe")
+                .expect("descriptor map should be built");
+
+        assert_eq!(
+            environment,
+            r"7:\??\Z:C:\Games\Game.exe|8:\??\Z:C:\Games\data.bin"
+        );
+        assert_eq!(entrypoint, r"\??\Z:C:\Games\Game.exe");
+    }
+
+    #[test]
+    fn wine_environment_map_rejects_missing_entrypoint() {
+        let files = [("Game.exe", 7)];
+
+        let error = build_wine_environment(files.iter().copied(), r"C:\Games", "Missing.exe")
+            .expect_err("missing entrypoint must fail");
+
+        assert_eq!(error.kind(), ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn wine_environment_map_rejects_separator_in_path_prefix() {
+        let files = [("Game.exe", 7)];
+
+        let error = build_wine_environment(files.iter().copied(), r"C:\Games|unsafe", "Game.exe")
+            .expect_err("descriptor map separator must fail");
+
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
     }
 }
