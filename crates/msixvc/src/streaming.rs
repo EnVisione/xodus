@@ -5,7 +5,7 @@ use std::task::{Context, Poll};
 
 use bytes::Bytes;
 use futures_util::Stream;
-use reqwest::header::{CONTENT_LENGTH, CONTENT_RANGE, RANGE};
+use reqwest::header::{CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_RANGE, HeaderMap, RANGE};
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf};
 
@@ -889,6 +889,7 @@ async fn open_http_stream(
         .error_for_status()
         .map_err(http_err)?;
     validate_http_response_scheme(&request_url, response.url())?;
+    validate_http_response_encoding(response.headers())?;
 
     let (actual_start, len, end_offset) = match start {
         None => {
@@ -986,6 +987,22 @@ fn validate_http_response_scheme(
     Ok(())
 }
 
+fn validate_http_response_encoding(headers: &HeaderMap) -> std::io::Result<()> {
+    let Some(value) = headers.get(CONTENT_ENCODING) else {
+        return Ok(());
+    };
+    let value = value
+        .to_str()
+        .map_err(|error| Error::new(ErrorKind::InvalidData, error))?;
+    if !value.trim().eq_ignore_ascii_case("identity") {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "encoded http responses are not supported for package data",
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::io;
@@ -995,6 +1012,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    use reqwest::header::{CONTENT_ENCODING, HeaderMap};
     use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, ReadBuf};
     use tokio::net::{TcpListener, TcpStream};
 
@@ -1316,6 +1334,34 @@ mod tests {
             error.to_string(),
             "https request redirected to an insecure scheme"
         );
+    }
+
+    #[test]
+    fn http_read_rejects_encoded_response_bodies() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            CONTENT_ENCODING,
+            reqwest::header::HeaderValue::from_static("gzip"),
+        );
+        let error = super::validate_http_response_encoding(&headers)
+            .expect_err("encoded package responses must fail before streaming");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("encoded http responses"));
+    }
+
+    #[test]
+    fn http_read_accepts_identity_or_missing_response_encoding() {
+        super::validate_http_response_encoding(&HeaderMap::new())
+            .expect("missing content encoding must preserve raw package bytes");
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            CONTENT_ENCODING,
+            reqwest::header::HeaderValue::from_static("identity"),
+        );
+        super::validate_http_response_encoding(&headers)
+            .expect("identity content encoding must preserve raw package bytes");
     }
 
     #[test]
