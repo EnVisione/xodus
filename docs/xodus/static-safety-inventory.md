@@ -12,6 +12,8 @@ Checkpoint `2b05894` removes the final production `debug_assert!` paths from the
 
 On August 26, 2026, the complete workspace all-target test command with the authorized account test included, `cargo test --workspace --all-targets -- --include-ignored --test-threads=1`, passed 410 tests across `msixvc`, `msixvc-common`, `xal`, `xodus`, `xodus-cli`, and `xodus-service`. This is a repository and account smoke-test result only; it does not prove protected title installation, runtime, update, or release behavior. Hosted run [32936266989](https://github.com/EnVisione/xodus/actions/runs/32936266989) also passed formatting, Linux x86_64, and macOS arm64 checks for checkpoint `17d0f40`.
 
+The focused `HttpRead` stream and response extent command, `cargo test -p msixvc --lib http_read -- --test-threads=1`, passed 28 tests on August 26, 2026. The extraction integrity tests passed 2 tests, the output retry policy test passed 1 test, the transaction and recovery tests passed 26 tests, and the service protocol and socket tests passed 15 tests. These focused results validate the current bounded slices but do not substitute for authorized package or title lifecycle evidence.
+
 ## Scan
 
 The baseline search was:
