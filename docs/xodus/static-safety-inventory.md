@@ -47,7 +47,7 @@ The scan still reports `panic!` and `expect` in test modules. These intentionall
 
 ## Secret scan
 
-A redacted `gitleaks dir` scan over an exact archive of the current `HEAD` tracked tree found no leaks. A redacted `gitleaks git` history scan found one generic API key match in the removed historical file `docs/device.md` at commit `536dc7f7f8bdf8183032c2bb8c54e8a999124126`. The historical example labels its values as random, while the current device documentation replaces the password value with `REDACTED`; the historical provenance is not independently verified. No credential value is retained in this inventory. The residual is tracked in [issue 12](https://github.com/EnVisione/xodus/issues/12) and remains open until the stable release security gate confirms its synthetic status or revocation.
+A redacted `gitleaks dir` scan over an exact archive of the current `HEAD` tracked tree found no leaks. A redacted `gitleaks git` history scan found one generic API key match in the removed historical file `docs/device.md`, line 34, at commit `536dc7f7f8bdf8183032c2bb8c54e8a999124126`. The historical example labels its values as random, while the current device documentation replaces the password value with `REDACTED`; the historical provenance is not independently verified. No credential value is retained in this inventory. The residual is tracked in [issue 12](https://github.com/EnVisione/xodus/issues/12) and remains open until the stable release security gate confirms its synthetic status or revocation.
 
 ## Limits
 
