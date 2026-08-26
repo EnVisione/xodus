@@ -1257,6 +1257,14 @@ mod tests {
     }
 
     #[test]
+    fn http_read_rejects_pending_chunk_offset_overflow() {
+        let error = super::checked_pending_chunk_offset(usize::MAX, 1, usize::MAX)
+            .expect_err("pending chunk offset overflow must fail");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
     fn http_read_rejects_logical_position_beyond_total() {
         let error = super::checked_http_position(9, 2, 10)
             .expect_err("logical position beyond total must fail");
@@ -1300,6 +1308,14 @@ mod tests {
     fn prefix_cache_rejects_upstream_extent_beyond_declared_length() {
         let error = super::checked_cache_position(4, 1, 4)
             .expect_err("cache data beyond the declared length must fail");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn prefix_cache_rejects_position_overflow() {
+        let error = super::checked_cache_position(u64::MAX, 1, u64::MAX)
+            .expect_err("cache position overflow must fail");
 
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
