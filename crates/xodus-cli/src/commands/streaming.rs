@@ -1161,6 +1161,17 @@ pub struct StreamingRequest {
     pub version_id: Option<String>,
 }
 
+async fn open_regular_stream_source(path: &Path) -> io::Result<File> {
+    let metadata = tokio::fs::metadata(path).await?;
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "stream source is not a regular file",
+        ));
+    }
+    File::open(path).await
+}
+
 pub async fn run(
     client: &reqwest::Client,
     tokens: &TokenManager,
@@ -1177,7 +1188,7 @@ pub async fn run(
     let (tx, rx) = tokio::sync::mpsc::channel::<ProgressEvent>(256);
     if source.starts_with("file://") {
         let fsrc = source.strip_prefix("file://").unwrap_or_default();
-        let f = match File::open(fsrc).await {
+        let f = match open_regular_stream_source(Path::new(fsrc)).await {
             Ok(f) => f,
             Err(err) => {
                 eprintln!("could not open {fsrc}: {err}");
@@ -1688,7 +1699,7 @@ where
                 .ok();
 
                 if let Some(fpath) = url.strip_prefix("file://") {
-                    let mut i = match File::open(&fpath).await {
+                    let mut i = match open_regular_stream_source(Path::new(fpath)).await {
                         Ok(file) => file,
                         Err(err) => {
                             eprintln!("failed to open {fpath}: {err}");
@@ -1803,11 +1814,12 @@ mod tests {
         PromotionState, SegmentFile, TRANSACTION_DIRECTORY_PREFIX, TRANSACTION_JOURNAL,
         TRANSACTION_JOURNAL_TEMP, TRANSACTION_LOCK_FILE, acquire_transaction_lock, changed_jobs,
         checked_progress_length, ensure_package_root, new_transaction, open_package_input,
-        open_package_output, open_package_root, package_path_components, promote_transaction,
-        promote_transaction_with_interruption, promotion_entries, promotion_entries_with_removals,
-        promotion_entry_capacity, read_bounded_transaction_journal, read_transaction_journal,
-        recover_transaction_dir, recover_transactions, rollback_transaction,
-        validate_streaming_space, write_transaction_journal,
+        open_package_output, open_package_root, open_regular_stream_source,
+        package_path_components, promote_transaction, promote_transaction_with_interruption,
+        promotion_entries, promotion_entries_with_removals, promotion_entry_capacity,
+        read_bounded_transaction_journal, read_transaction_journal, recover_transaction_dir,
+        recover_transactions, rollback_transaction, validate_streaming_space,
+        write_transaction_journal,
     };
 
     #[test]
@@ -1822,6 +1834,17 @@ mod tests {
         let error = validate_streaming_space(100, 119)
             .expect_err("capacity below the reserve must be rejected");
         assert_eq!(error.kind(), std::io::ErrorKind::StorageFull);
+    }
+
+    #[tokio::test]
+    async fn stream_source_open_rejects_non_regular_files_before_opening() {
+        let temporary = tempfile::tempdir().expect("temporary directory must exist");
+
+        let error = open_regular_stream_source(temporary.path())
+            .await
+            .expect_err("a directory must not be opened as a streaming source");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
     }
 
     #[tokio::test]
