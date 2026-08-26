@@ -109,6 +109,8 @@ pub enum XspUpdateApplyError {
     NewDataTooShort { actual: usize, required: usize },
     #[error("XSP in-memory output requires {required} bytes and exceeds limit {limit}")]
     OutputTooLarge { required: u64, limit: u64 },
+    #[error("unable to reserve {required} bytes for XSP in-memory output")]
+    OutputAllocationFailed { required: u64 },
     #[error("XSP apply length cannot be represented on this platform")]
     LengthOverflow,
     #[error("XSP {phase} block hash mismatch at block {block}")]
@@ -121,6 +123,8 @@ pub enum XspStreamApplyError {
     Validation(#[from] XspUpdateValidationError),
     #[error("XSP stream block size {size} exceeds the supported limit {limit}")]
     BlockSizeTooLarge { size: u64, limit: u64 },
+    #[error("unable to reserve {size} bytes for an XSP stream block")]
+    BlockAllocationFailed { size: u64 },
     #[error("XSP source block {block} ended before the declared block size")]
     SourceBlockTooShort { block: u64 },
     #[error("XSP new data block {block} ended before the declared block size")]
@@ -272,7 +276,13 @@ impl XspFile {
         }
         let block_size = usize::try_from(validated.block_size)
             .map_err(|_| XspStreamApplyError::OffsetOverflow)?;
-        let mut block = vec![0_u8; block_size];
+        let mut block = Vec::new();
+        block.try_reserve_exact(block_size).map_err(|_| {
+            XspStreamApplyError::BlockAllocationFailed {
+                size: validated.block_size,
+            }
+        })?;
+        block.resize(block_size, 0);
 
         base.seek(std::io::SeekFrom::Start(0)).await?;
         for (index, expected_hash) in base_state.block_hashes.iter().enumerate() {
@@ -561,7 +571,13 @@ impl XspFile {
             XspHashPhase::Source,
         )?;
 
-        let mut output = vec![0_u8; target_length_usize];
+        let mut output = Vec::new();
+        output.try_reserve_exact(target_length_usize).map_err(|_| {
+            XspUpdateApplyError::OutputAllocationFailed {
+                required: target_length,
+            }
+        })?;
+        output.resize(target_length_usize, 0);
         let mut new_data_offset = 0_usize;
         for entry in &self.entries {
             let (source_start, target_start, block_count) = match entry {
