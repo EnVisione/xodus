@@ -11,7 +11,7 @@ use futures_util::{StreamExt, stream};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use msixvc::streaming;
 use msixvc::xvd::{SegmentFile, XvdFile};
-use rustix::fs::{Mode, OFlags, ResolveFlags, mkdirat, openat2};
+use rustix::fs::{AtFlags, Mode, OFlags, ResolveFlags, mkdirat, openat2, renameat, unlinkat};
 use rustix::io::Errno;
 use tempfile::{Builder as TempDirBuilder, TempDir};
 use tokio::fs::{File, OpenOptions};
@@ -213,22 +213,30 @@ fn package_relative_path(package_path: &str) -> io::Result<PathBuf> {
     Ok(relative)
 }
 
-fn ensure_package_parent(root: &Path, package_path: &Path) -> io::Result<()> {
+fn open_package_parent(
+    root: &Path,
+    package_path: &Path,
+    create_parent: bool,
+) -> io::Result<std::fs::File> {
     let mut directory = std::fs::File::open(root)?;
-    let components = package_path
-        .parent()
-        .into_iter()
-        .flat_map(Path::components)
-        .filter_map(|component| match component {
-            std::path::Component::Normal(component) => component.to_str(),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
+    if !directory.metadata()?.is_dir() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "package root is not a directory",
+        ));
+    }
 
-    for component in components {
-        match mkdirat(&directory, component, Mode::RWXU) {
-            Ok(()) | Err(Errno::EXIST) => {}
-            Err(error) => return Err(error.into()),
+    for component in package_path.parent().into_iter().flat_map(Path::components) {
+        let std::path::Component::Normal(component) = component else {
+            return Err(invalid_package_path(
+                "package path parent contains an invalid component",
+            ));
+        };
+        if create_parent {
+            match mkdirat(&directory, component, Mode::RWXU) {
+                Ok(()) | Err(Errno::EXIST) => {}
+                Err(error) => return Err(error.into()),
+            }
         }
         directory = std::fs::File::from(
             openat2(
@@ -241,7 +249,11 @@ fn ensure_package_parent(root: &Path, package_path: &Path) -> io::Result<()> {
             .map_err(io::Error::from)?,
         );
     }
-    Ok(())
+    Ok(directory)
+}
+
+fn ensure_package_parent(root: &Path, package_path: &Path) -> io::Result<()> {
+    open_package_parent(root, package_path, true).map(|_| ())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -503,17 +515,84 @@ fn read_bounded_transaction_journal<R: Read>(reader: R, max_bytes: usize) -> io:
         .map_err(|_| invalid_package_path("transaction journal is not valid UTF-8"))
 }
 
-fn remove_file_if_present(path: &Path) -> io::Result<()> {
-    match std::fs::remove_file(path) {
+fn package_entry_name(path: &Path) -> io::Result<&std::ffi::OsStr> {
+    path.file_name()
+        .ok_or_else(|| invalid_package_path("package path has no filename"))
+}
+
+fn package_entry_is_regular(root: &Path, relative: &Path) -> io::Result<bool> {
+    let parent = match open_package_parent(root, relative, false) {
+        Ok(parent) => parent,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    let name = package_entry_name(relative)?;
+    let file = match openat2(
+        &parent,
+        name,
+        OFlags::RDONLY | OFlags::CLOEXEC,
+        Mode::empty(),
+        OUTPUT_RESOLVE_FLAGS,
+    ) {
+        Ok(file) => std::fs::File::from(file),
+        Err(error) if error == Errno::NOENT => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    Ok(file.metadata()?.is_file())
+}
+
+fn rename_package_entry(
+    source_root: &Path,
+    source_relative: &Path,
+    target_root: &Path,
+    target_relative: &Path,
+) -> io::Result<()> {
+    let source_parent = open_package_parent(source_root, source_relative, false)?;
+    let target_parent = open_package_parent(target_root, target_relative, true)?;
+    let source_name = package_entry_name(source_relative)?;
+    let target_name = package_entry_name(target_relative)?;
+    match renameat(&source_parent, source_name, &target_parent, target_name) {
         Ok(()) => Ok(()),
+        Err(Errno::EXIST) => {
+            unlinkat(&target_parent, target_name, AtFlags::empty()).map_err(io::Error::from)?;
+            renameat(&source_parent, source_name, &target_parent, target_name)
+                .map_err(io::Error::from)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn remove_package_entry(root: &Path, relative: &Path) -> io::Result<()> {
+    let parent = match open_package_parent(root, relative, false) {
+        Ok(parent) => parent,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let name = package_entry_name(relative)?;
+    match unlinkat(&parent, name, AtFlags::empty()) {
+        Ok(()) => Ok(()),
+        Err(error) if error == Errno::NOENT => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn sync_package_parent(root: &Path, relative: &Path) -> io::Result<()> {
+    match open_package_parent(root, relative, false) {
+        Ok(parent) => parent.sync_all(),
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
     }
 }
 
-fn restore_previous_file(backup_path: &Path, final_path: &Path) -> io::Result<()> {
-    let metadata = std::fs::symlink_metadata(backup_path)?;
-    if !metadata.file_type().is_file() {
+fn restore_previous_file(
+    transaction_root: &Path,
+    backup_relative: &Path,
+    output_root: &Path,
+    final_relative: &Path,
+) -> io::Result<()> {
+    let backup_path = transaction_root.join(backup_relative);
+    std::fs::symlink_metadata(&backup_path)?;
+    if !package_entry_is_regular(transaction_root, backup_relative)? {
         return Err(io::Error::new(
             ErrorKind::InvalidData,
             format!(
@@ -523,19 +602,29 @@ fn restore_previous_file(backup_path: &Path, final_path: &Path) -> io::Result<()
         ));
     }
 
-    match std::fs::rename(backup_path, final_path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
-            remove_file_if_present(final_path)?;
-            std::fs::rename(backup_path, final_path)
-        }
-        Err(error) => Err(error),
-    }
+    rename_package_entry(
+        transaction_root,
+        backup_relative,
+        output_root,
+        final_relative,
+    )
 }
 
-fn recover_backup_pending(backup_path: &Path, final_path: &Path) -> io::Result<()> {
+fn recover_backup_pending(
+    transaction_root: &Path,
+    backup_relative: &Path,
+    output_root: &Path,
+    final_relative: &Path,
+) -> io::Result<()> {
+    let backup_path = transaction_root.join(backup_relative);
+    let final_path = output_root.join(final_relative);
     match std::fs::symlink_metadata(backup_path) {
-        Ok(_) => restore_previous_file(backup_path, final_path),
+        Ok(_) => restore_previous_file(
+            transaction_root,
+            backup_relative,
+            output_root,
+            final_relative,
+        ),
         Err(error) if error.kind() == ErrorKind::NotFound => {
             if std::fs::symlink_metadata(final_path).is_ok() {
                 Ok(())
@@ -564,21 +653,30 @@ fn rollback_transaction(
 ) -> io::Result<()> {
     let mut rollback_error = None;
     for entry in entries.iter_mut().rev() {
-        let final_path = output_root.join(&entry.final_relative);
-        let backup_path = transaction_root.join(&entry.backup_relative);
         let result = if entry.had_previous {
             if entry.state == PromotionState::BackupPending {
-                recover_backup_pending(&backup_path, &final_path)
+                recover_backup_pending(
+                    transaction_root,
+                    &entry.backup_relative,
+                    output_root,
+                    &entry.final_relative,
+                )
             } else {
-                restore_previous_file(&backup_path, &final_path)
+                restore_previous_file(
+                    transaction_root,
+                    &entry.backup_relative,
+                    output_root,
+                    &entry.final_relative,
+                )
             }
-            .and_then(|()| sync_parent_directory(&backup_path))
-            .and_then(|()| sync_parent_directory(&final_path))
+            .and_then(|()| sync_package_parent(transaction_root, &entry.backup_relative))
+            .and_then(|()| sync_package_parent(output_root, &entry.final_relative))
         } else if matches!(
             entry.state,
             PromotionState::BackedUp | PromotionState::Promoted
         ) {
-            remove_file_if_present(&final_path).and_then(|()| sync_parent_directory(&final_path))
+            remove_package_entry(output_root, &entry.final_relative)
+                .and_then(|()| sync_package_parent(output_root, &entry.final_relative))
         } else {
             Ok(())
         };
@@ -618,17 +716,25 @@ where
     }
 
     for index in 0..entries.len() {
-        let (staged_path, final_path, backup_path) = {
+        let (staged_path, final_path) = {
             let entry = &entries[index];
             (
                 transaction_root
                     .join(TRANSACTION_PAYLOAD_DIRECTORY)
                     .join(&entry.staged_relative),
                 output_root.join(&entry.final_relative),
-                transaction_root.join(&entry.backup_relative),
             )
         };
-        if !entries[index].remove_final && !staged_path.is_file() {
+        let payload_root = transaction_root.join(TRANSACTION_PAYLOAD_DIRECTORY);
+        if !entries[index].remove_final
+            && !match package_entry_is_regular(&payload_root, &entries[index].staged_relative) {
+                Ok(is_regular) => is_regular,
+                Err(error) => {
+                    let _ = rollback_transaction(transaction_root, output_root, entries);
+                    return Err(error);
+                }
+            }
+        {
             let error = io::Error::new(
                 ErrorKind::NotFound,
                 format!("staged package file is missing: {}", staged_path.display()),
@@ -638,12 +744,6 @@ where
         }
         if !entries[index].remove_final
             && let Err(error) = ensure_package_parent(output_root, &entries[index].final_relative)
-        {
-            let _ = rollback_transaction(transaction_root, output_root, entries);
-            return Err(error);
-        }
-        if let Some(parent) = backup_path.parent()
-            && let Err(error) = std::fs::create_dir_all(parent)
         {
             let _ = rollback_transaction(transaction_root, output_root, entries);
             return Err(error);
@@ -661,12 +761,19 @@ where
                     "transaction promotion interrupted before backup",
                 ));
             }
-            if let Err(error) = std::fs::rename(&final_path, &backup_path) {
+            if let Err(error) = rename_package_entry(
+                output_root,
+                &entries[index].final_relative,
+                transaction_root,
+                &entries[index].backup_relative,
+            ) {
                 let _ = rollback_transaction(transaction_root, output_root, entries);
                 return Err(error);
             }
-            if let Err(error) = sync_parent_directory(&final_path)
-                .and_then(|()| sync_parent_directory(&backup_path))
+            if let Err(error) = sync_package_parent(output_root, &entries[index].final_relative)
+                .and_then(|()| {
+                    sync_package_parent(transaction_root, &entries[index].backup_relative)
+                })
             {
                 let _ = rollback_transaction(transaction_root, output_root, entries);
                 return Err(error);
@@ -691,7 +798,12 @@ where
         }
 
         if !entries[index].remove_final
-            && let Err(error) = std::fs::rename(&staged_path, &final_path)
+            && let Err(error) = rename_package_entry(
+                &payload_root,
+                &entries[index].staged_relative,
+                output_root,
+                &entries[index].final_relative,
+            )
         {
             let _ = rollback_transaction(transaction_root, output_root, entries);
             return Err(error);
@@ -703,8 +815,8 @@ where
             ));
         }
         if !entries[index].remove_final
-            && let Err(error) = sync_parent_directory(&staged_path)
-                .and_then(|()| sync_parent_directory(&final_path))
+            && let Err(error) = sync_package_parent(&payload_root, &entries[index].staged_relative)
+                .and_then(|()| sync_package_parent(output_root, &entries[index].final_relative))
         {
             let _ = rollback_transaction(transaction_root, output_root, entries);
             return Err(error);
@@ -1713,6 +1825,49 @@ mod tests {
 
         assert!(open_package_output(&root, r"escape\payload.bin").is_err());
         assert!(open_package_input(&root, r"escape\payload.bin").is_err());
+        assert!(!outside.join("payload.bin").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transaction_promotion_refuses_staged_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let output = temporary.path().join("output");
+        let outside = temporary.path().join("outside");
+        std::fs::create_dir(&output).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        let outside_file = outside.join("payload.bin");
+        std::fs::write(&outside_file, b"outside").unwrap();
+        let (transaction, payload) = new_transaction(&output).unwrap();
+        symlink(&outside_file, payload.join("payload.bin")).unwrap();
+
+        let mut entries =
+            promotion_entries(&[("payload.bin".to_owned(), "payload.bin".to_owned())]).unwrap();
+        assert!(promote_transaction(transaction.path(), &output, &mut entries).is_err());
+        assert!(!output.join("payload.bin").exists());
+        assert_eq!(std::fs::read(outside_file).unwrap(), b"outside");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transaction_promotion_refuses_symlinked_final_parent() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let output = temporary.path().join("output");
+        let outside = temporary.path().join("outside");
+        std::fs::create_dir(&output).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        symlink(&outside, output.join("escape")).unwrap();
+        let (transaction, payload) = new_transaction(&output).unwrap();
+        std::fs::write(payload.join("payload.bin"), b"payload").unwrap();
+
+        let mut entries =
+            promotion_entries(&[("payload.bin".to_owned(), "escape/payload.bin".to_owned())])
+                .unwrap();
+        assert!(promote_transaction(transaction.path(), &output, &mut entries).is_err());
         assert!(!outside.join("payload.bin").exists());
     }
 
