@@ -62,7 +62,7 @@ Clippy completed with exit status zero and four warnings at the frozen source re
 
 No account login, entitlement, package, Game Runtime, game launch, performance, Tier 2, release, or cloud fallback verification ran in this phase. The baseline manifests are not local compatibility evidence.
 
-The August 25, 2026 dependency security review ran `cargo audit --no-fetch --stale` and found `rsa` 0.9.10 with `RUSTSEC-2023-0071`, the Marvin timing side channel. The advisory has no fixed upstream release. The package is reachable through `bergshamra-keys` and `kryptering` in the Xodus runtime, while the service boundary limits direct invocation to the owning user's mode 600 Unix socket. `cargo deny check` and zero warning Clippy pass, but the unresolved audit result remains a release blocker tracked in [issue 13](https://github.com/EnVisione/xodus/issues/13). No stable release claim is made until the dependency is replaced or an approved isolation decision is verified.
+The August 25, 2026 dependency security review ran `cargo audit --no-fetch --stale` and found `rsa` 0.9.10 with `RUSTSEC-2023-0071`, the Marvin timing side channel. The advisory has no fixed upstream release. The all-target lockfile contains the package through `bergshamra-keys` and `kryptering`, while `cargo tree --workspace --target x86_64-unknown-linux-gnu -e features -i rsa@0.9.10` returns no package for the CachyOS Linux graph, which selects AWS-LC. `cargo deny check` and zero warning Clippy pass. Issue 13 tracks removal or isolation of the non-Linux RustCrypto path before those targets ship; the cross-target audit finding remains unresolved.
 
 ## Phase 001 Exit Evidence
 
