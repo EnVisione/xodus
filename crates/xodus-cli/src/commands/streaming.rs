@@ -52,6 +52,7 @@ const TRANSACTION_JOURNAL: &str = ".xodus-streaming-journal";
 const TRANSACTION_JOURNAL_TEMP: &str = ".xodus-streaming-journal.tmp";
 const TRANSACTION_LOCK_FILE: &str = ".xodus-streaming.lock";
 const MAX_TRANSACTION_JOURNAL_BYTES: usize = 64 * 1024 * 1024;
+const MAX_PACKAGE_PATH_BYTES: usize = 4096;
 
 fn invalid_package_path(message: impl Into<String>) -> io::Error {
     io::Error::new(ErrorKind::InvalidData, message.into())
@@ -182,9 +183,9 @@ pub(crate) fn ensure_package_root(root: &Path) -> io::Result<()> {
 }
 
 pub(crate) fn package_path_components(path: &str) -> io::Result<Vec<&str>> {
-    if path.is_empty() || path.contains('\0') {
+    if path.is_empty() || path.len() > MAX_PACKAGE_PATH_BYTES || path.contains('\0') {
         return Err(invalid_package_path(
-            "package path is empty or contains a null byte",
+            "package path is empty, too long, or contains a null byte",
         ));
     }
     if path.starts_with(['/', '\\']) {
@@ -204,11 +205,15 @@ pub(crate) fn package_path_components(path: &str) -> io::Result<Vec<&str>> {
         return Err(invalid_package_path("package path uses mixed separators"));
     }
 
-    let components = if uses_backslash {
-        path.split('\\').collect::<Vec<_>>()
+    let mut components = Vec::new();
+    components
+        .try_reserve(path.len().saturating_add(1))
+        .map_err(|_| invalid_package_path("package path component allocation failed"))?;
+    if uses_backslash {
+        components.extend(path.split('\\'));
     } else {
-        path.split('/').collect::<Vec<_>>()
-    };
+        components.extend(path.split('/'));
+    }
 
     for component in &components {
         if component.is_empty() || *component == "." || *component == ".." {
@@ -1941,6 +1946,12 @@ mod tests {
         ] {
             assert!(package_path_components(path).is_err(), "{path}");
         }
+    }
+
+    #[test]
+    fn package_paths_reject_oversized_names_before_component_allocation() {
+        let path = "a".repeat(super::MAX_PACKAGE_PATH_BYTES + 1);
+        assert!(package_path_components(&path).is_err());
     }
 
     #[test]
