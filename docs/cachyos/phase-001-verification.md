@@ -22,6 +22,8 @@ Hosted run [32924183997](https://github.com/EnVisione/xodus/actions/runs/3292418
 
 The package response validation checkpoint `fb97bc474b40fe33f2413507c5cfbee8ba7ce66b` is signed, pushed, and passes the local full workspace gate. It adds latest and exact-version response identity checks plus file metadata and CDN safety validation before file selection or URL construction. Hosted run [32926270780](https://github.com/EnVisione/xodus/actions/runs/32926270780) passed formatting, Linux x86_64, and macOS arm64 checks against documentation checkpoint `08e3710b79482e5d4aed1a92b1a2c4d93189b7d1`, which contains source checkpoint `fb97bc474b40fe33f2413507c5cfbee8ba7ce66b`. This cross-target result confirms build and lint coverage for the package validation slice only and does not establish account, retail package, target runtime, performance, Tier 2, or release completion.
 
+Checkpoint `7d56e1523d8305ac5426f2bde549876241d19179` extends that boundary by rejecting duplicate package file names before selection. The source checkpoint is signed, pushed, and passes the targeted package tests and zero-warning targeted Clippy. The baseline manifest is refreshed to bind this checkpoint; hosted verification remains pending.
+
 ## Commands and Results
 
 The following commands passed against the frozen source revision. They are read only except for Cargo build output under the ignored `target/` directory.
