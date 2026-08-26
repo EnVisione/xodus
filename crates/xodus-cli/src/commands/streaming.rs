@@ -1,7 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::io::{self, ErrorKind, Read, Write};
-use std::path::{Component, Path, PathBuf};
+#[cfg(target_os = "linux")]
+use std::path::Component;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
