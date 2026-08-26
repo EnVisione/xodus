@@ -1127,56 +1127,65 @@ pub async fn run(
         )
         .await;
     } else {
-        let urls = if source.starts_with("http://") || source.starts_with("https://") {
-            vec![source]
-        } else {
-            let content_id = if Uuid::try_parse(&source).is_err() {
-                let content_id_task = get_content_id(client, source, market.clone()).await;
-                let Ok(content_id) = content_id_task else {
-                    let Err(err) = content_id_task else {
+        let (urls, expected_length) =
+            if source.starts_with("http://") || source.starts_with("https://") {
+                (vec![source], None)
+            } else {
+                let content_id = if Uuid::try_parse(&source).is_err() {
+                    let content_id_task = get_content_id(client, source, market.clone()).await;
+                    let Ok(content_id) = content_id_task else {
+                        let Err(err) = content_id_task else {
+                            eprintln!("Unknown Error");
+                            return ExitCode::FAILURE;
+                        };
+                        eprintln!("{}", err);
+                        return ExitCode::FAILURE;
+                    };
+                    content_id
+                } else {
+                    source
+                };
+                let package_result = if let Some(version_id) = version_id {
+                    get_specific_packages(client, tokens, content_id.clone(), version_id).await
+                } else {
+                    get_packages(client, tokens, content_id.clone()).await
+                };
+                let Ok(package) = package_result else {
+                    let Err(err) = package_result else {
                         eprintln!("Unknown Error");
                         return ExitCode::FAILURE;
                     };
                     eprintln!("{}", err);
                     return ExitCode::FAILURE;
                 };
-                content_id
-            } else {
-                source
-            };
-            let package_result = if let Some(version_id) = version_id {
-                get_specific_packages(client, tokens, content_id.clone(), version_id).await
-            } else {
-                get_packages(client, tokens, content_id.clone()).await
-            };
-            let Ok(package) = package_result else {
-                let Err(err) = package_result else {
-                    eprintln!("Unknown Error");
+                let Some(file) = package
+                    .package_files
+                    .iter()
+                    .find(|p| p.file_name.ends_with(".msixvc"))
+                else {
+                    eprintln!("No .msixvc file found");
                     return ExitCode::FAILURE;
                 };
-                eprintln!("{}", err);
-                return ExitCode::FAILURE;
+                let expected_length = match u64::try_from(file.file_size) {
+                    Ok(length) => length,
+                    Err(_) => {
+                        eprintln!("Package file size is invalid");
+                        return ExitCode::FAILURE;
+                    }
+                };
+                let urls = match package_download_urls(
+                    &file.cdn_root_paths,
+                    &file.background_cdn_root_paths,
+                    &file.relative_url,
+                ) {
+                    Ok(urls) => urls,
+                    Err(error) => {
+                        eprintln!("could not construct package URL: {error}");
+                        return ExitCode::FAILURE;
+                    }
+                };
+                (urls, Some(expected_length))
             };
-            let Some(file) = package
-                .package_files
-                .iter()
-                .find(|p| p.file_name.ends_with(".msixvc"))
-            else {
-                eprintln!("No .msixvc file found");
-                return ExitCode::FAILURE;
-            };
-            match package_download_urls(
-                &file.cdn_root_paths,
-                &file.background_cdn_root_paths,
-                &file.relative_url,
-            ) {
-                Ok(urls) => urls,
-                Err(error) => {
-                    eprintln!("could not construct package URL: {error}");
-                    return ExitCode::FAILURE;
-                }
-            }
-        };
         let progress_position = Arc::new(AtomicU64::new(0));
         let mut selected_url = None;
         let mut http_file = None;
@@ -1184,9 +1193,10 @@ pub async fn run(
         for candidate in &urls {
             let progress_position = Arc::clone(&progress_position);
             let progress_tx = tx.clone();
-            match streaming::HttpRead::open(
+            match streaming::HttpRead::open_with_expected_len(
                 client.clone(),
                 candidate.clone(),
+                expected_length,
                 Some(move |c: u64, _| {
                     let previous = progress_position.load(Ordering::Relaxed);
                     if progress_tx

@@ -176,6 +176,18 @@ fn validate_partial_http_response_extent(
     Ok(())
 }
 
+fn validate_expected_http_length(expected: Option<u64>, actual: u64) -> io::Result<()> {
+    if let Some(expected) = expected
+        && actual != expected
+    {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            format!("http content length mismatch: expected {expected} bytes, got {actual}"),
+        ));
+    }
+    Ok(())
+}
+
 fn consume_http_retry(remaining: &mut usize) -> io::Result<()> {
     if *remaining == 0 {
         return Err(http_retry_budget_exhausted());
@@ -230,6 +242,18 @@ impl<'t> HttpRead<'t> {
     where
         Progress: FnMut(u64, u64) + Send + 't,
     {
+        Self::open_with_expected_len(client, url, None, progress).await
+    }
+
+    pub async fn open_with_expected_len<Progress>(
+        client: reqwest::Client,
+        url: impl Into<String>,
+        expected_len: Option<u64>,
+        progress: Option<Progress>,
+    ) -> std::io::Result<Self>
+    where
+        Progress: FnMut(u64, u64) + Send + 't,
+    {
         let url = url.into();
         let mut retry_budget = HTTP_RETRY_LIMIT;
         let initial = loop {
@@ -241,6 +265,7 @@ impl<'t> HttpRead<'t> {
                 Err(error) => return Err(error),
             }
         };
+        validate_expected_http_length(expected_len, initial.len)?;
 
         Ok(Self {
             client,
@@ -1682,6 +1707,26 @@ mod tests {
 
         assert_eq!(output, body);
         assert_eq!(server.request_ranges(), vec![None]);
+    }
+
+    #[tokio::test]
+    async fn http_read_rejects_initial_content_length_mismatch() {
+        let body = test_body();
+        let server = spawn_server(body.clone(), None, 0).await.unwrap();
+        let error = match HttpRead::open_with_expected_len(
+            reqwest::Client::new(),
+            &server.url,
+            Some(body.len() as u64 + 1),
+            None::<fn(u64, u64)>,
+        )
+        .await
+        {
+            Ok(_) => panic!("a metadata length mismatch must fail before the reader opens"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("content length mismatch"));
     }
 
     #[test]
