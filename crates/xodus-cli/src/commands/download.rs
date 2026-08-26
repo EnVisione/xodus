@@ -85,6 +85,24 @@ fn validate_declared_download_length(expected: u64, declared: Option<u64>) -> io
     Ok(())
 }
 
+fn validate_download_space(required: u64, available: u64) -> io::Result<()> {
+    let required_with_reserve = required
+        .checked_mul(6)
+        .map(|value| value.div_ceil(5))
+        .ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "package download size overflow")
+        })?;
+    if required_with_reserve > available {
+        return Err(io::Error::new(
+            io::ErrorKind::StorageFull,
+            format!(
+                "package download requires {required_with_reserve} bytes including reserve but only {available} bytes are available"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 fn checked_download_total(current: u64, chunk: usize, expected: u64) -> io::Result<u64> {
     let next = current
         .checked_add(u64::try_from(chunk).map_err(|_| {
@@ -196,6 +214,8 @@ where
         progress_bar,
     } = request;
     progress_bar.set_position(0);
+    let available_space = fs2::available_space(output_root).map_err(fatal_download_error)?;
+    validate_download_space(file_size, available_space).map_err(fatal_download_error)?;
     let response = client
         .get(url)
         .send()
@@ -428,7 +448,7 @@ mod tests {
         DOWNLOAD_RETRY_LIMIT, DownloadAttemptRequest, MAX_FILE_HASH_BASE64_CHARS,
         checked_download_total, consume_download_retry, decode_file_hash, download_file_attempt,
         download_file_attempt_with_hook, is_retryable_package_download_status,
-        validate_declared_download_length, validate_file_hash,
+        validate_declared_download_length, validate_download_space, validate_file_hash,
     };
     use crate::commands::streaming::recover_transactions;
     use crate::package::package_download_urls;
@@ -530,6 +550,14 @@ mod tests {
         validate_declared_download_length(10, Some(10)).expect("matching length");
         validate_declared_download_length(10, None).expect("unknown length");
         assert!(validate_declared_download_length(10, Some(9)).is_err());
+    }
+
+    #[test]
+    fn download_space_validation_requires_a_twenty_percent_reserve() {
+        validate_download_space(100, 120).expect("capacity including reserve must be accepted");
+        let error = validate_download_space(100, 119)
+            .expect_err("capacity below the reserve must be rejected");
+        assert_eq!(error.kind(), std::io::ErrorKind::StorageFull);
     }
 
     #[test]
