@@ -105,7 +105,7 @@
 //!         )
 //!         .await?;
 //!
-//!     let identity_token = xsts_mc_services.authorization_header_value();
+//!     let identity_token = xsts_mc_services.authorization_header_value()?;
 //!     println!("identityToken: {identity_token}");
 //!
 //!     /* Minecraft stuff */
@@ -163,7 +163,7 @@
 //!     let userpresence = reqwest::Client::new()
 //!         .get("https://userpresence.xboxlive.com/users/me?level=all")
 //!         .header("x-xbl-contract-version", "3")
-//!         .header("Authorization", xsts_token.authorization_header_value())
+//!         .header("Authorization", xsts_token.authorization_header_value()?)
 //!         .add_cv(&mut cv)?
 //!         .sign(&mut signer, None)
 //!         .await?

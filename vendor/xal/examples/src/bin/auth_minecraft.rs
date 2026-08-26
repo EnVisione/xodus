@@ -32,7 +32,7 @@ async fn main() -> Result<(), Error> {
         .await?;
 
     xsts_mc_services.check_validity()?;
-    let identity_token = xsts_mc_services.authorization_header_value();
+    let identity_token = xsts_mc_services.authorization_header_value()?;
     println!("identityToken: {identity_token}");
 
     /* Minecraft stuff */

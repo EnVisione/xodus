@@ -347,15 +347,29 @@ pub mod response {
 
     impl XTokenResponse<XSTSDisplayClaims> {
         /// Return Xbox Userhash (related to `Authorization`)
-        #[must_use]
-        pub fn userhash(&self) -> String {
-            self.display_claims.clone().unwrap().xui[0]["uhs"].clone()
+        ///
+        /// Returns a typed error when the response does not contain a nonempty user hash.
+        pub fn userhash(&self) -> Result<String, Error> {
+            let claims = self
+                .display_claims
+                .as_ref()
+                .ok_or(Error::MissingXstsUserHash)?;
+            let claim = claims.xui.first().ok_or(Error::MissingXstsUserHash)?;
+            let userhash = claim
+                .get("uhs")
+                .filter(|value| !value.is_empty())
+                .ok_or(Error::MissingXstsUserHash)?;
+            Ok(userhash.clone())
         }
 
         /// Return Authorization header value
-        #[must_use]
-        pub fn authorization_header_value(&self) -> String {
-            format!("XBL3.0 x={};{}", self.userhash(), self.token)
+        ///
+        /// Returns a typed error when the response does not contain a token or user hash.
+        pub fn authorization_header_value(&self) -> Result<String, Error> {
+            if self.token.is_empty() {
+                return Err(Error::MissingXstsToken);
+            }
+            Ok(format!("XBL3.0 x={};{}", self.userhash()?, self.token))
         }
     }
 
@@ -848,6 +862,10 @@ impl Default for XalClientParameters {
 
 #[cfg(test)]
 mod test {
+    use chrono::{TimeZone, Utc};
+
+    use crate::Error;
+
     use super::*;
 
     #[test]
@@ -876,9 +894,9 @@ mod test {
         let xsts: response::XSTSToken =
             serde_json::from_str(data).expect("BUG: Failed to deserialize XSTS response");
 
-        assert_eq!(xsts.userhash(), "abcdefg");
+        assert_eq!(xsts.userhash().unwrap(), "abcdefg");
         assert_eq!(
-            xsts.authorization_header_value(),
+            xsts.authorization_header_value().unwrap(),
             "XBL3.0 x=abcdefg;123456789"
         );
         assert_eq!(xsts.token, "123456789".to_owned());
@@ -909,6 +927,34 @@ mod test {
             deserialized.supported_algorithms,
             vec![SigningAlgorithm::ES521]
         )
+    }
+
+    #[test]
+    fn xsts_header_rejects_missing_claims_without_panicking() {
+        let xsts = response::XSTSToken::from("token");
+
+        assert!(matches!(xsts.userhash(), Err(Error::MissingXstsUserHash)));
+        assert!(matches!(
+            xsts.authorization_header_value(),
+            Err(Error::MissingXstsUserHash)
+        ));
+    }
+
+    #[test]
+    fn xsts_header_rejects_empty_token_without_panicking() {
+        let xsts = response::XSTSToken {
+            issue_instant: Utc.with_ymd_and_hms(2020, 12, 15, 0, 0, 0).unwrap(),
+            not_after: Utc.with_ymd_and_hms(2199, 12, 15, 0, 0, 0).unwrap(),
+            token: String::new(),
+            display_claims: Some(response::XSTSDisplayClaims {
+                xui: vec![HashMap::from([(String::from("uhs"), String::from("uhs"))])],
+            }),
+        };
+
+        assert!(matches!(
+            xsts.authorization_header_value(),
+            Err(Error::MissingXstsToken)
+        ));
     }
 
     #[test]

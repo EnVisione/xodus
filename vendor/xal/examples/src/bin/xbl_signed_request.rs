@@ -32,7 +32,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let userpresence = reqwest::Client::new()
         .get("https://userpresence.xboxlive.com/users/me?level=all")
         .header("x-xbl-contract-version", "3")
-        .header("Authorization", xsts_token.authorization_header_value())
+        .header("Authorization", xsts_token.authorization_header_value()?)
         .add_cv(&mut cv)?
         .sign(&mut signer, None)
         .await?

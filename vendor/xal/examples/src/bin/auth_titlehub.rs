@@ -195,7 +195,7 @@ async fn main() -> Result<(), Error> {
         .header("x-xbl-contract-version", "107")
         .header("x-xbl-pfn", pfn)
         .header("Accept-Language", "en-US")
-        .header("Authorization", xsts_token.authorization_header_value())
+        .header("Authorization", xsts_token.authorization_header_value()?)
         .add_cv(&mut cv)?
         .sign(&mut signer, None)
         .await?
@@ -219,7 +219,7 @@ async fn main() -> Result<(), Error> {
             .header("x-xbl-contract-version", "107")
             .header("x-xbl-pfn", pfn)
             .header("Accept-Language", "en-US")
-            .header("Authorization", xsts_token.authorization_header_value())
+            .header("Authorization", xsts_token.authorization_header_value()?)
             .add_cv(&mut cv)?
             .sign(&mut signer, None)
             .await?
@@ -243,7 +243,7 @@ async fn main() -> Result<(), Error> {
                 .header("x-xbl-contract-version", "107")
                 .header("x-xbl-pfn", pfn)
                 .header("Accept-Language", "en-US")
-                .header("Authorization", xsts_token.authorization_header_value())
+                .header("Authorization", xsts_token.authorization_header_value()?)
                 .add_cv(&mut cv)?
                 .sign(&mut signer, None)
                 .await?
