@@ -67,20 +67,32 @@ impl From<&XboxWebSignatureBytes> for Vec<u8> {
 }
 
 impl FromStr for XboxWebSignatureBytes {
-    type Err = base64ct::Error;
+    type Err = Error;
 
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         let bytes = Base64::decode_vec(s)?;
-        Ok(bytes.into())
+        bytes.try_into()
     }
 }
-impl From<Vec<u8>> for XboxWebSignatureBytes {
-    fn from(bytes: Vec<u8>) -> Self {
-        Self {
+impl TryFrom<Vec<u8>> for XboxWebSignatureBytes {
+    type Error = Error;
+
+    fn try_from(bytes: Vec<u8>) -> std::result::Result<Self, Self::Error> {
+        const SIGNATURE_PREFIX_LEN: usize = 12;
+        const SIGNATURE_LEN: usize = 64;
+        const SERIALIZED_LEN: usize = SIGNATURE_PREFIX_LEN + SIGNATURE_LEN;
+
+        if bytes.len() != SERIALIZED_LEN {
+            return Err(Error::InvalidRequest(
+                "Xbox signature has an invalid serialized length".to_string(),
+            ));
+        }
+
+        Ok(Self {
             signing_policy_version: bytes[..4].to_vec(),
             timestamp: bytes[4..12].to_vec(),
-            signature: Signature::from_slice(&bytes[12..]).unwrap(),
-        }
+            signature: Signature::from_slice(&bytes[SIGNATURE_PREFIX_LEN..])?,
+        })
     }
 }
 
@@ -875,6 +887,21 @@ mod test {
         signer
             .verify_message(signature, &request, MAX_BODY_BYTES)
             .expect("Verification failed")
+    }
+
+    #[test]
+    fn malformed_signature_bytes_return_errors_without_panicking() {
+        for length in [0, 11, 75, 77] {
+            let encoded = Base64::encode_string(&vec![0_u8; length]);
+            let result = std::panic::catch_unwind(|| XboxWebSignatureBytes::from_str(&encoded));
+
+            assert!(result.is_ok(), "signature length {} must not panic", length);
+            assert!(
+                result.unwrap().is_err(),
+                "signature length {} must fail",
+                length
+            );
+        }
     }
 
     #[test]
