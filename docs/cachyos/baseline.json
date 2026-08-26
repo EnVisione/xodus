@@ -1,10 +1,10 @@
 {
   "schema_version": 1,
-  "evidence_id": "xodus-cachyos-baseline-2026-08-25-package-file-uniqueness",
-  "captured_at": "2026-08-25T22:29:35-05:00",
+  "evidence_id": "xodus-cachyos-baseline-2026-08-25-package-file-hash-validation",
+  "captured_at": "2026-08-25T22:37:23-05:00",
   "classification": "sanitized-observed-baseline",
   "source_revision": {
-    "xodus_commit": "7d56e1523d8305ac5426f2bde549876241d19179",
+    "xodus_commit": "1e07267dc34c007e97e2346ae5066c1f91f3b9a2",
     "origin_main_commit": "5b77e06eaa5e3cea78af122436d35a9b02992834",
     "upstream_main_commit": "467edc0b0724c700ccd5ab1959fbef1a0f6b6f7d",
     "cargo_lock_sha256": "86d8c89aa452c1788482a472415a1249d940926a9415f6169c382eec266861f5",
