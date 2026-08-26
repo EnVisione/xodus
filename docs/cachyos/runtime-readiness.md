@@ -49,6 +49,10 @@ On August 25, 2026, the current `Weather-OS/WineGDK` metadata was checked again.
 
 The fresh metadata therefore leaves EXT-003 and EXT-004 unavailable. No source checkout, build, installation, account state, package content, or protected executable was accessed during this check.
 
+On August 26, 2026, the public `xodus-gaming/xgameruntime` repository was also checked as a possible EXT-003 source. Its `main` branch is active, reports LGPL-2.1 licensing, and currently resolves to commit `791710510d9ba0746bbd60754215eb321800e4f0`. The repository has no GitHub release or versioned binary artifact, and its root contains source files only. This adds a licensed source candidate but does not provide the required versioned artifact, SHA-256 and SHA-512 provenance, reproducible build, exported-surface review, or target compatibility evidence.
+
+The xgameruntime source check therefore leaves EXT-003 and EXT-004 unavailable. No source checkout, build, installation, account state, package content, or protected executable was accessed during this check.
+
 No HDMI connector was exposed by the current Hyprland monitor state. HDMI resolution and refresh verification therefore remains pending until the connector is present.
 
 No account, keychain, browser storage, package content, or protected executable was accessed during this check.
