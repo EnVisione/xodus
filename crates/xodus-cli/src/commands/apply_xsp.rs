@@ -54,6 +54,26 @@ fn validate_update_space(required: u64, available: u64) -> io::Result<()> {
     Ok(())
 }
 
+fn calculate_update_space_required(
+    declared: u64,
+    target_hash_count: usize,
+    block_size: u64,
+) -> io::Result<u64> {
+    let target_blocks = u64::try_from(target_hash_count).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "XSP target hash count cannot be represented",
+        )
+    })?;
+    let target_bytes = target_blocks.checked_mul(block_size).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "XSP target output size overflow",
+        )
+    })?;
+    Ok(declared.max(target_bytes))
+}
+
 fn hex_value(byte: u8) -> Option<u8> {
     match byte {
         b'0'..=b'9' => Some(byte - b'0'),
@@ -252,7 +272,18 @@ where
             return ExitCode::FAILURE;
         }
     };
-    if let Err(error) = validate_update_space(xsp.header.disk_space_required, available_space) {
+    let required_space = match calculate_update_space_required(
+        xsp.header.disk_space_required,
+        target_hashes.len(),
+        block_size,
+    ) {
+        Ok(required) => required,
+        Err(error) => {
+            eprintln!("XSP update rejected target size: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Err(error) = validate_update_space(required_space, available_space) {
         eprintln!("XSP update rejected insufficient destination space: {error}");
         return ExitCode::FAILURE;
     }
@@ -444,6 +475,22 @@ mod tests {
         assert_eq!(error.kind(), std::io::ErrorKind::StorageFull);
         let overflow = super::validate_update_space(u64::MAX, u64::MAX)
             .expect_err("reserve arithmetic overflow must be rejected");
+        assert_eq!(overflow.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn xsp_space_validation_accounts_for_target_output_size() {
+        let required = super::calculate_update_space_required(1, 2, 4)
+            .expect("target output size must be representable");
+        assert_eq!(required, 8);
+        super::validate_update_space(required, 10)
+            .expect("capacity must include the target output reserve");
+        let error = super::validate_update_space(required, 9)
+            .expect_err("capacity below the target output reserve must be rejected");
+        assert_eq!(error.kind(), std::io::ErrorKind::StorageFull);
+
+        let overflow = super::calculate_update_space_required(0, 2, u64::MAX)
+            .expect_err("target output arithmetic overflow must be rejected");
         assert_eq!(overflow.kind(), std::io::ErrorKind::InvalidData);
     }
 
