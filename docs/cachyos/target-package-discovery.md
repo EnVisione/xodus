@@ -31,7 +31,7 @@ xodus-cli download 9NBLGGH2JHXJ --market neutral --dry-run
 
 The corrected DisplayCatalog path reached authenticated package metadata instead of returning the previous 404. The current response then failed the repository's existing CDN policy because its first reported root was non-HTTPS. The error is now reported as `package CDN root rejected, requires HTTPS` without echoing the root value. No signed URL, package byte, file selection, or filesystem mutation occurred. The client continues to fail closed; it does not silently downgrade to HTTP. The earlier August 24 dry-run result remains historical evidence for that run and does not establish a current successful dry run.
 
-Public packagespc examples document legacy Xbox package roots using HTTP, which is consistent with the current rejection but does not authorize weakening the repository's HTTPS boundary. Resolving that compatibility gap requires an owner-approved secure transport decision or a service-side HTTPS endpoint. Until then, current package acquisition remains blocked after metadata retrieval.
+Public packagespc examples document legacy Xbox package roots using HTTP, which is consistent with the current rejection but does not authorize weakening the repository's HTTPS boundary. The reproducible release blocker is tracked in [issue 14](https://github.com/EnVisione/xodus/issues/14). Resolving that compatibility gap requires an owner-approved secure transport decision or a service-side HTTPS endpoint. Until then, current package acquisition remains blocked after metadata retrieval.
 
 ### Versioned Package Retrieval Boundary
 
