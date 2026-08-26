@@ -56,7 +56,11 @@ async fn read_response_text(mut response: reqwest::Response) -> Result<String, s
     while let Some(chunk) = response.chunk().await? {
         append_response_chunk(&mut body, &chunk, MAX_RST_RESPONSE_BYTES)?;
     }
-    Ok(std::str::from_utf8(&body)?.to_owned())
+    response_text_from_body(body)
+}
+
+fn response_text_from_body(body: Vec<u8>) -> Result<String, super::RSTError> {
+    String::from_utf8(body).map_err(|error| super::RSTError::InvalidUtf8(error.utf8_error()))
 }
 
 fn append_response_chunk(
@@ -81,7 +85,18 @@ fn collect_nonces(
         .try_reserve(tokens.len())
         .map_err(|_| super::RSTError::DerivedKeyTokenAllocationFailed)?;
     for token in tokens {
-        nonces.insert(token.id.clone(), token.nonce.clone());
+        let mut id = String::new();
+        id.try_reserve_exact(token.id.len())
+            .map_err(|_| super::RSTError::DerivedKeyTokenAllocationFailed)?;
+        id.push_str(&token.id);
+
+        let mut nonce = String::new();
+        nonce
+            .try_reserve_exact(token.nonce.len())
+            .map_err(|_| super::RSTError::DerivedKeyTokenAllocationFailed)?;
+        nonce.push_str(&token.nonce);
+
+        nonces.insert(id, nonce);
     }
     Ok(nonces)
 }
@@ -139,7 +154,9 @@ fn verify_and_decrypt_envelope<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::{append_response_chunk, collect_nonces, referenced_token_id};
+    use super::{
+        append_response_chunk, collect_nonces, referenced_token_id, response_text_from_body,
+    };
     use crate::models::soap;
 
     #[test]
@@ -154,6 +171,17 @@ mod tests {
     fn response_body_limit_rejects_oversized_chunks() {
         let mut body = Vec::new();
         append_response_chunk(&mut body, b"12345", 4).expect_err("response must be bounded");
+    }
+
+    #[test]
+    fn response_body_conversion_rejects_invalid_utf8() {
+        let error =
+            response_text_from_body(vec![0xff]).expect_err("invalid response utf 8 must fail");
+
+        assert!(matches!(
+            error,
+            crate::api::live::rst::RSTError::InvalidUtf8(_)
+        ));
     }
 
     #[test]
