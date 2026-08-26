@@ -45,6 +45,10 @@ The result contains no `TODO`, `todo!`, or `unimplemented!` match in the current
 
 The scan still reports `panic!` and `expect` in test modules. These intentionally fail a test when a synthetic fixture violates the test's expected contract. They are not used as production fallback behavior. The ignored account-backed tests also retain assertions because they are opt in and require authorized external state; they are excluded from ordinary offline verification and do not authorize a release claim.
 
+## Secret scan
+
+A redacted `gitleaks dir` scan over an exact archive of the current `HEAD` tracked tree found no leaks. A redacted `gitleaks git` history scan found one generic API key match in the removed historical file `docs/device.md` at commit `536dc7f7f8bdf8183032c2bb8c54e8a999124126`. The historical example labels its values as random, while the current device documentation replaces the password value with `REDACTED`; the historical provenance is not independently verified. No credential value is retained in this inventory. The residual is tracked in [issue 12](https://github.com/EnVisione/xodus/issues/12) and remains open until the stable release security gate confirms its synthetic status or revocation.
+
 ## Limits
 
 This is a static inventory. It does not prove dynamic behavior, external service compatibility, protected executable launch, or target game lifecycle completion. Mutation regressions, bounded fixture tests, the fuzz harness runtime, workspace Clippy, account-backed verification, runtime traces, and real target exercises remain separate required evidence. The bounded campaign produced no crash corpus, so no crash-specific regression is claimed beyond the existing deterministic parser and transaction tests.
