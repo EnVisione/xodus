@@ -16,6 +16,8 @@ The focused `HttpRead` stream and response extent command, `cargo test -p msixvc
 
 Checkpoint `4981c70` redacts service request parse errors and records only stable error kinds for routed failures. After that change, `cargo test --workspace --all-targets -- --include-ignored --test-threads=1` passed with zero failures, `cargo clippy --workspace --all-targets --all-features --message-format short -- -D warnings` passed with zero warnings, and `cargo build --workspace --release` completed successfully. These are local repository gates and do not close the external package, entitlement, runtime, or release requirements.
 
+Checkpoint `792f193` also validates the final response URL for streamed HTTP reads. An HTTPS package request now rejects a followed redirect that downgrades to HTTP before accepting status, range, or payload data. The regression test passes with the streaming suite, while HTTP test fixtures and explicitly supplied HTTP sources remain available for local diagnostics.
+
 ## Scan
 
 The baseline search was:

@@ -876,7 +876,9 @@ async fn open_http_stream(
     url: String,
     start: Option<u64>,
 ) -> std::io::Result<OpenedHttpStream> {
-    let mut request = client.get(url);
+    let request_url = reqwest::Url::parse(&url)
+        .map_err(|_| Error::new(ErrorKind::InvalidData, "http request URL is invalid"))?;
+    let mut request = client.get(request_url.clone());
     if let Some(start) = start {
         request = request.header(RANGE, format!("bytes={start}-"));
     }
@@ -887,6 +889,7 @@ async fn open_http_stream(
         .map_err(http_err)?
         .error_for_status()
         .map_err(http_err)?;
+    validate_http_response_scheme(&request_url, response.url())?;
 
     let (actual_start, len, end_offset) = match start {
         None => {
@@ -969,6 +972,19 @@ fn http_err(err: reqwest::Error) -> std::io::Error {
         None => ErrorKind::Other,
     };
     Error::new(kind, err)
+}
+
+fn validate_http_response_scheme(
+    request_url: &reqwest::Url,
+    response_url: &reqwest::Url,
+) -> std::io::Result<()> {
+    if request_url.scheme() == "https" && response_url.scheme() != "https" {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "https request redirected to an insecure scheme",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1287,6 +1303,20 @@ mod tests {
             .expect_err("pending chunk offset overflow must fail");
 
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn http_read_rejects_https_downgrade_after_redirect() {
+        let request_url = reqwest::Url::parse("https://cdn.example/file").unwrap();
+        let response_url = reqwest::Url::parse("http://cdn.example/file").unwrap();
+        let error = super::validate_http_response_scheme(&request_url, &response_url)
+            .expect_err("https redirects must not downgrade to http");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            error.to_string(),
+            "https request redirected to an insecure scheme"
+        );
     }
 
     #[test]
