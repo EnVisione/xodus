@@ -179,6 +179,26 @@ pub fn finalize_request(url: String) -> Result<WebviewRequest, Box<dyn std::erro
     ))
 }
 
+fn host_context_script(ctx: &str) -> Result<String, serde_json::Error> {
+    let message = serde_json::json!({
+        "type": "callback",
+        "value": {
+            "name": "CloudExperienceHost.getContext",
+            "args": [
+                "CloudExperienceHost",
+                "TokenBroker",
+                "TokenBroker",
+                r#"{"PrivatePropertyBag":1,"PasswordlessConnect":1,"PreferAssociate":1,"ChromelessUI":0}"#,
+            ],
+            "context": ctx,
+        },
+    });
+    let message = serde_json::to_string(&message)?;
+    Ok(format!(
+        r#"window["CloudExperienceHost.Bridge.dispatchMessage"](JSON.stringify({message}))"#
+    ))
+}
+
 pub fn run_sessions<T>(handler: T) -> HandlerResult<Option<T::Output>>
 where
     T: SessionHandler,
@@ -207,13 +227,9 @@ where
                 session_id,
                 request,
             }) => {
-                if let Err(err) = create_session(
-                    target,
-                    proxy.clone(),
-                    &mut state,
-                    session_id,
-                    request,
-                ) {
+                if let Err(err) =
+                    create_session(target, proxy.clone(), &mut state, session_id, request)
+                {
                     state.error = Some(err.to_string());
                 }
             }
@@ -221,23 +237,28 @@ where
                 if state.active_session == Some(session_id)
                     && let Some(webview) = state.active_webview.as_ref()
                 {
-                    let _ = webview.evaluate_script("window.ipc.postMessage(JSON.stringify(ServerData))");
+                    let _ = webview
+                        .evaluate_script("window.ipc.postMessage(JSON.stringify(ServerData))");
                 }
             }
             Event::UserEvent(CustomEvent::HostGetContext(session_id, ctx)) => {
                 if state.active_session == Some(session_id)
                     && let Some(webview) = state.active_webview.as_ref()
                 {
-                    let _ = webview.evaluate_script(&format!(r#"window["CloudExperienceHost.Bridge.dispatchMessage"](JSON.stringify({{"type": "callback", "value": {{ "name": "CloudExperienceHost.getContext", "args": ["CloudExperienceHost", "TokenBroker", "TokenBroker", "{{\"PrivatePropertyBag\":1,\"PasswordlessConnect\":1,\"PreferAssociate\":1,\"ChromelessUI\":0}}"], "context": "{ctx}"}}}}))"#));
+                    match host_context_script(&ctx) {
+                        Ok(script) => {
+                            let _ = webview.evaluate_script(&script);
+                        }
+                        Err(error) => {
+                            state.error = Some(format!("failed to encode host context: {error}"));
+                        }
+                    }
                 }
             }
             Event::UserEvent(CustomEvent::IpcCallback(session_id, data)) => {
-                apply_handler_result(
-                    &proxy,
-                    target,
-                    &mut state,
-                    move |handler, runtime| handler.on_token(session_id, data, runtime),
-                );
+                apply_handler_result(&proxy, target, &mut state, move |handler, runtime| {
+                    handler.on_token(session_id, data, runtime)
+                });
             }
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
@@ -451,7 +472,7 @@ fn remove_session<T: SessionHandler>(state: &mut RuntimeState<T>, session_id: Se
 
 #[cfg(test)]
 mod tests {
-    use super::{finalize_request, login_request};
+    use super::{finalize_request, host_context_script, login_request};
 
     #[cfg(target_os = "linux")]
     use super::should_disable_dmabuf_renderer;
@@ -502,6 +523,16 @@ mod tests {
             request.url,
             "https://login.live.com/ppsecure/InlineConnect.srf?mkt=en-US"
         );
+    }
+
+    #[test]
+    fn host_context_script_escapes_untrusted_context() {
+        let context = r#"ctx"});window.evil();/*"#;
+        let script = host_context_script(context).expect("host context must encode");
+        let encoded = serde_json::to_string(context).expect("context must serialize");
+
+        assert!(script.contains(&format!(r#""context":{encoded}"#)));
+        assert!(!script.contains(r#""context": "ctx"});window.evil();/*"#));
     }
 
     #[cfg(target_os = "linux")]
