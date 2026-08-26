@@ -9,7 +9,7 @@ Flow looks as follows
 - Open `InlineLogin.srf` in a webview, presenting as `CloudExperienceHost`
 - The page calls back over IPC as it loads, and again once `post.srf` finishes loading, handing over the signed-in user's tokens (`DAProperty`)
 - use RST2.srf to exchange it for real Xbox Live tokens (`exchange_user_token`)
-- On SSO failure - open the URL returned in the fault for auth approval
+- On SSO failure - open the URL returned in the fault for auth approval. The returned URL must be absolute HTTPS without embedded credentials before a second webview session is opened.
 - Call RST2.srf again once that second session completes
 
 ## Webview / JS IPC
