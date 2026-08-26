@@ -107,6 +107,8 @@ pub enum XspUpdateApplyError {
     BaseImageTooShort { actual: usize, required: usize },
     #[error("XSP new data has {actual} bytes but requires at least {required}")]
     NewDataTooShort { actual: usize, required: usize },
+    #[error("XSP new data has {actual} bytes but requires exactly {required}")]
+    NewDataTooLong { actual: usize, required: usize },
     #[error("XSP in-memory output requires {required} bytes and exceeds limit {limit}")]
     OutputTooLarge { required: u64, limit: u64 },
     #[error("unable to reserve {required} bytes for XSP in-memory output")]
@@ -129,6 +131,8 @@ pub enum XspStreamApplyError {
     SourceBlockTooShort { block: u64 },
     #[error("XSP new data block {block} ended before the declared block size")]
     NewDataBlockTooShort { block: u64 },
+    #[error("XSP new data contains bytes beyond the declared block payload")]
+    NewDataTooLong,
     #[error("XSP {phase} block hash mismatch at block {block}")]
     BlockHashMismatch { phase: XspHashPhase, block: u64 },
     #[error("XSP stream offset cannot be represented")]
@@ -375,6 +379,7 @@ impl XspFile {
             verify_stream_block(&block, expected_hash, XspHashPhase::Target, target_block)?;
             output.write_all(&block).await?;
         }
+        ensure_stream_exhausted(new_data).await?;
         output.flush().await?;
         Ok(())
     }
@@ -564,6 +569,12 @@ impl XspFile {
                 required: new_data_length_usize,
             });
         }
+        if new_data.len() > new_data_length_usize {
+            return Err(XspUpdateApplyError::NewDataTooLong {
+                actual: new_data.len(),
+                required: new_data_length_usize,
+            });
+        }
         verify_block_hashes(
             base_bytes,
             input.expected_source_hashes,
@@ -685,6 +696,17 @@ where
         },
         Err(error) => Err(XspStreamApplyError::Io(error)),
     }
+}
+
+async fn ensure_stream_exhausted<Reader>(reader: &mut Reader) -> Result<(), XspStreamApplyError>
+where
+    Reader: AsyncRead + Unpin,
+{
+    let mut trailing = [0_u8; 1];
+    if reader.read(&mut trailing).await? != 0 {
+        return Err(XspStreamApplyError::NewDataTooLong);
+    }
+    Ok(())
 }
 
 fn verify_stream_block(
@@ -965,6 +987,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rejects_trailing_new_data_in_byte_apply() {
+        let xsp = parse(VALID_XSP).await.expect("valid synthetic XSP fixture");
+        let base_hashes = [hash20(b"base")];
+        let target_hashes = [hash20(b"new!"), hash20(b"base")];
+        let base = XspBaseState {
+            content_id: xsp.header.content_id,
+            version: xsp.header.upgrade_from_version,
+            block_hashes: &base_hashes,
+        };
+        let input = XspUpdateInput {
+            expected_source_hashes: &base_hashes,
+            target_hashes: &target_hashes,
+            available_space: u64::MAX,
+            block_size: 4,
+        };
+
+        let error = xsp
+            .apply_update_to_bytes(base, input, b"base", b"new!extra")
+            .expect_err("trailing new data must fail");
+
+        assert_eq!(
+            error,
+            XspUpdateApplyError::NewDataTooLong {
+                actual: 9,
+                required: 4,
+            }
+        );
+    }
+
+    #[tokio::test]
     async fn applies_a_bounded_rollback_to_bytes() {
         let mut xsp = parse(ROLLBACK_XSP)
             .await
@@ -1025,6 +1077,41 @@ mod tests {
         .await
         .expect("valid stream update should apply");
 
+        assert_eq!(output.0, b"new!base");
+    }
+
+    #[tokio::test]
+    async fn stream_update_rejects_trailing_new_data() {
+        let xsp = parse(VALID_XSP).await.expect("valid synthetic XSP fixture");
+        let base_hashes = [hash20(b"base")];
+        let target_hashes = [hash20(b"new!"), hash20(b"base")];
+        let base = XspBaseState {
+            content_id: xsp.header.content_id,
+            version: xsp.header.upgrade_from_version,
+            block_hashes: &base_hashes,
+        };
+        let input = XspUpdateInput {
+            expected_source_hashes: &base_hashes,
+            target_hashes: &target_hashes,
+            available_space: u64::MAX,
+            block_size: 4,
+        };
+        let mut base_reader = TestReader::new(b"base");
+        let mut new_data_reader = TestReader::new(b"new!extra");
+        let mut output = TestWriter(Vec::new());
+
+        let error = xsp
+            .apply_update_stream(
+                &mut base_reader,
+                &mut new_data_reader,
+                &mut output,
+                base,
+                input,
+            )
+            .await
+            .expect_err("trailing new data must fail");
+
+        assert!(matches!(error, XspStreamApplyError::NewDataTooLong));
         assert_eq!(output.0, b"new!base");
     }
 
