@@ -13,7 +13,7 @@ use rustix::fs::{MemfdFlags, memfd_create};
 use rustix::io::{FdFlags, fcntl_getfd, fcntl_setfd};
 #[cfg(not(target_os = "linux"))]
 use tempfile::{tempdir, tempfile, tempfile_in};
-use tokio::fs::{File, OpenOptions};
+use tokio::fs::File;
 use tokio::process::Command;
 use xodus::tokens::TokenManager;
 
@@ -308,14 +308,10 @@ pub async fn run(
             return ExitCode::FAILURE;
         }
     };
-    let final_path = out.join(".xodus-streaming.msixvc");
+    let final_path = out_absolute.join(".xodus-streaming.msixvc");
 
-    let mut file = match OpenOptions::new()
-        .read(true)
-        .open(final_path.to_owned())
-        .await
-    {
-        Ok(file) => file,
+    let mut file = match open_package_input(&out_absolute, ".xodus-streaming.msixvc") {
+        Ok(file) => File::from_std(file),
         Err(err) => {
             eprintln!("failed to open {}: {err}", final_path.display());
             return ExitCode::FAILURE;
@@ -693,5 +689,20 @@ mod tests {
             .expect_err("descriptor map separator must fail");
 
         assert_eq!(error.kind(), ErrorKind::InvalidInput);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_package_input_rejects_a_symlinked_package_file() {
+        let temporary = tempfile::tempdir().expect("temporary directory must exist");
+        let package = temporary.path().join(".xodus-streaming.msixvc");
+        let target = temporary.path().join("outside.msixvc");
+        std::fs::write(&target, b"package").expect("target package must be writable");
+        std::os::unix::fs::symlink(&target, &package).expect("package symlink must be creatable");
+
+        let error = super::open_package_input(temporary.path(), ".xodus-streaming.msixvc")
+            .expect_err("run package input must reject a symlink");
+
+        assert_ne!(error.kind(), std::io::ErrorKind::NotFound);
     }
 }
