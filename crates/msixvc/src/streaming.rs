@@ -1,5 +1,6 @@
 use std::future::Future;
 use std::io::{self, Error, ErrorKind, SeekFrom};
+use std::net::IpAddr;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -877,18 +878,15 @@ async fn open_http_stream(
 ) -> std::io::Result<OpenedHttpStream> {
     let request_url = reqwest::Url::parse(&url)
         .map_err(|_| Error::new(ErrorKind::InvalidData, "http request URL is invalid"))?;
+    validate_http_request_url(&request_url)?;
     let mut request = client.get(request_url.clone());
     if let Some(start) = start {
         request = request.header(RANGE, format!("bytes={start}-"));
     }
 
-    let response = request
-        .send()
-        .await
-        .map_err(http_err)?
-        .error_for_status()
-        .map_err(http_err)?;
+    let response = request.send().await.map_err(http_err)?;
     validate_http_response_scheme(&request_url, response.url())?;
+    let response = response.error_for_status().map_err(http_err)?;
     validate_http_response_encoding(response.headers())?;
 
     let (actual_start, len, end_offset) = match start {
@@ -985,6 +983,41 @@ fn validate_http_response_scheme(
         ));
     }
     Ok(())
+}
+
+fn validate_http_request_url(url: &reqwest::Url) -> std::io::Result<()> {
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "http request URL must not contain credentials",
+        ));
+    }
+
+    let host = url.host_str().ok_or_else(|| {
+        Error::new(
+            ErrorKind::InvalidData,
+            "http request URL must include a host",
+        )
+    })?;
+    match url.scheme() {
+        "https" => Ok(()),
+        "http"
+            if host.eq_ignore_ascii_case("localhost")
+                || host
+                    .parse::<IpAddr>()
+                    .is_ok_and(|address| address.is_loopback()) =>
+        {
+            Ok(())
+        }
+        "http" => Err(Error::new(
+            ErrorKind::InvalidData,
+            "nonlocal http request URLs must use HTTPS",
+        )),
+        _ => Err(Error::new(
+            ErrorKind::InvalidData,
+            "http request URL must use HTTPS or loopback HTTP",
+        )),
+    }
 }
 
 fn validate_http_response_encoding(headers: &HeaderMap) -> std::io::Result<()> {
@@ -1334,6 +1367,30 @@ mod tests {
             error.to_string(),
             "https request redirected to an insecure scheme"
         );
+    }
+
+    #[test]
+    fn http_read_requires_secure_or_loopback_request_urls() {
+        for source in [
+            "http://cdn.example/file",
+            "https://user:password@cdn.example/file",
+            "ftp://cdn.example/file",
+        ] {
+            let url = reqwest::Url::parse(source).expect("test URL must parse");
+            let error = super::validate_http_request_url(&url)
+                .expect_err("unsafe request URL must fail before network activity");
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        }
+
+        for source in [
+            "https://cdn.example/file",
+            "http://localhost:8080/file",
+            "http://127.0.0.1:8080/file",
+        ] {
+            let url = reqwest::Url::parse(source).expect("test URL must parse");
+            super::validate_http_request_url(&url)
+                .expect("secure and loopback request URLs must remain supported");
+        }
     }
 
     #[test]
