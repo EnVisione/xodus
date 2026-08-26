@@ -1,14 +1,14 @@
 {
   "schema_version": 1,
-  "evidence_id": "xodus-cachyos-baseline-2026-08-25-cache-cursor",
-  "captured_at": "2026-08-25T19:54:58-05:00",
+  "evidence_id": "xodus-cachyos-baseline-2026-08-25-parser-fuzz",
+  "captured_at": "2026-08-25T20:51:38-05:00",
   "classification": "sanitized-observed-baseline",
   "source_revision": {
-    "xodus_commit": "c0d85aa2f4c6f1285eb0ccba66eb14bf24618142",
+    "xodus_commit": "b965ed77211c30e09f5442664778de45f93f0446",
     "origin_main_commit": "5b77e06eaa5e3cea78af122436d35a9b02992834",
     "upstream_main_commit": "467edc0b0724c700ccd5ab1959fbef1a0f6b6f7d",
-    "cargo_lock_sha256": "108a22142041ce3b2704f11f65cf875d50668581575ce394d02fb9bbaa898580",
-    "cargo_metadata_sha256": "2a1cd2665fcdde2bd58c6eb3a1be6570ac1be03f60051bafd5465b9a1407c22b",
+    "cargo_lock_sha256": "86d8c89aa452c1788482a472415a1249d940926a9415f6169c382eec266861f5",
+    "cargo_metadata_sha256": "cef5fbfca134a12c108c1259b3ced57794442454863ef37fc87d05a453b76c74",
     "branch": "envy/target-metadata-evidence",
     "source_sensitive_paths": [
       "Cargo.lock",
