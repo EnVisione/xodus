@@ -91,7 +91,7 @@ pub enum XspUpdateValidationError {
         count: u64,
         source_blocks: u64,
     },
-    #[error("XSP required disk space {required} exceeds available space {available}")]
+    #[error("XSP required space {required} exceeds available space {available}")]
     InsufficientSpace { required: u64, available: u64 },
     #[error("XSP target block count cannot be represented")]
     TargetBlockCountOverflow,
@@ -501,9 +501,13 @@ impl XspFile {
             previous_target_end = target_end;
         }
 
-        if self.header.disk_space_required > input.available_space {
+        let target_bytes = target_blocks
+            .checked_mul(input.block_size)
+            .ok_or(XspUpdateValidationError::BlockCountOverflow)?;
+        let required_space = self.header.disk_space_required.max(target_bytes);
+        if required_space > input.available_space {
             return Err(XspUpdateValidationError::InsufficientSpace {
-                required: self.header.disk_space_required,
+                required: required_space,
                 available: input.available_space,
             });
         }
@@ -959,6 +963,36 @@ mod tests {
         assert_eq!(validated.target_blocks, 2);
         assert_eq!(validated.new_data_blocks, 1);
         assert_eq!(validated.copied_blocks, 1);
+    }
+
+    #[tokio::test]
+    async fn rejects_target_output_larger_than_available_space() {
+        let xsp = parse(VALID_XSP).await.expect("valid synthetic XSP fixture");
+        let base_hashes = [hash20(b"base")];
+        let target_hashes = [hash20(b"new!"), hash20(b"base")];
+        let base = XspBaseState {
+            content_id: xsp.header.content_id,
+            version: xsp.header.upgrade_from_version,
+            block_hashes: &base_hashes,
+        };
+        let input = XspUpdateInput {
+            expected_source_hashes: &base_hashes,
+            target_hashes: &target_hashes,
+            available_space: 7,
+            block_size: 4,
+        };
+
+        let error = xsp
+            .validate_update(base, input)
+            .expect_err("target output must fit available space");
+
+        assert!(matches!(
+            error,
+            super::XspUpdateValidationError::InsufficientSpace {
+                required: 8,
+                available: 7,
+            }
+        ));
     }
 
     #[tokio::test]
