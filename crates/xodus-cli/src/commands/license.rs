@@ -1,10 +1,11 @@
 use std::path::Path;
 use std::process::ExitCode;
 
-use tokio::fs::OpenOptions;
+use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 use xodus::tokens::TokenManager;
 
+use super::streaming::{ensure_package_root, open_package_output};
 use crate::license::get_license;
 
 pub async fn run(
@@ -27,7 +28,8 @@ pub async fn run(
             return ExitCode::FAILURE;
         }
     };
-    if let Err(error) = tokio::fs::create_dir_all(&ciks).await {
+    let ciks_path = Path::new(&ciks);
+    if let Err(error) = ensure_package_root(ciks_path) {
         eprintln!("failed to create CIK directory: {error}");
         return ExitCode::FAILURE;
     }
@@ -39,20 +41,15 @@ pub async fn run(
                 return ExitCode::FAILURE;
             }
         };
-        let path = Path::new(&ciks).join(format!("{uuid}.cik"));
-        let file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(path)
-            .await;
-        let mut file = match file {
+        let path = format!("{uuid}.cik");
+        let file = match open_package_output(ciks_path, &path) {
             Ok(file) => file,
             Err(error) => {
                 eprintln!("failed to create CIK file for {uuid}: {error}");
                 return ExitCode::FAILURE;
             }
         };
+        let mut file = File::from_std(file);
         let uuid_buf = uuid.to_bytes_le();
         if let Err(error) = file.write_all(&uuid_buf).await {
             eprintln!("failed to write CIK header for {uuid}: {error}");
@@ -69,4 +66,26 @@ pub async fn run(
     }
 
     ExitCode::SUCCESS
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::os::unix::fs::symlink;
+
+    use super::super::streaming::{ensure_package_root, open_package_output};
+
+    #[test]
+    fn cik_export_rejects_symlinked_file_before_writing_target() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("ciks");
+        ensure_package_root(&root).unwrap();
+        let target = temporary.path().join("target.cik");
+        std::fs::write(&target, b"untouched").unwrap();
+        symlink(&target, root.join("test.cik")).unwrap();
+
+        let result = open_package_output(&root, "test.cik");
+
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"untouched");
+    }
 }

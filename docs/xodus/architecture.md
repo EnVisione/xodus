@@ -81,7 +81,7 @@ The in-memory token backend now reports poisoned mutex state as a typed storage 
 
 TokenManager lifecycle regressions now cover scoped device and user token persistence, corrupted token-store recovery without overwriting the existing value, logout clearing token, user, and optional device-license state, and expiry and replacement of the ephemeral XSTS cache. These tests use only the memory backend and do not inspect or modify a real keyring.
 
-License acquisition and CIK export now propagate token, exchange, entitlement, SPLicense, key derivation, directory, file, and flush failures with nonzero command results. CIK paths are joined beneath the requested export directory and existing files are truncated before replacement.
+License acquisition and CIK export now propagate token, exchange, entitlement, SPLicense, key derivation, directory, file, and flush failures with nonzero command results. The requested CIK directory is created and opened through the same no-symlink root boundary as package transactions, and each CIK path is opened relative to that root so a symlink cannot redirect key material outside it. Existing regular CIK files may be replaced, while symlinked files and directories fail closed.
 
 Content license responses now require a successful HTTP status, a nonempty key list, valid base64, valid UTF-8, and valid license XML. The bounded response reader reserves each chunk fallibly before appending. Malformed or incomplete service data returns typed `LicenseContentError` variants instead of indexing or decoding through unchecked operations.
 
