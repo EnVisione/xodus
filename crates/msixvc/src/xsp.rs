@@ -534,7 +534,7 @@ impl XspFile {
             target_blocks,
             new_data_blocks,
             copied_blocks,
-            required_space: self.header.disk_space_required,
+            required_space,
             download_bytes: self.header.total_download,
         })
     }
@@ -984,6 +984,29 @@ mod tests {
         assert_eq!(validated.target_blocks, 2);
         assert_eq!(validated.new_data_blocks, 1);
         assert_eq!(validated.copied_blocks, 1);
+    }
+
+    #[tokio::test]
+    async fn reports_target_size_when_it_exceeds_declared_disk_space() {
+        let mut xsp = parse(VALID_XSP).await.expect("valid synthetic XSP fixture");
+        xsp.header.disk_space_required = 1;
+        let base_hashes = [hash20(b"base")];
+        let target_hashes = [hash20(b"new!"), hash20(b"base")];
+        let base = XspBaseState {
+            content_id: xsp.header.content_id,
+            version: xsp.header.upgrade_from_version,
+            block_hashes: &base_hashes,
+        };
+        let input = XspUpdateInput {
+            expected_source_hashes: &base_hashes,
+            target_hashes: &target_hashes,
+            available_space: u64::MAX,
+            block_size: 4,
+        };
+
+        let validated = xsp.validate_update(base, input).expect("valid update plan");
+
+        assert_eq!(validated.required_space, 8);
     }
 
     #[tokio::test]
