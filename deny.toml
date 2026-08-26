@@ -4,7 +4,6 @@ all-features = true
 [advisories]
 # These advisories remain only in the pinned GTK3 desktop stack.
 ignore = [
-    { id = "RUSTSEC-2023-0071", reason = "The non-Linux RustCrypto fallback is required to keep portable targets buildable because kryptering 0.5.0 restricts AWS-LC to Linux. The stable CachyOS target uses AWS-LC, while non-Linux builds have no stable support claim. Revisit this exception when kryptering offers a supported constant-time provider for those targets." },
     { id = "RUSTSEC-2024-0370", reason = "proc-macro-error is pulled only by the pinned GTK3 desktop stack used by the current tao and wry UI dependencies; no safe upgrade is available." },
     { id = "RUSTSEC-2024-0411", reason = "gdkwayland-sys is pulled only by the pinned GTK3 desktop stack used by tao and wry; no safe upgrade is available." },
     { id = "RUSTSEC-2024-0412", reason = "gdk is pulled only by the pinned GTK3 desktop stack used by tao and wry; no safe upgrade is available." },

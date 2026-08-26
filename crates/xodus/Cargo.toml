@@ -35,8 +35,8 @@ zeroize = "1.8.2"
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 smbios-lib = "0.9.4"
-bergshamra = { version = "0.8.0", default-features = false, features = ["rustcrypto"] }
-kryptering = { version = "0.5.0", default-features = false, features = ["rustcrypto"] }
+bergshamra = { version = "0.8.0", default-features = false, features = ["aws-lc"] }
+kryptering = { version = "0.5.0", default-features = false, features = ["aws-lc"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 bergshamra = { version = "0.8.0", default-features = false, features = ["aws-lc"] }

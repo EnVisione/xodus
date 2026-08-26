@@ -33,7 +33,7 @@ These components establish a usable CachyOS graphics and Wine baseline. They do 
 
 ## Cryptographic Provider Selection
 
-Xodus selects the AWS-LC provider for Linux builds, including the Tier 1 CachyOS target. Non-Linux builds select the RustCrypto provider because `kryptering` 0.5.0 currently rejects AWS-LC outside Linux. This fallback keeps portable targets buildable but is not a stable macOS or other non-Linux support claim. The RustCrypto dependency brings the unresolved `RUSTSEC-2023-0071` RSA timing advisory, which is explicitly waived in `deny.toml` for this non-release portability path. The waiver must be removed when a supported constant-time provider is available on those targets.
+Xodus selects the AWS-LC provider for Linux and non-Linux builds. This removes the RustCrypto `rsa` dependency and the `RUSTSEC-2023-0071` Marvin timing advisory from every target graph while keeping the same provider-backed signing interface. Non-Linux runtime behavior remains outside the stable support claim until its platform and title evidence is completed.
 
 Hosted Rust verification run [32919300713](https://github.com/EnVisione/xodus/actions/runs/32919300713) passed formatting, Linux x86_64 Clippy, and macOS arm64 Clippy at commit `3e6e11e`. This confirms cross-target compilation and lint coverage only; it does not establish a macOS runtime claim or any target game lifecycle result.
 

@@ -64,6 +64,8 @@ No account login, entitlement, package, Game Runtime, game launch, performance, 
 
 The August 25, 2026 dependency security review ran `cargo audit --no-fetch --stale` and found `rsa` 0.9.10 with `RUSTSEC-2023-0071`, the Marvin timing side channel. The advisory has no fixed upstream release. The all-target lockfile contains the package through `bergshamra-keys` and `kryptering`, while `cargo tree --workspace --target x86_64-unknown-linux-gnu -e features -i rsa@0.9.10` returns no package for the CachyOS Linux graph, which selects AWS-LC. `cargo deny check` and zero warning Clippy pass. Issue 13 tracks removal or isolation of the non-Linux RustCrypto path before those targets ship; the cross-target audit finding remains unresolved.
 
+On August 26, 2026, the non-Linux `xodus` dependencies were switched from RustCrypto to the supported AWS-LC feature. Cargo regenerated the lockfile, removed `rsa` and its RustCrypto dependency family, and `cargo tree --workspace --target x86_64-pc-windows-gnu -e features` showed AWS-LC without `rsa`. `cargo audit --no-fetch --stale` reported no vulnerabilities, and `cargo deny check` passed with only the existing GTK3 advisory warnings. Cross-target runtime and title behavior remain unverified.
+
 ## Phase 001 Exit Evidence
 
 - The machine-readable baseline binds source, dependency, CachyOS, hardware, display, graphics, and runtime candidate identities.
