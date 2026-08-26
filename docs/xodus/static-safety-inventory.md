@@ -4,7 +4,9 @@
 
 This inventory covers Rust production sources under `crates/` and supports the Phase 2 requirement that remotely influenced parser, package, service, and environment paths do not contain placeholder macros or unconditional process aborts. The fuzz evidence was refreshed at signed checkpoint `cbe2157`.
 
-The inventory was refreshed on August 25, 2026 after the parser, service, transport, and cursor hardening checkpoints `070eb42`, `658beef`, `e9eab1a`, `7f9d68e`, `65b9274`, `59b37c5`, `c7e6347`, `d474620`, `d002e3e`, `b8a998e`, `e37a3a3`, `ecdfb0b`, `20d5466`, `0856c3b`, `c0d85aa`, `cbe2157`, and `a1c1609`.
+The inventory was refreshed on August 25, 2026 after the parser, service, transport, and cursor hardening checkpoints `070eb42`, `658beef`, `e9eab1a`, `7f9d68e`, `65b9274`, `59b37c5`, `c7e6347`, `d474620`, `d002e3e`, `b8a998e`, `e37a3a3`, `ecdfb0b`, `20d5466`, `0856c3b`, `c0d85aa`, `cbe2157`, `a1c1609`, and `2b05894`.
+
+Checkpoint `2b05894` removes the final production `debug_assert!` paths from the reviewed parser and CLEP code. Local formatting, workspace tests, zero warning Clippy, and the release build pass, and hosted run [32920147423](https://github.com/EnVisione/xodus/actions/runs/32920147423) passes formatting plus Linux x86_64 and macOS arm64 checks for that checkpoint.
 
 ## Scan
 
