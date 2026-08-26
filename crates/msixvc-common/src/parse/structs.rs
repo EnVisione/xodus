@@ -6,7 +6,7 @@
 //! little-endian vs big-endian).
 
 use super::byteorder::little_endian::{I64 as LeI64, U16 as LeU16};
-use super::{BinaryParse, BytesReader, EmptyReader};
+use super::{BinaryParse, BinaryTryParse, BytesReader, EmptyReader};
 
 use std::cmp::{Ord, Ordering, PartialOrd};
 use std::fmt::{self, Debug, Display};
@@ -94,29 +94,43 @@ impl BinaryParse for Uuid {
 /// Converts a Microsoft FILETIME (number of 100ns intervals since 1601-01-01 UTC)
 /// into a [`chrono::DateTime`]
 #[inline]
-const fn microsoft_filetime(filetime: i64) -> DateTime<chrono::Utc> {
+fn microsoft_filetime(filetime: i64) -> Result<DateTime<chrono::Utc>, FiletimeParseError> {
     // FILETIME counts 100ns intervals since 1601-01-01 UTC.
     // Unix time counts nanoseconds since 1970-01-01 UTC.
 
     /// Number of 100 nanoseconds between FILETIME epoch and Unix time
     const FILETIME_TO_UNIX: i64 = 116_444_736_000_000_000;
 
-    let unix_nanos = (filetime - FILETIME_TO_UNIX) * 100;
-    DateTime::from_timestamp_nanos(unix_nanos)
+    let unix_nanos = filetime
+        .checked_sub(FILETIME_TO_UNIX)
+        .and_then(|unix_ticks| unix_ticks.checked_mul(100))
+        .ok_or(FiletimeParseError::OutOfRange { filetime })?;
+    Ok(DateTime::from_timestamp_nanos(unix_nanos))
 }
 
-/// A marker type that implements [`BinaryParse`] for parsing a Microsoft FILETIME
-/// into a [`chrono`]'s [`DateTime<Utc>`].
+/// An error returned when a Microsoft FILETIME cannot be represented as a
+/// nanosecond timestamp.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum FiletimeParseError {
+    #[error("FILETIME value {filetime} is outside the supported timestamp range")]
+    OutOfRange { filetime: i64 },
+}
+
+/// A marker type that implements [`BinaryTryParse`] for parsing a Microsoft
+/// FILETIME into a [`chrono`]'s [`DateTime<Utc>`].
 pub struct Filetime;
 
-impl BinaryParse for Filetime {
+impl BinaryTryParse for Filetime {
     type Output = DateTime<chrono::Utc>;
     type Size = U8;
+    type Error = FiletimeParseError;
 
     #[inline]
-    fn parse<'a>(r: BytesReader<'a, Self::Size>) -> (Self::Output, EmptyReader<'a>) {
+    fn try_parse<'a>(
+        r: BytesReader<'a, Self::Size>,
+    ) -> Result<(Self::Output, EmptyReader<'a>), Self::Error> {
         let (filetime, r) = r.read::<LeI64>();
-        (microsoft_filetime(filetime), r)
+        microsoft_filetime(filetime).map(|timestamp| (timestamp, r))
     }
 }
 
@@ -155,5 +169,13 @@ mod tests {
         assert!(higher > lower);
         assert!(higher == other_high);
         assert!(other_high2 > other_high);
+    }
+
+    #[test]
+    fn filetime_rejects_timestamp_arithmetic_overflow() {
+        let bytes = i64::MAX.to_le_bytes();
+        let error = Filetime::try_from_slice(&bytes).expect_err("out of range FILETIME");
+
+        assert_eq!(error, FiletimeParseError::OutOfRange { filetime: i64::MAX });
     }
 }

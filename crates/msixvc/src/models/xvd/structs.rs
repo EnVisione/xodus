@@ -9,7 +9,7 @@ use crate::math::{
 };
 
 use msixvc_common::parse::byteorder::little_endian::*;
-use msixvc_common::parse::structs::{Filetime, Version};
+use msixvc_common::parse::structs::{Filetime, FiletimeParseError, Version};
 use msixvc_common::parse::{BinaryParse, BinaryTryParse, BytesReader, EmptyReader};
 
 use chrono::DateTime;
@@ -80,6 +80,9 @@ pub enum XvdHeaderParseError {
 
     #[error("invalid xvd content type: {0}")]
     InvalidXvdContentType(#[from] TryFromPrimitiveError<XvdContentType>),
+
+    #[error(transparent)]
+    Filetime(#[from] FiletimeParseError),
 }
 
 impl BinaryTryParse for XvdHeader {
@@ -96,7 +99,7 @@ impl BinaryTryParse for XvdHeader {
 
         let (volume_flags, r) = r.read::<XvdVolumeFlags>();
         let (format_version, r) = r.read::<U32>();
-        let (file_time_created, r) = r.read::<Filetime>();
+        let (file_time_created, r) = r.try_read::<Filetime>()?;
         let (drive_size, r) = r.read::<U64>();
 
         let (vduid, r) = r.read::<Uuid>();
@@ -261,11 +264,20 @@ pub struct XvcInfo {
     pub region_specifier_count: u32,
 }
 
-impl BinaryParse for XvcInfo {
+#[derive(thiserror::Error, Debug)]
+pub enum XvcInfoParseError {
+    #[error(transparent)]
+    Filetime(#[from] FiletimeParseError),
+}
+
+impl BinaryTryParse for XvcInfo {
     type Output = Self;
     type Size = T3496;
+    type Error = XvcInfoParseError;
 
-    fn parse<'a>(r: BytesReader<'a, Self::Size>) -> (Self::Output, EmptyReader<'a>) {
+    fn try_parse<'a>(
+        r: BytesReader<'a, Self::Size>,
+    ) -> Result<(Self::Output, EmptyReader<'a>), Self::Error> {
         let (content_id, r) = r.read::<Uuid>();
         let (xvc_encryption_key_id, r) = r.read::<[Uuid; 0xC0]>();
         let xvc_encryption_key_id: HashMap<u8, Uuid> = xvc_encryption_key_id
@@ -289,7 +301,7 @@ impl BinaryParse for XvcInfo {
         let (initial_play_region_id, r) = r.read::<XvcRegionId>();
 
         let (initial_play_offset, r) = r.read::<U64>();
-        let (file_time_created, r) = r.read::<Filetime>();
+        let (file_time_created, r) = r.try_read::<Filetime>()?;
 
         let (preview_region_id, r) = r.read::<XvcRegionId>();
 
@@ -301,7 +313,7 @@ impl BinaryParse for XvcInfo {
 
         let (_reserved, r) = r.array::<0x54>();
 
-        (
+        Ok((
             Self {
                 content_id,
                 xvc_encryption_key_id,
@@ -319,7 +331,7 @@ impl BinaryParse for XvcInfo {
                 region_specifier_count,
             },
             r,
-        )
+        ))
     }
 }
 

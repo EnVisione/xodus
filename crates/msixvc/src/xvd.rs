@@ -25,10 +25,11 @@ use crate::math::{
     offset_to_page_number,
 };
 use crate::models::xvd::{
-    PAGE_SIZE, PAGES_PER_BLOCK, XvcInfo, XvcRegionHeader, XvcRegionHeaderParseError, XvcRegionId,
-    XvdHashEntry, XvdHeader, XvdHeaderLayoutError, XvdHeaderParseError, XvdSegmentMetadataHeader,
-    XvdSegmentMetadataHeaderParseError, XvdSegmentMetadataSegment, XvdSegmentMetadataSegmentFlags,
-    XvdUserDataHeader, XvdUserDataPackageFileEntry, XvdUserDataPackageFilesHeader,
+    PAGE_SIZE, PAGES_PER_BLOCK, XvcInfo, XvcInfoParseError, XvcRegionHeader,
+    XvcRegionHeaderParseError, XvcRegionId, XvdHashEntry, XvdHeader, XvdHeaderLayoutError,
+    XvdHeaderParseError, XvdSegmentMetadataHeader, XvdSegmentMetadataHeaderParseError,
+    XvdSegmentMetadataSegment, XvdSegmentMetadataSegmentFlags, XvdUserDataHeader,
+    XvdUserDataPackageFileEntry, XvdUserDataPackageFilesHeader,
 };
 use crate::streaming_ntfs::{NtfsStreamLayoutReport, collect_ntfs_stream_layouts};
 
@@ -412,6 +413,8 @@ pub enum XvdFileParseError {
     Header(#[from] XvdHeaderParseError),
     #[error(transparent)]
     RegionHeader(#[from] XvcRegionHeaderParseError),
+    #[error(transparent)]
+    XvcInfo(#[from] XvcInfoParseError),
     #[error(transparent)]
     Io(#[from] io::Error),
     #[error(transparent)]
@@ -2369,7 +2372,7 @@ impl XvdFile {
             let xvc_info = {
                 let mut buf = XvcInfo::buffer();
                 file.read_exact(&mut buf).await?;
-                XvcInfo::from_array(&buf)
+                XvcInfo::try_from_array(&buf)?
             };
 
             if xvc_info.version > MAX_SUPPORTED_XVC_INFO_VERSION {
@@ -4060,6 +4063,42 @@ mod tests {
             )
         ));
         assert_eq!(read_bytes.load(Ordering::SeqCst), XVD_HEADER_SIZE);
+    }
+
+    #[tokio::test]
+    async fn parse_rejects_filetime_overflow_without_panicking() {
+        let mut reader = SyntheticXvdReader::synthetic_xvd_header(false);
+        reader.inner.get_mut()[FILETIME_OFFSET..FILETIME_OFFSET + 8]
+            .copy_from_slice(&i64::MAX.to_le_bytes());
+
+        let result = XvdFile::parse(reader).await;
+        let error = match result {
+            Ok(_) => panic!("an overflowing FILETIME must not parse an XVD"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            XvdFileParseError::Header(super::super::models::xvd::XvdHeaderParseError::Filetime(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn parse_rejects_xvc_info_filetime_overflow_without_panicking() {
+        let mut reader = SyntheticXvdReader::synthetic_xvd_with_region_count(0);
+        let start = XVC_INFO_OFFSET + XVC_INFO_FILETIME_OFFSET;
+        reader.inner.get_mut()[start..start + 8].copy_from_slice(&i64::MAX.to_le_bytes());
+
+        let result = XvdFile::parse(reader).await;
+        let error = match result {
+            Ok(_) => panic!("an overflowing XVC information FILETIME must not parse"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            XvdFileParseError::XvcInfo(super::super::models::xvd::XvcInfoParseError::Filetime(_))
+        ));
     }
 
     #[tokio::test]
