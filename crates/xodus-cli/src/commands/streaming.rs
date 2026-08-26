@@ -324,16 +324,23 @@ pub(crate) fn open_package_input(root: &Path, package_path: &str) -> io::Result<
     let Some(filename) = components.last() else {
         return Err(invalid_package_path("package path has no filename"));
     };
-    Ok(std::fs::File::from(
+    let file = std::fs::File::from(
         open_resolved(
             &directory,
             *filename,
-            OFlags::RDONLY | OFlags::CLOEXEC,
+            OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC,
             Mode::empty(),
             OUTPUT_RESOLVE_FLAGS,
         )
         .map_err(io::Error::from)?,
-    ))
+    );
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "package input is not a regular file",
+        ));
+    }
+    Ok(file)
 }
 
 fn package_relative_path(package_path: &str) -> io::Result<PathBuf> {
@@ -656,7 +663,7 @@ fn package_entry_is_regular(root: &Path, relative: &Path) -> io::Result<bool> {
     let file = match open_resolved(
         &parent,
         name,
-        OFlags::RDONLY | OFlags::CLOEXEC,
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC,
         Mode::empty(),
         OUTPUT_RESOLVE_FLAGS,
     ) {
@@ -1882,6 +1889,18 @@ mod tests {
             package_path_components("content/textures/terrain.bin").unwrap(),
             vec!["content", "textures", "terrain.bin"]
         );
+    }
+
+    #[test]
+    fn package_input_rejects_non_regular_entries_without_blocking() {
+        let temporary = tempfile::tempdir().expect("temporary directory must exist");
+        std::fs::create_dir(temporary.path().join("package.msixvc"))
+            .expect("package entry directory must be created");
+
+        let error = open_package_input(temporary.path(), "package.msixvc")
+            .expect_err("a directory must not be opened as a package input stream");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
     }
 
     #[test]
