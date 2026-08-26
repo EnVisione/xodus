@@ -25,7 +25,11 @@ fn hex_value(byte: u8) -> Option<u8> {
 
 fn read_hashes(path: &Path) -> Result<Vec<[u8; 20]>, String> {
     let contents = read_bounded_text(path, MAX_HASH_MANIFEST_BYTES)?;
+    let maximum_hashes = contents.len().saturating_add(40) / 41;
     let mut hashes = Vec::new();
+    hashes
+        .try_reserve(maximum_hashes)
+        .map_err(|_| "hash manifest allocation failed".to_owned())?;
     for (line_number, raw_line) in contents.lines().enumerate() {
         let line = raw_line.trim();
         if line.is_empty() {
@@ -325,6 +329,29 @@ mod tests {
         std::fs::write(&manifest, "é".repeat(20)).expect("hash manifest must be writable");
 
         assert!(super::read_hashes(&manifest).is_err());
+    }
+
+    #[test]
+    fn parses_bounded_hash_manifest_entries() {
+        let temporary = tempfile::tempdir().expect("temporary directory must exist");
+        let manifest = temporary.path().join("valid.hashes");
+        std::fs::write(
+            &manifest,
+            "000102030405060708090a0b0c0d0e0f10111213\n\n".to_owned()
+                + "ffffffffffffffffffffffffffffffffffffffff\n",
+        )
+        .expect("hash manifest must be writable");
+
+        let hashes = super::read_hashes(&manifest).expect("valid hash manifest must parse");
+        assert_eq!(hashes.len(), 2);
+        assert_eq!(
+            hashes[0],
+            [
+                0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+                0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13,
+            ]
+        );
+        assert_eq!(hashes[1], [0xff; 20]);
     }
 
     #[test]
