@@ -35,7 +35,7 @@ fn normalized_package_path(path: &str) -> String {
     path.replace('\\', "/")
 }
 
-fn open_archive(path: &Path) -> io::Result<File> {
+pub(crate) fn open_archive(path: &Path) -> io::Result<File> {
     let metadata = std::fs::metadata(path)?;
     if !metadata.is_file() {
         return Err(io::Error::new(
