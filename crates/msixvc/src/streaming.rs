@@ -507,8 +507,7 @@ where
         let cache_path = cache_path.as_ref();
 
         let cache_writer = OpenOptions::new()
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .read(true)
             .write(true)
             .open(cache_path)
@@ -1915,5 +1914,35 @@ mod tests {
         assert_eq!(file.cached_len(), 0);
         assert_eq!(tokio::fs::metadata(&cache).await.unwrap().len(), 0);
         let _ = std::fs::remove_file(cache);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn prefix_cache_rejects_symlink_before_writing_target() {
+        use std::os::unix::fs::symlink;
+
+        let cache = cache_path("symlink");
+        let target = cache.with_extension("target");
+        std::fs::write(&target, b"untouched").unwrap();
+        symlink(&target, &cache).unwrap();
+
+        let result = PrefixCacheFile::new(
+            FixedReader {
+                data: b"replacement".to_vec(),
+                position: 0,
+            },
+            11,
+            &cache,
+        )
+        .await;
+
+        let error = match result {
+            Ok(_) => panic!("an existing cache symlink must be rejected"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&target).unwrap(), b"untouched");
+        let _ = std::fs::remove_file(cache);
+        let _ = std::fs::remove_file(target);
     }
 }
