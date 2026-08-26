@@ -35,6 +35,17 @@ fn normalized_package_path(path: &str) -> String {
     path.replace('\\', "/")
 }
 
+fn open_archive(path: &Path) -> io::Result<File> {
+    let metadata = std::fs::metadata(path)?;
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "MSIXVC2 archive is not a regular file",
+        ));
+    }
+    File::open(path)
+}
+
 fn package_top_level(path: &str) -> Option<String> {
     path.split('/').next().map(str::to_owned)
 }
@@ -110,7 +121,7 @@ where
     F: FnMut() -> bool,
 {
     let archive_path = Path::new(&path);
-    let mut metadata_file = match File::open(archive_path) {
+    let mut metadata_file = match open_archive(archive_path) {
         Ok(file) => file,
         Err(error) => {
             eprintln!("MSIXVC2 install could not open archive: {error}");
@@ -192,7 +203,7 @@ where
         }
     };
 
-    let mut package_file = match File::open(archive_path) {
+    let mut package_file = match open_archive(archive_path) {
         Ok(file) => file,
         Err(error) => {
             eprintln!("MSIXVC2 install could not reopen archive: {error}");
@@ -240,7 +251,7 @@ mod tests {
 
     use crate::commands::streaming::recover_transactions;
 
-    use super::{run, run_with_hook, validate_available_space};
+    use super::{open_archive, run, run_with_hook, validate_available_space};
 
     fn fixture(name: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -282,6 +293,18 @@ mod tests {
         let error = validate_available_space(100, 119)
             .expect_err("an install larger than available space must fail before staging");
         assert_eq!(error.kind(), std::io::ErrorKind::StorageFull);
+    }
+
+    #[test]
+    fn archive_open_rejects_non_regular_files_before_reading() {
+        let temporary = tempfile::tempdir().expect("temporary archive directory must exist");
+        let directory = temporary.path().join("archive-directory");
+        std::fs::create_dir(&directory).expect("archive directory must be created");
+
+        let error = open_archive(&directory)
+            .expect_err("a directory must not be opened as an archive stream");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
     }
 
     #[test]
