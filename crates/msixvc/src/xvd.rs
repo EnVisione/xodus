@@ -590,6 +590,8 @@ pub enum SegmentMetadataParseError {
     SegmentCountTooLarge { segment_count: u32 },
     #[error("unable to reserve {segment_count} segment metadata entries")]
     SegmentAllocationFailed { segment_count: u32 },
+    #[error("unable to reserve a segment metadata path of {path_length} UTF-16 units")]
+    PathAllocationFailed { path_length: u16 },
     #[error("unable to reserve a segment metadata file entry")]
     FileMapAllocationFailed,
     #[error("unable to reserve {hash_count} segment hashes")]
@@ -1293,6 +1295,13 @@ fn package_file_payload(
 
 fn segment_file_name(fullname: &[u16]) -> Result<String, SegmentMetadataParseError> {
     String::from_utf16(fullname).map_err(SegmentMetadataParseError::InvalidFileName)
+}
+
+fn reserve_segment_path(path_length: u16) -> Result<Vec<u16>, SegmentMetadataParseError> {
+    let mut path = Vec::new();
+    path.try_reserve_exact(usize::from(path_length))
+        .map_err(|_| SegmentMetadataParseError::PathAllocationFailed { path_length })?;
+    Ok(path)
 }
 
 fn segment_metadata_reader_capacity() -> usize {
@@ -2593,7 +2602,8 @@ impl XvdFile {
                     segment.path_offset,
                     s,
                 )?;
-                let mut buf = vec![0u16; s as usize];
+                let mut buf = reserve_segment_path(s)?;
+                buf.resize(usize::from(s), 0);
                 file.seek(SeekFrom::Start(path_offset)).await?;
                 file.read_exact(buf.as_mut_bytes()).await?;
                 let file_name = segment_file_name(buf.as_slice())?;
@@ -3167,8 +3177,8 @@ mod tests {
         next_download_page, next_download_received_byte_count, next_package_files_table_offset,
         next_segment_page_offset, non_encrypted_prefix_len, ntfs_drive_extents,
         ntfs_partition_extents, package_file_name, required_gpt_partition_length,
-        required_gpt_partition_start, reserve_xvc_region_entries, segment_file_name,
-        segment_metadata_reader_capacity, sync_substream_absolute_target,
+        required_gpt_partition_start, reserve_segment_path, reserve_xvc_region_entries,
+        segment_file_name, segment_metadata_reader_capacity, sync_substream_absolute_target,
         validate_download_response_extent, validate_package_files_table_cursor,
         validate_segment_metadata_table_extent, validate_user_data_header_extent,
         validate_user_data_header_length, validate_xvc_region_hash_entry_addresses,
@@ -4181,6 +4191,15 @@ mod tests {
             error,
             SegmentMetadataParseError::InvalidFileName(_)
         ));
+    }
+
+    #[test]
+    fn segment_path_reservation_is_bounded_by_declared_length() {
+        let path = reserve_segment_path(u16::MAX)
+            .expect("maximum segment path reservation must remain representable");
+
+        assert_eq!(path.len(), 0);
+        assert!(path.capacity() >= usize::from(u16::MAX));
     }
 
     #[test]
