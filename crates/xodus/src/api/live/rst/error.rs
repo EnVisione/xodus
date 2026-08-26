@@ -41,6 +41,8 @@ pub enum RSTError {
     ResponseBodyTooLarge { limit: usize },
     #[error("SOAP response body allocation failed within the supported limit of {limit} bytes")]
     ResponseBodyAllocationFailed { limit: usize },
+    #[error("SOAP request redirected to an insecure scheme")]
+    InsecureRedirect,
     #[error("SOAP derived key token index allocation failed")]
     DerivedKeyTokenAllocationFailed,
     #[error("SP license key derivation failed: {0}")]

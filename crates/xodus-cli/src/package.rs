@@ -519,8 +519,14 @@ async fn get_packages_at_endpoint(
             xodus::api::xbox::get_xsts_auth_header(xsts_token)?,
         )
         .send()
-        .await?
-        .error_for_status()?;
+        .await?;
+    if response.url().scheme() != "https" {
+        return Err(Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "package request redirected to an insecure scheme",
+        )));
+    }
+    let response = response.error_for_status()?;
 
     let res: PackageResponse = xodus::api::xbox::decode_json_response(response).await?;
 

@@ -27,6 +27,8 @@ pub enum DeviceCredentialError {
     ResponseBodyAllocationFailed { size: usize, limit: usize },
     #[error("device credential response body is not valid utf 8: {0}")]
     InvalidUtf8(#[from] std::string::FromUtf8Error),
+    #[error("device credential request redirected to an insecure scheme")]
+    InsecureRedirect,
 }
 
 async fn read_bounded_response_text(
@@ -103,6 +105,8 @@ pub async fn login_device_credential(
         .body(data)
         .send()
         .await?;
+    crate::api::ensure_https_url(response.url())
+        .map_err(|_| DeviceCredentialError::InsecureRedirect)?;
     let response = response.error_for_status()?;
     let text = read_bounded_response_text(response).await?;
     Ok(quick_xml::de::from_str(&text)?)

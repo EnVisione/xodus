@@ -9,6 +9,7 @@ pub async fn get_title_management(
         .get("https://title.mgt.xboxlive.com/titles/default/endpoints?type=1")
         .send()
         .await?;
+    crate::api::ensure_https_url(response.url()).map_err(|_| XboxApiError::InsecureRedirect)?;
     let response = response.error_for_status()?;
     decode_json_response(response).await
 }

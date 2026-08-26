@@ -46,6 +46,8 @@ pub enum LicenseContentError {
 
     #[error("license content xml is invalid: {0}")]
     InvalidXml(#[from] quick_xml::DeError),
+    #[error("license request redirected to an insecure scheme")]
+    InsecureRedirect,
 }
 
 fn decode_license_value(value: &str) -> Result<License, LicenseContentError> {
@@ -160,6 +162,8 @@ pub async fn get_license_content(
         })
         .send()
         .await?;
+    crate::api::ensure_https_url(response.url())
+        .map_err(|_| LicenseContentError::InsecureRedirect)?;
 
     let content_res = decode_license_response(response.error_for_status()?).await?;
     let content = match content_res {

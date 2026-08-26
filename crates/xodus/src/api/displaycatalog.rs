@@ -19,6 +19,8 @@ pub enum DisplayCatalogApiError {
     ResponseBodyAllocationFailed { size: usize, limit: usize },
     #[error("display catalog response is not valid json: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("display catalog request redirected to an insecure scheme")]
+    InsecureRedirect,
 }
 
 pub async fn find_products_by_id(
@@ -29,6 +31,8 @@ pub async fn find_products_by_id(
 ) -> Result<DisplayCatalogProductsResponse, DisplayCatalogApiError> {
     let endpoint = display_catalog_url(&product, &market, &languages)?;
     let response = client.get(endpoint).send().await?;
+    crate::api::ensure_https_url(response.url())
+        .map_err(|_| DisplayCatalogApiError::InsecureRedirect)?;
     let response = response.error_for_status()?;
     decode_json_response(response).await
 }

@@ -32,8 +32,10 @@ impl<'a> RSTRequest<'a> {
         .header("Host", "login.live.com")
         .body(self.signed_xml)
         .send()
-        .await?
-        .error_for_status()?;
+        .await?;
+        crate::api::ensure_https_url(response.url())
+            .map_err(|_| super::RSTError::InsecureRedirect)?;
+        let response = response.error_for_status()?;
 
         let response_text = read_response_text(response).await?;
         let envelope: soap::Envelope = quick_xml::de::from_str(&response_text)?;

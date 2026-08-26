@@ -15,6 +15,8 @@ pub enum XboxApiError {
     ResponseBodyAllocationFailed { size: usize, limit: usize },
     #[error("xbox response is not valid json: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("xbox request redirected to an insecure scheme")]
+    InsecureRedirect,
 }
 
 async fn post_json<Body, Response>(
@@ -26,14 +28,17 @@ where
     Body: Serialize,
     Response: DeserializeOwned,
 {
+    let request_url = reqwest::Url::parse(endpoint).map_err(|_| XboxApiError::InsecureRedirect)?;
     let response = client
         .post(endpoint)
         .header("Content-Type", "application/json")
         .header("x-xbl-contract-version", "1")
         .json(body)
         .send()
-        .await?
-        .error_for_status()?;
+        .await?;
+    crate::api::ensure_response_scheme(&request_url, response.url())
+        .map_err(|_| XboxApiError::InsecureRedirect)?;
+    let response = response.error_for_status()?;
     decode_json_response(response).await
 }
 
