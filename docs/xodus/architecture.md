@@ -99,7 +99,7 @@ Package download candidates are built by joining validated relative paths to bou
 
 Direct package downloads check the destination filesystem before issuing a request. The required file size is expanded with checked arithmetic to include a twenty percent reserve, and insufficient capacity returns a storage error before any staging transaction or network body is created. This check is per file, so each sequential download retains the reserve for its own staged write.
 
-The remote `streaming` command accepts the same selector, so a recorded source `VersionId` can feed the existing range-checked MSIXVC reader and transaction path. Local `file://` streaming ignores the selector because it does not contact the package service. The selector only chooses the package revision; it does not weaken the existing integrity, cancellation, path, or promotion gates.
+The remote `streaming` command accepts the same selector, so a recorded source `VersionId` can feed the existing range-checked MSIXVC reader and transaction path. When package metadata is available, the initial CDN response must declare the same file length before the reader is returned, and every resumed range must retain that total. Local `file://` streaming ignores the selector because it does not contact the package service. The selector only chooses the package revision; it does not weaken the existing integrity, cancellation, path, or promotion gates.
 
 Remote streaming checks destination capacity for the package cache before creating a transaction, then checks capacity again for changed segment files after local state comparison. Both checks use checked arithmetic and include a twenty percent reserve, and failures return before the corresponding cache or changed-file writes.
 
