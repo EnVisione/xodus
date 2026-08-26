@@ -18,7 +18,7 @@ On Windows, `CloudExperienceHost` hosts the login page and exposes itself to it 
 
 What that involves:
 
-- **Identifying as the host.** The initial request to `InlineLogin.srf` carries a set of `cxh-*` headers (capabilities, correlation id, MSA/identity client binary versions, OS version, platform, protocol) that a real `CloudExperienceHost` would send. Without these the page can behave differently or refuse to proceed.
+- **Identifying as the host.** The initial request to `InlineLogin.srf` carries a set of `cxh-*` headers (capabilities, correlation id, MSA/identity client binary versions, OS version, platform, protocol) that a real `CloudExperienceHost` would send. Its market and client identifier query values are encoded through the URL API, so delimiters in configuration values cannot add parameters or change the request target. Without these headers the page can behave differently or refuse to proceed.
 - **Aliasing the IPC channel.** wry only exposes `window.ipc.postMessage`; an injected init script aliases `window.external.notify` to it so the page's existing calls reach Xodus unmodified.
 - **Two kinds of IPC message.** Everything the page posts over IPC lands in `with_ipc_handler` and is tried as two different shapes:
   - A `DAProperty` payload - the actual sign-in result (DA token, DA session key, STS inline flow token, sign-in name, PUID). This is what `SessionHandler::on_token` receives.

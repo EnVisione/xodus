@@ -118,9 +118,14 @@ pub fn login_request(
     market: String,
 ) -> Result<WebviewRequest, Box<dyn std::error::Error>> {
     let uid = uuid::Uuid::new_v4();
-    let url = format!(
-        "https://login.live.com/ppsecure/InlineLogin.srf?id=80604&scid=3&mkt={market}&Platform=Windows10&clientid={client_id}&hosted=1"
-    );
+    let mut url = reqwest::Url::parse("https://login.live.com/ppsecure/InlineLogin.srf")?;
+    url.query_pairs_mut()
+        .append_pair("id", "80604")
+        .append_pair("scid", "3")
+        .append_pair("mkt", &market)
+        .append_pair("Platform", "Windows10")
+        .append_pair("clientid", &client_id)
+        .append_pair("hosted", "1");
 
     let mut headers = HeaderMap::new();
     headers.insert("cxh-capabilities", HeaderValue::from_static(r#"{"PrivatePropertyBag":1,"PasswordlessConnect":1,"PreferAssociate":1,"ChromelessUI":0}"#));
@@ -150,7 +155,7 @@ pub fn login_request(
         HeaderValue::from_static(r#"CloudExperienceHost"#),
     );
 
-    Ok(WebviewRequest::new("Xodus login", url, headers))
+    Ok(WebviewRequest::new("Xodus login", url.to_string(), headers))
 }
 
 pub fn finalize_request(url: String) -> WebviewRequest {
@@ -427,25 +432,48 @@ fn remove_session<T: SessionHandler>(state: &mut RuntimeState<T>, session_id: Se
     }
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
 mod tests {
+    use super::login_request;
+
+    #[cfg(target_os = "linux")]
     use super::should_disable_dmabuf_renderer;
 
+    #[test]
+    fn login_request_encodes_query_parameters() {
+        let request = login_request("client&id".to_string(), "en-US&x".to_string())
+            .expect("login request must build");
+        let url = reqwest::Url::parse(&request.url).expect("login URL must parse");
+        let query: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+
+        assert_eq!(url.scheme(), "https");
+        assert_eq!(url.host_str(), Some("login.live.com"));
+        assert_eq!(query.get("id").map(String::as_str), Some("80604"));
+        assert_eq!(query.get("scid").map(String::as_str), Some("3"));
+        assert_eq!(query.get("mkt").map(String::as_str), Some("en-US&x"));
+        assert_eq!(query.get("clientid").map(String::as_str), Some("client&id"));
+        assert_eq!(query.get("hosted").map(String::as_str), Some("1"));
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn enables_the_workaround_for_wayland_nvidia_without_an_override() {
         assert!(should_disable_dmabuf_renderer(false, true, true));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn preserves_an_explicit_renderer_override() {
         assert!(!should_disable_dmabuf_renderer(true, true, true));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn leaves_non_wayland_sessions_unchanged() {
         assert!(!should_disable_dmabuf_renderer(false, false, true));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn leaves_systems_without_nvidia_unchanged() {
         assert!(!should_disable_dmabuf_renderer(false, true, false));
