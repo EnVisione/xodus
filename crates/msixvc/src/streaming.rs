@@ -1567,6 +1567,82 @@ mod tests {
         assert!(output.is_empty());
     }
 
+    #[tokio::test]
+    async fn http_read_rejects_pending_chunk_offset_before_slicing() {
+        let mut reader = super::HttpRead {
+            client: reqwest::Client::new(),
+            url: "http://invalid.test/file".to_owned(),
+            len: 1,
+            pos: 0,
+            pending_open: None,
+            active: None,
+            pending_chunk: Some(bytes::Bytes::from_static(b"a")),
+            pending_chunk_offset: 2,
+            retry_budget: 0,
+            progress: None,
+        };
+
+        let error = reader
+            .read_to_end(&mut Vec::new())
+            .await
+            .expect_err("an invalid pending chunk offset must fail before slicing");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("pending chunk offset"));
+    }
+
+    #[tokio::test]
+    async fn http_read_preserves_cursor_when_copying_partial_pending_chunk() {
+        let body = test_body();
+        let server = spawn_server(body.clone(), None, 0).await.unwrap();
+        let mut reader = HttpRead::open(reqwest::Client::new(), &server.url, None::<fn(u64, u64)>)
+            .await
+            .unwrap();
+
+        let mut first = [0_u8; 7];
+        reader.read_exact(&mut first).await.unwrap();
+        let mut second = [0_u8; 11];
+        reader.read_exact(&mut second).await.unwrap();
+
+        assert_eq!(&first[..], &body[..7]);
+        assert_eq!(&second[..], &body[7..18]);
+        assert_eq!(server.request_ranges(), vec![None]);
+    }
+
+    #[tokio::test]
+    async fn http_read_rejects_active_cursor_drift_before_polling() {
+        let stream: super::ByteStream = Box::pin(futures_util::stream::iter(vec![Ok::<
+            bytes::Bytes,
+            reqwest::Error,
+        >(
+            bytes::Bytes::from_static(b"a"),
+        )]));
+        let mut reader = super::HttpRead {
+            client: reqwest::Client::new(),
+            url: "http://invalid.test/file".to_owned(),
+            len: 1,
+            pos: 0,
+            pending_open: None,
+            active: Some(super::ActiveHttpStream {
+                next_offset: 1,
+                end_offset: 1,
+                stream,
+            }),
+            pending_chunk: None,
+            pending_chunk_offset: 0,
+            retry_budget: 0,
+            progress: None,
+        };
+
+        let error = reader
+            .read_to_end(&mut Vec::new())
+            .await
+            .expect_err("active cursor drift must fail before polling");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("active stream position"));
+    }
+
     async fn open_cached_reader<'t>(
         server: &TestServer,
         cache: &PathBuf,
