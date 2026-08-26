@@ -139,6 +139,11 @@ fn parse_smbios(smbios: &[u8]) -> io::Result<(Vec<u8>, Vec<u8>, [u8; 16])> {
         .get(length..)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "SMBIOS header exceeds input"))?;
     let mut strings: Vec<&[u8]> = Vec::new();
+    strings
+        .try_reserve(stringsbuf.len().saturating_add(1))
+        .map_err(|error| {
+            io::Error::other(format!("SMBIOS string table allocation failed: {error}"))
+        })?;
     strings.push(&[]);
     let mut cursor = 0;
     while cursor < stringsbuf.len() {
@@ -171,7 +176,20 @@ fn parse_smbios(smbios: &[u8]) -> io::Result<(Vec<u8>, Vec<u8>, [u8; 16])> {
         )
     })?;
 
-    Ok((version.to_vec(), serial.to_vec(), uuid))
+    let version = copy_smbios_string(version)?;
+    let serial = copy_smbios_string(serial)?;
+
+    Ok((version, serial, uuid))
+}
+
+#[cfg(target_os = "linux")]
+fn copy_smbios_string(value: &[u8]) -> io::Result<Vec<u8>> {
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(value.len())
+        .map_err(|error| io::Error::other(format!("SMBIOS string allocation failed: {error}")))?;
+    output.extend_from_slice(value);
+    Ok(output)
 }
 
 #[cfg(any(target_os = "macos", target_os = "ios", target_family = "windows"))]
@@ -253,10 +271,12 @@ fn load_raw_smbios() -> io::Result<Vec<u8>> {
 
 #[cfg(target_os = "linux")]
 fn read_bounded_smbios<R: Read>(reader: R) -> io::Result<Vec<u8>> {
+    let read_limit = MAX_SMBIOS_BYTES.saturating_add(1);
     let mut output = Vec::new();
-    reader
-        .take((MAX_SMBIOS_BYTES as u64).saturating_add(1))
-        .read_to_end(&mut output)?;
+    output
+        .try_reserve_exact(read_limit)
+        .map_err(|error| io::Error::other(format!("SMBIOS buffer allocation failed: {error}")))?;
+    reader.take(read_limit as u64).read_to_end(&mut output)?;
     if output.len() > MAX_SMBIOS_BYTES {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
