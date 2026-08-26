@@ -66,7 +66,7 @@ fn display_catalog_url(
         ));
     }
 
-    let mut url = reqwest::Url::parse("https://displaycatalog.mp.microsoft.com/v7.0/products/")
+    let mut url = reqwest::Url::parse("https://displaycatalog.mp.microsoft.com/v7.0/products")
         .map_err(|_| DisplayCatalogApiError::InvalidInput("display catalog endpoint is invalid"))?;
     url.path_segments_mut()
         .map_err(|_| DisplayCatalogApiError::InvalidInput("display catalog endpoint is invalid"))?
@@ -160,7 +160,11 @@ mod tests {
         )
         .expect("bounded display catalog URL must build");
 
-        assert!(url.as_str().contains("product%2Fid%3Fvalue"));
+        assert_eq!(
+            url.path(),
+            "/v7.0/products/product%2Fid%3Fvalue",
+            "product identifier must be appended without an empty path segment"
+        );
         let query: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
         assert_eq!(query.get("market"), Some(&"en&us".to_owned()));
         assert_eq!(query.get("languages"), Some(&"en,us,neutral".to_owned()));

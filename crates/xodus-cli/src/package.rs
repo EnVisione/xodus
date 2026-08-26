@@ -192,21 +192,31 @@ fn validate_package_cdn_root(root: &str) -> io::Result<reqwest::Url> {
     }
     let parsed = reqwest::Url::parse(root)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "package CDN URL is invalid"))?;
-    if parsed.scheme() != "https"
-        || parsed.host_str().is_none()
-        || !parsed.username().is_empty()
-        || parsed.password().is_some()
-        || parsed.query().is_some()
-        || parsed.fragment().is_some()
-        || !parsed.path().ends_with('/')
-        || parsed
-            .path()
-            .split('/')
-            .any(|segment| segment == "." || segment == "..")
+    let rejection = if parsed.scheme() != "https" {
+        Some("requires HTTPS")
+    } else if parsed.host_str().is_none() {
+        Some("requires a host")
+    } else if !parsed.username().is_empty() || parsed.password().is_some() {
+        Some("must not contain user information")
+    } else if parsed.query().is_some() {
+        Some("must not contain a query")
+    } else if parsed.fragment().is_some() {
+        Some("must not contain a fragment")
+    } else if !parsed.path().ends_with('/') {
+        Some("must name a directory ending with a slash")
+    } else if parsed
+        .path()
+        .split('/')
+        .any(|segment| segment == "." || segment == "..")
     {
+        Some("must not contain dot path segments")
+    } else {
+        None
+    };
+    if let Some(rejection) = rejection {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "package CDN root must be an HTTPS directory without user information",
+            format!("package CDN root rejected, {rejection}"),
         ));
     }
     Ok(parsed)
@@ -527,7 +537,7 @@ mod tests {
     use super::{
         MAX_CONTENT_ID_REDIRECTS, MAX_PACKAGE_ID_BYTES, append_subproduct,
         package_download_url_capacity, package_endpoint_url, register_content_id_redirect,
-        validate_package_details,
+        validate_package_cdn_root, validate_package_details,
     };
     use xodus::models::packagespc::{PackageDetails, PackageFile};
 
@@ -611,6 +621,18 @@ mod tests {
             url.path(),
             "/GetSpecificBasePackage/content%2Fid/version%2Fid"
         );
+    }
+
+    #[test]
+    fn package_cdn_root_reports_insecure_scheme_without_echoing_input() {
+        let error = validate_package_cdn_root("http://cdn.example/")
+            .expect_err("insecure CDN roots must fail closed");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(
+            error.to_string(),
+            "package CDN root rejected, requires HTTPS"
+        );
+        assert!(!error.to_string().contains("cdn.example"));
     }
 
     #[test]
