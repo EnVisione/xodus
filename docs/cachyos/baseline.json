@@ -8,7 +8,7 @@
     "origin_main_commit": "5b77e06eaa5e3cea78af122436d35a9b02992834",
     "upstream_main_commit": "467edc0b0724c700ccd5ab1959fbef1a0f6b6f7d",
     "cargo_lock_sha256": "86d8c89aa452c1788482a472415a1249d940926a9415f6169c382eec266861f5",
-    "cargo_metadata_sha256": "cef5fbfca134a12c108c1259b3ced57794442454863ef37fc87d05a453b76c74",
+    "cargo_metadata_sha256": "ffead14f195647b3c9e4c7ef1fba3b9abbf20e0397c064f4c0feef4dc83edfd6",
     "branch": "envy/target-metadata-evidence",
     "source_sensitive_paths": [
       "Cargo.lock",
