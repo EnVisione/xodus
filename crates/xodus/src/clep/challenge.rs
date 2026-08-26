@@ -235,8 +235,7 @@ impl Cipher {
 /// is asserted by tests and the round trip test verifies the byte layout.
 pub fn clep_obfuscate(buffer: &mut [u8; 2048]) {
     // --- IV setup: XOR state with first data word, write back ---
-    let (blocks, remainder) = buffer.as_chunks_mut::<8>();
-    debug_assert!(remainder.is_empty());
+    let (blocks, _) = buffer.as_chunks_mut::<8>();
     let first = &mut blocks[0];
     let mut word2 = [0_u8; 4];
     word2.copy_from_slice(&first[4..8]);
@@ -255,8 +254,7 @@ pub fn clep_obfuscate(buffer: &mut [u8; 2048]) {
 /// Inverse of [`clep_obfuscate`].
 pub fn clep_deobfuscate(buffer: &mut [u8; 2048]) {
     // --- IV setup: recover the original IV that was XORed into word2 ---
-    let (blocks, remainder) = buffer.as_chunks_mut::<8>();
-    debug_assert!(remainder.is_empty());
+    let (blocks, _) = buffer.as_chunks_mut::<8>();
     let first = &mut blocks[0];
     let mut word2 = [0_u8; 4];
     word2.copy_from_slice(&first[4..8]);

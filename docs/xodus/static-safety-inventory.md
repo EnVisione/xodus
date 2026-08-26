@@ -14,7 +14,9 @@ The baseline search was:
 rg -n --glob '*.rs' '(TODO|todo!|unimplemented!|panic!|unwrap\(|expect\()' crates
 ```
 
-The result contains no `TODO`, `todo!`, or `unimplemented!` match in the current source tree. The remaining `panic!` and `expect` matches are in `#[cfg(test)]` modules and are assertion failures for synthetic fixtures, test setup, or authorized opt in account tests. They are not reachable from production command, service, parser, package, or environment paths.
+The result contains no `TODO`, `todo!`, or `unimplemented!` match in the current source tree. The remaining `panic!`, `expect`, and `debug_assert!` matches are in `#[cfg(test)]` modules and are assertion failures for synthetic fixtures, test setup, or authorized opt in account tests. They are not reachable from production command, service, parser, package, or environment paths.
+
+The parser and CLEP hardening pass also removes the last production debug assertions. The package-file table cursor now returns `UserPackageFilesParseError::PackageFilesTableCursorBeyondEnd` if an internal cursor ever exceeds its validated extent, and the fixed 2,048 byte CLEP array uses its type-level chunk guarantee without a runtime assertion. The deterministic regression tests `package_files_table_cursor_rejects_past_end_without_panicking` and `package_files_table_cursor_accepts_exact_end` cover the new parser boundary.
 
 ## Reviewed production boundaries
 

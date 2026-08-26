@@ -527,6 +527,8 @@ pub enum UserPackageFilesParseError {
     FileCountCannotFit { file_count: u32 },
     #[error("unable to reserve {file_count} package file entries")]
     FileAllocationFailed { file_count: u32 },
+    #[error("package files table cursor {offset} exceeds validated table end {table_end}")]
+    PackageFilesTableCursorBeyondEnd { offset: u64, table_end: u64 },
     #[error(
         "package file payload end overflows for entry offset {payload_offset} and length {payload_length}"
     )]
@@ -1211,6 +1213,18 @@ fn validate_package_files_table_end(
             file_count,
         },
     )
+}
+
+fn validate_package_files_table_cursor(
+    offset: u64,
+    table_end: u64,
+) -> Result<(), UserPackageFilesParseError> {
+    if offset > table_end {
+        return Err(
+            UserPackageFilesParseError::PackageFilesTableCursorBeyondEnd { offset, table_end },
+        );
+    }
+    Ok(())
 }
 
 fn next_package_files_table_offset(
@@ -2502,12 +2516,9 @@ impl XvdFile {
                 user_data_length,
             )?;
             let mut off = entry_table_offset;
-            debug_assert!(
-                off <= table_end,
-                "validated package files table must begin within its declared range"
-            );
             let mut buf = XvdUserDataPackageFileEntry::buffer();
             for _ in 0..user_data_package_files_header.file_count {
+                validate_package_files_table_cursor(off, table_end)?;
                 file.seek(SeekFrom::Start(off)).await?;
                 file.read_exact(&mut buf).await?;
                 let user_data_package_file_entry = XvdUserDataPackageFileEntry::from_array(&buf);
@@ -3158,10 +3169,10 @@ mod tests {
         ntfs_partition_extents, package_file_name, required_gpt_partition_length,
         required_gpt_partition_start, reserve_xvc_region_entries, segment_file_name,
         segment_metadata_reader_capacity, sync_substream_absolute_target,
-        validate_download_response_extent, validate_segment_metadata_table_extent,
-        validate_user_data_header_extent, validate_user_data_header_length,
-        validate_xvc_region_hash_entry_addresses, verify_page_hash, write_all_with_retry,
-        xvd_stream_absolute_seek_target,
+        validate_download_response_extent, validate_package_files_table_cursor,
+        validate_segment_metadata_table_extent, validate_user_data_header_extent,
+        validate_user_data_header_length, validate_xvc_region_hash_entry_addresses,
+        verify_page_hash, write_all_with_retry, xvd_stream_absolute_seek_target,
     };
 
     const XVD_HEADER_SIZE: usize = 4096;
@@ -5810,6 +5821,26 @@ mod tests {
                 file_count: 9,
             }
         ));
+    }
+
+    #[test]
+    fn package_files_table_cursor_rejects_past_end_without_panicking() {
+        let error = validate_package_files_table_cursor(11, 10)
+            .expect_err("package table cursor beyond validated end must be typed");
+
+        assert!(matches!(
+            error,
+            UserPackageFilesParseError::PackageFilesTableCursorBeyondEnd {
+                offset: 11,
+                table_end: 10,
+            }
+        ));
+    }
+
+    #[test]
+    fn package_files_table_cursor_accepts_exact_end() {
+        validate_package_files_table_cursor(10, 10)
+            .expect("package table cursor at validated end must remain valid");
     }
 
     #[tokio::test]
