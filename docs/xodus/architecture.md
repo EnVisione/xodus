@@ -67,7 +67,7 @@ The XAL authentication library is vendored under `vendor/xal` from upstream comm
 
 SOAP key-info conversion now returns typed errors for missing key names or security-token references. Encrypted response handling validates reference prefixes and IV length, maps decryption and UTF 8 failures, and parses only the authenticated padded plaintext instead of indexing or unwrapping malformed data.
 
-Shared-key derivation now rejects empty secrets, unsupported output lengths, and checked length arithmetic failures through typed errors. HMAC signing and encrypted response handling propagate those failures without indexing or unwrapping invalid key material.
+Shared-key derivation now rejects empty secrets, unsupported output lengths, checked length arithmetic failures, and material allocation failures through typed errors. HMAC signing and encrypted response handling propagate those failures without indexing or unwrapping invalid key material. The derived material buffer reserves fallibly before it is zero-filled, so caller supplied usage or context lengths cannot turn allocation failure into a process abort.
 
 The service startup path now returns typed initialization, token, runtime-directory, socket, permission, accept, and cleanup failures. Its outer execution boundary unsets the configured secret store on both clean shutdown and startup failure. Per-connection request-client construction also reports errors and closes the connection without a process panic. The CLI wraps command execution in the same teardown boundary so the configured secret store is unset on both successful and early-failure paths.
 

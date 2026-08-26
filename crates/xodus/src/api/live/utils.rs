@@ -21,6 +21,8 @@ pub enum SharedKeyError {
     InvalidKeyLength(usize),
     #[error("shared key material length overflow")]
     MaterialLengthOverflow,
+    #[error("shared key material allocation failed at {0} bytes")]
+    MaterialAllocationFailed(usize),
     #[error("shared key length cannot be represented as bits")]
     BitLengthOverflow,
     #[error("shared key input must not be empty")]
@@ -53,7 +55,7 @@ pub fn generate_shared_key(
         .and_then(|value| value.checked_add(context.len()))
         .and_then(|value| value.checked_add(4))
         .ok_or(SharedKeyError::MaterialLengthOverflow)?;
-    let mut shared_key_material: Vec<u8> = vec![0; len];
+    let mut shared_key_material = allocate_shared_key_material(len)?;
 
     let mut offset = 0;
     offset += 4;
@@ -93,6 +95,15 @@ pub fn generate_shared_key(
     }
 
     Ok(shared_key)
+}
+
+fn allocate_shared_key_material(len: usize) -> Result<Vec<u8>, SharedKeyError> {
+    let mut material = Vec::new();
+    material
+        .try_reserve_exact(len)
+        .map_err(|_| SharedKeyError::MaterialAllocationFailed(len))?;
+    material.resize(len, 0);
+    Ok(material)
 }
 
 pub fn generate_nonce() -> [u8; 32] {
@@ -168,7 +179,7 @@ pub fn decrypt_soap_encrypted_data<T: serde::de::DeserializeOwned>(
 
 #[cfg(test)]
 mod tests {
-    use super::{SharedKeyError, generate_shared_key};
+    use super::{SharedKeyError, allocate_shared_key_material, generate_shared_key};
 
     #[test]
     fn shared_key_rejects_empty_input() {
@@ -194,5 +205,13 @@ mod tests {
             .expect("valid shared key inputs");
 
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn shared_key_material_allocation_failure_is_typed() {
+        let error = allocate_shared_key_material(usize::MAX)
+            .expect_err("an impossible material size must fail without aborting");
+
+        assert_eq!(error, SharedKeyError::MaterialAllocationFailed(usize::MAX));
     }
 }
