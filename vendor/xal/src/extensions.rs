@@ -46,10 +46,10 @@ impl LoggingReqwestRequestHandler for reqwest::RequestBuilder {
         if let Some(rb) = self.try_clone() {
             let req = rb.build()?;
             let body = match req.body() {
-                Some(body) => {
-                    let b = body.as_bytes().unwrap();
-                    std::str::from_utf8(b)
-                }
+                Some(body) => match body.as_bytes() {
+                    Some(bytes) => std::str::from_utf8(bytes),
+                    None => Ok("<STREAMING BODY>"),
+                },
                 None => Ok("<NO BODY>"),
             };
 
@@ -102,9 +102,11 @@ impl LoggingReqwestResponseHandler for reqwest::Response {
             "Failed to get mut ref to header".into(),
         ))?;
 
-        headers.into_iter().for_each(|(key, val)| {
-            hdr_mut.insert(key.unwrap(), val);
-        });
+        for (key, val) in headers {
+            if let Some(key) = key {
+                hdr_mut.insert(key, val);
+            }
+        }
 
         let new_resp = response_builder.body(self.bytes().await?)?;
 

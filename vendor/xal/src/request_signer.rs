@@ -225,7 +225,9 @@ impl RequestSigning<reqwest::Request> for RequestSigner {
         rhs: reqwest::Request,
         timestamp: Option<DateTime<Utc>>,
     ) -> Result<reqwest::Request, Error> {
-        let mut clone_request = rhs.try_clone().unwrap();
+        let mut clone_request = rhs
+            .try_clone()
+            .ok_or(Error::InvalidRequest("Failed cloning request".into()))?;
         // Gather data from request used for signing
         let to_sign = rhs.try_into()?;
 
@@ -411,7 +413,7 @@ impl RequestSigner {
         );
 
         // Sign the message
-        let signature: Signature = signing_key.sign_prehash(&prehash).unwrap();
+        let signature: Signature = signing_key.sign_prehash(&prehash)?;
 
         // Return final signature
         Ok(XboxWebSignatureBytes {
