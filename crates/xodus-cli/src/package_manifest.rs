@@ -135,6 +135,7 @@ pub(crate) fn write_package_revision_manifest(
             "package manifest parent is not a directory",
         ));
     }
+    crate::commands::streaming::ensure_package_root(parent)?;
     let mut temporary = NamedTempFile::new_in(parent)?;
     temporary.write_all(&bytes)?;
     temporary.as_file().sync_all()?;
@@ -216,5 +217,24 @@ mod tests {
             .expect_err("negative file size must fail");
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
         assert!(!Path::new(&path).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn manifest_rejects_symlinked_parent_before_write() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let outside = directory.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        let linked = directory.path().join("linked");
+        symlink(&outside, &linked).unwrap();
+        let path = linked.join("package.json");
+
+        let error = write_package_revision_manifest(&path, &package())
+            .expect_err("a symlinked manifest parent must be rejected");
+
+        assert!(error.kind() != std::io::ErrorKind::NotFound);
+        assert!(!outside.join("package.json").exists());
     }
 }
