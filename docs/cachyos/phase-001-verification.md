@@ -12,6 +12,10 @@
 | Verification date | August 24, 2026 |
 | Environment | Sanitized Tier 1 CachyOS baseline recorded in `baseline.json` |
 
+## Current Baseline Refresh
+
+On August 25, 2026, `baseline.json` was refreshed at signed checkpoint `ecdfb0b1acdfdc889c3510fbd678cb74edfe81c0` after the verified Phase 2 safety work. The refresh binds the current branch, fork and upstream heads, Cargo lock and metadata digests, package database digest, and observed CachyOS graphics state. The original Phase 001 record above remains historical evidence for the merged baseline and is not changed into a Phase 2 completion claim.
+
 ## Commands and Results
 
 The following commands passed against the frozen source revision. They are read only except for Cargo build output under the ignored `target/` directory.
