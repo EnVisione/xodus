@@ -179,4 +179,42 @@ mod tests {
         );
         assert!(!destination.exists());
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_installed_entry_fails_closed_without_touching_target() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().expect("temporary destination must exist");
+        let destination = temporary.path().join("install");
+        let outside = temporary.path().join("outside.txt");
+        let archive = fixture("xodus-fixture-base.msixvc");
+        assert_eq!(
+            install_msixvc2::run(
+                archive.to_string_lossy().into_owned(),
+                destination.to_string_lossy().into_owned(),
+            ),
+            ExitCode::SUCCESS
+        );
+        std::fs::write(&outside, b"preserve").expect("outside target must be writable");
+        let package_file = destination.join("XboxPackage.cbor");
+        std::fs::remove_file(&package_file).expect("package file must be removable");
+        symlink(&outside, &package_file).expect("package symlink must be created");
+
+        assert_eq!(
+            run(
+                archive.to_string_lossy().into_owned(),
+                destination.to_string_lossy().into_owned(),
+            ),
+            ExitCode::FAILURE
+        );
+        assert_eq!(
+            std::fs::read(&outside).expect("outside target must remain readable"),
+            b"preserve"
+        );
+        assert!(
+            package_file.is_symlink(),
+            "the unsafe package entry must remain"
+        );
+    }
 }
