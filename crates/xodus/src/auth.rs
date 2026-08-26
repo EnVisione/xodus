@@ -16,6 +16,24 @@ use crate::models::soap;
 use crate::tokens::TokenManager;
 use crate::tokens::store::TokenStoreError;
 
+#[derive(Debug, thiserror::Error)]
+pub enum SisuError {
+    #[error("user STS token is unavailable: {0}")]
+    UserToken(#[source] TokenStoreError),
+    #[error("user STS token has an unsupported format")]
+    UserTokenFormat,
+    #[error("device STS token is unavailable: {0}")]
+    DeviceToken(#[source] TokenStoreError),
+    #[error("device STS token has an unsupported format")]
+    DeviceTokenFormat,
+    #[error("device token exchange returned an unsupported token format")]
+    DeviceExchangeFormat,
+    #[error("user token exchange returned an unexpected response")]
+    UserExchangeResponse,
+    #[error("user token exchange returned an unsupported token format")]
+    UserExchangeFormat,
+}
+
 fn get_app_params() -> XalAppParameters {
     XalAppParameters {
         client_id: "000000004424da1f".to_string(),
@@ -79,18 +97,16 @@ pub async fn do_sisu(
     ),
     Box<dyn std::error::Error>,
 > {
-    let Token::Legacy(token) = manager.get_user_sts_token()? else {
-        return Err(Box::new(std::io::Error::new(
-            std::io::ErrorKind::BrokenPipe,
-            "error",
-        )));
+    let user_token = manager.get_user_sts_token().map_err(SisuError::UserToken)?;
+    let Token::Legacy(token) = user_token else {
+        return Err(Box::new(SisuError::UserTokenFormat));
     };
     let scope = "xboxlive.signin";
-    let Token::Legacy(device_token) = manager.get_device_sts_token()? else {
-        return Err(Box::new(std::io::Error::new(
-            std::io::ErrorKind::BrokenPipe,
-            "error",
-        )));
+    let device_token = manager
+        .get_device_sts_token()
+        .map_err(SisuError::DeviceToken)?;
+    let Token::Legacy(device_token) = device_token else {
+        return Err(Box::new(SisuError::DeviceTokenFormat));
     };
     let device_token_resp: soap::RequestSecurityTokenResponse =
         crate::api::live::exchange_device_token(
@@ -103,10 +119,7 @@ pub async fn do_sisu(
         .await?;
 
     let Token::Compact(ms_device_token) = device_token_resp.try_into()? else {
-        return Err(Box::new(std::io::Error::new(
-            std::io::ErrorKind::BrokenPipe,
-            "error",
-        )));
+        return Err(Box::new(SisuError::DeviceExchangeFormat));
     };
 
     let user_token = crate::api::live::exchange_user_token(
@@ -131,10 +144,7 @@ pub async fn do_sisu(
         soap::BodyContent::RequestSecurityTokenResponseCollection(collection),
     ) = user_token
     else {
-        return Err(Box::new(std::io::Error::new(
-            std::io::ErrorKind::BrokenPipe,
-            "error",
-        )));
+        return Err(Box::new(SisuError::UserExchangeResponse));
     };
 
     let mut security_tokens = collection.security_tokens;
@@ -154,10 +164,7 @@ pub async fn do_sisu(
         .ok_or_else(|| std::io::Error::other("token exchange returned an empty collection"))?;
     let token: Token = token.try_into()?;
     let Token::Compact(user_token) = token else {
-        return Err(Box::new(std::io::Error::new(
-            std::io::ErrorKind::BrokenPipe,
-            "error",
-        )));
+        return Err(Box::new(SisuError::UserExchangeFormat));
     };
 
     let mut auth = XalAuthenticator::new(
@@ -198,7 +205,7 @@ fn persist_refreshed_user_token(
 mod tests {
     use std::sync::Arc;
 
-    use super::persist_refreshed_user_token;
+    use super::{do_sisu, persist_refreshed_user_token};
     use crate::models::secrets::Token;
     use crate::tokens::backend::MemoryBackend;
     use crate::tokens::manager::TokenManager;
@@ -233,6 +240,27 @@ mod tests {
         .expect_err("refresh persistence failure must not be swallowed");
 
         assert!(matches!(error, TokenStoreError::Poisoned));
+    }
+
+    #[tokio::test]
+    async fn sisu_reports_missing_user_token_without_network_activity() {
+        let manager = TokenManager::with_memory();
+        let result = do_sisu(
+            &reqwest::Client::new(),
+            &manager,
+            "0000000040159362",
+            896928775,
+        )
+        .await;
+
+        let error = match result {
+            Ok(_) => panic!("missing user token must fail before network activity"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.to_string(),
+            "user STS token is unavailable: entry not found"
+        );
     }
 }
 
