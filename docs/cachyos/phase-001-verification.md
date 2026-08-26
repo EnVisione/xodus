@@ -14,7 +14,7 @@
 
 ## Current Baseline Refresh
 
-On August 25, 2026, `baseline.json` was refreshed at signed checkpoint `ecdfb0b1acdfdc889c3510fbd678cb74edfe81c0` after the verified Phase 2 safety work. The refresh binds the current branch, fork and upstream heads, Cargo lock and metadata digests, package database digest, and observed CachyOS graphics state. The original Phase 001 record above remains historical evidence for the merged baseline and is not changed into a Phase 2 completion claim.
+On August 25, 2026, `baseline.json` was refreshed at signed checkpoint `0856c3bd25a652ebbb0749b7be40a92cfe49c5cc` after the verified HTTP cursor overflow coverage. The refresh binds the current branch, fork and upstream heads, Cargo lock and metadata digests, package database digest, and observed CachyOS graphics state. The original Phase 001 record above remains historical evidence for the merged baseline and is not changed into a Phase 2 completion claim.
 
 ## Commands and Results
 
