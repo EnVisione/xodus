@@ -1025,6 +1025,27 @@ fn checked_progress_length(position: u64, additional: u64) -> Option<u64> {
     position.checked_add(additional)
 }
 
+fn validate_streaming_space(required: u64, available: u64) -> io::Result<()> {
+    let required_with_reserve = required
+        .checked_mul(6)
+        .map(|value| value.div_ceil(5))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "package streaming size overflow",
+            )
+        })?;
+    if required_with_reserve > available {
+        return Err(io::Error::new(
+            io::ErrorKind::StorageFull,
+            format!(
+                "package streaming requires {required_with_reserve} bytes including reserve but only {available} bytes are available"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 async fn run_with_cancellation<Operation, Cancellation>(
     operation: Operation,
     cancellation: Cancellation,
@@ -1315,6 +1336,21 @@ where
         eprintln!("failed to recover a previous package transaction: {err}");
         return false;
     }
+    let available_cache_space = match available_space(out) {
+        Ok(space) => space,
+        Err(err) => {
+            eprintln!(
+                "failed to determine available space for {}: {}",
+                out.display(),
+                err
+            );
+            return false;
+        }
+    };
+    if let Err(err) = validate_streaming_space(l, available_cache_space) {
+        eprintln!("not enough free disk space for the package cache: {err}");
+        return false;
+    }
     let (transaction, transaction_payload) = match new_transaction(out) {
         Ok(transaction) => transaction,
         Err(err) => {
@@ -1472,7 +1508,6 @@ where
         return false;
     };
 
-    let required_free_space = total_size;
     let available_free_space = match available_space(out) {
         Ok(space) => space,
         Err(err) => {
@@ -1485,13 +1520,10 @@ where
         }
     };
 
-    if available_free_space < required_free_space {
+    if let Err(err) = validate_streaming_space(total_size, available_free_space) {
         eprintln!(
-            "not enough free disk space on {}: need {} bytes, have {} bytes (files: {})",
-            out.display(),
-            required_free_space,
-            available_free_space,
-            total_size
+            "not enough free disk space on {} for changed files: {err} (files: {total_size})",
+            out.display()
         );
         return false;
     }
@@ -1679,13 +1711,22 @@ mod tests {
         package_path_components, promote_transaction, promote_transaction_with_interruption,
         promotion_entries, promotion_entries_with_removals, promotion_entry_capacity,
         read_bounded_transaction_journal, read_transaction_journal, recover_transaction_dir,
-        recover_transactions, rollback_transaction, write_transaction_journal,
+        recover_transactions, rollback_transaction, validate_streaming_space,
+        write_transaction_journal,
     };
 
     #[test]
     fn progress_length_rejects_overflow_without_wrapping() {
         assert_eq!(checked_progress_length(4, 6), Some(10));
         assert_eq!(checked_progress_length(u64::MAX, 1), None);
+    }
+
+    #[test]
+    fn streaming_space_validation_requires_a_twenty_percent_reserve() {
+        validate_streaming_space(100, 120).expect("capacity including reserve must be accepted");
+        let error = validate_streaming_space(100, 119)
+            .expect_err("capacity below the reserve must be rejected");
+        assert_eq!(error.kind(), std::io::ErrorKind::StorageFull);
     }
 
     #[tokio::test]
