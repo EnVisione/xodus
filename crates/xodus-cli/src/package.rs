@@ -4,7 +4,7 @@ use std::io;
 use inquire::Select;
 use xodus::XBOX_LIVE_PACKAGES_PC;
 use xodus::api::displaycatalog::find_products_by_id;
-use xodus::models::packagespc::{PackageDetails, PackageResponse};
+use xodus::models::packagespc::{PackageDetails, PackageFile, PackageResponse};
 use xodus::models::secrets::Token;
 use xodus::tokens::TokenManager;
 
@@ -121,21 +121,16 @@ pub(crate) fn package_download_urls(
     background_cdn_root_paths: &[String],
     relative_url: &str,
 ) -> Result<Vec<String>, io::Error> {
-    if cdn_root_paths.is_empty() && background_cdn_root_paths.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "package has no CDN root",
-        ));
-    }
-
+    validate_package_download_metadata(cdn_root_paths, background_cdn_root_paths, relative_url)?;
     let capacity =
         package_download_url_capacity(cdn_root_paths.len(), background_cdn_root_paths.len())?;
     let mut urls = Vec::new();
     urls.try_reserve(capacity)
         .map_err(|_| io::Error::other("package CDN URL allocation failed"))?;
-    validate_package_relative_url(relative_url)?;
     for root in cdn_root_paths.iter().chain(background_cdn_root_paths) {
-        let parsed_root = validate_package_cdn_root(root)?;
+        let parsed_root = reqwest::Url::parse(root).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "package CDN URL is invalid")
+        })?;
         let joined = parsed_root.join(relative_url).map_err(|_| {
             io::Error::new(io::ErrorKind::InvalidData, "package CDN URL is invalid")
         })?;
@@ -157,6 +152,25 @@ pub(crate) fn package_download_urls(
     }
 
     Ok(urls)
+}
+
+fn validate_package_download_metadata(
+    cdn_root_paths: &[String],
+    background_cdn_root_paths: &[String],
+    relative_url: &str,
+) -> io::Result<()> {
+    if cdn_root_paths.is_empty() && background_cdn_root_paths.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "package has no CDN root",
+        ));
+    }
+    package_download_url_capacity(cdn_root_paths.len(), background_cdn_root_paths.len())?;
+    validate_package_relative_url(relative_url)?;
+    for root in cdn_root_paths.iter().chain(background_cdn_root_paths) {
+        validate_package_cdn_root(root)?;
+    }
+    Ok(())
 }
 
 fn validate_package_cdn_root(root: &str) -> io::Result<reqwest::Url> {
@@ -219,6 +233,94 @@ fn validate_package_relative_url(relative_url: &str) -> io::Result<()> {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "package relative URL contains an unsafe path segment",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_package_details(
+    package: &PackageDetails,
+    expected_content_id: &str,
+    expected_version_id: Option<&str>,
+) -> io::Result<()> {
+    if !package.package_found {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "package response is not marked as found",
+        ));
+    }
+    validate_package_id(&package.content_id, "package response content ID")?;
+    if package.content_id != expected_content_id {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "package response content ID does not match the request",
+        ));
+    }
+    validate_package_id(&package.version_id, "package response version ID")?;
+    if let Some(expected_version_id) = expected_version_id
+        && package.version_id != expected_version_id
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "package response version ID does not match the request",
+        ));
+    }
+    if package.version.trim().is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "package response version is empty",
+        ));
+    }
+    if package.package_files.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "package response contains no files",
+        ));
+    }
+    for file in &package.package_files {
+        validate_package_file(file, &package.content_id, &package.version_id)?;
+    }
+    Ok(())
+}
+
+fn validate_package_file(file: &PackageFile, content_id: &str, version_id: &str) -> io::Result<()> {
+    if file.content_id != content_id {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "package file content ID does not match the response",
+        ));
+    }
+    if file.version_id != version_id {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "package file version ID does not match the response",
+        ));
+    }
+    if file.file_size < 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "package file size is negative",
+        ));
+    }
+    if file.file_name.trim().is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "package file name is empty",
+        ));
+    }
+    validate_package_download_metadata(
+        &file.cdn_root_paths,
+        &file.background_cdn_root_paths,
+        &file.relative_url,
+    )?;
+    if file
+        .delta_version_id
+        .as_deref()
+        .is_some_and(|value| value.trim().is_empty())
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "package file delta version ID is empty",
         ));
     }
     Ok(())
@@ -317,7 +419,10 @@ pub async fn get_packages(
     tokens: &TokenManager,
     content_id: String,
 ) -> Result<PackageDetails, Box<dyn std::error::Error>> {
-    get_packages_at_endpoint(client, tokens, package_endpoint_url(&content_id, None)?).await
+    let package =
+        get_packages_at_endpoint(client, tokens, package_endpoint_url(&content_id, None)?).await?;
+    validate_package_details(&package, &content_id, None)?;
+    Ok(package)
 }
 
 pub async fn get_specific_packages(
@@ -326,12 +431,14 @@ pub async fn get_specific_packages(
     content_id: String,
     version_id: String,
 ) -> Result<PackageDetails, Box<dyn std::error::Error>> {
-    get_packages_at_endpoint(
+    let package = get_packages_at_endpoint(
         client,
         tokens,
         package_endpoint_url(&content_id, Some(&version_id))?,
     )
-    .await
+    .await?;
+    validate_package_details(&package, &content_id, Some(&version_id))?;
+    Ok(package)
 }
 
 async fn get_packages_at_endpoint(
@@ -377,7 +484,36 @@ mod tests {
     use super::{
         MAX_CONTENT_ID_REDIRECTS, MAX_PACKAGE_ID_BYTES, append_subproduct,
         package_download_url_capacity, package_endpoint_url, register_content_id_redirect,
+        validate_package_details,
     };
+    use xodus::models::packagespc::{PackageDetails, PackageFile};
+
+    fn package() -> PackageDetails {
+        PackageDetails {
+            package_found: true,
+            content_id: "content-id".to_owned(),
+            version_id: "version-id".to_owned(),
+            package_files: vec![PackageFile {
+                content_id: "content-id".to_owned(),
+                version_id: "version-id".to_owned(),
+                file_name: "package.msixvc".to_owned(),
+                file_size: 42,
+                file_hash: String::new(),
+                key_blob: String::new(),
+                cdn_root_paths: vec!["https://cdn.example/".to_owned()],
+                background_cdn_root_paths: Vec::new(),
+                relative_url: "content/version/package.msixvc".to_owned(),
+                update_type: 0,
+                delta_version_id: None,
+                license_usage_type: 0,
+                modified_date: String::new(),
+            }],
+            version: "1.0.0.0".to_owned(),
+            hash_of_hashes: None,
+            update_predownload: false,
+            availability_date: String::new(),
+        }
+    }
 
     #[test]
     fn subproduct_parser_accepts_only_three_part_big_keys() {
@@ -443,6 +579,50 @@ mod tests {
                 .kind(),
             std::io::ErrorKind::InvalidData
         );
+    }
+
+    #[test]
+    fn package_response_validation_accepts_matching_latest_identity() {
+        validate_package_details(&package(), "content-id", None)
+            .expect("matching latest package metadata must validate");
+    }
+
+    #[test]
+    fn package_response_validation_accepts_matching_specific_identity() {
+        validate_package_details(&package(), "content-id", Some("version-id"))
+            .expect("matching specific package metadata must validate");
+    }
+
+    #[test]
+    fn package_response_validation_rejects_mismatched_content_id() {
+        let error = validate_package_details(&package(), "other-content", None)
+            .expect_err("mismatched content ID must fail");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn package_response_validation_rejects_mismatched_version_id() {
+        let error = validate_package_details(&package(), "content-id", Some("other-version"))
+            .expect_err("mismatched version ID must fail");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn package_response_validation_rejects_negative_file_size() {
+        let mut package = package();
+        package.package_files[0].file_size = -1;
+        let error = validate_package_details(&package, "content-id", None)
+            .expect_err("negative package file size must fail");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn package_response_validation_rejects_mismatched_file_identity() {
+        let mut package = package();
+        package.package_files[0].content_id = "other-content".to_owned();
+        let error = validate_package_details(&package, "content-id", None)
+            .expect_err("mismatched file identity must fail");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     }
 
     #[test]
