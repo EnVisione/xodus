@@ -1,4 +1,4 @@
-use std::io::Read;
+use std::io::{self, Read};
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -13,6 +13,24 @@ use crate::commands::streaming::{
 
 const MAX_HASH_MANIFEST_BYTES: usize = 64 * 1024 * 1024;
 const XVD_HEADER_BYTES: u64 = 4096;
+const SPACE_RESERVE_MULTIPLIER: u64 = 6;
+const SPACE_RESERVE_DIVISOR: u64 = 5;
+
+fn validate_update_space(required: u64, available: u64) -> io::Result<()> {
+    let required_with_reserve = required
+        .checked_mul(SPACE_RESERVE_MULTIPLIER)
+        .map(|value| value.div_ceil(SPACE_RESERVE_DIVISOR))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "XSP update size overflow"))?;
+    if required_with_reserve > available {
+        return Err(io::Error::new(
+            io::ErrorKind::StorageFull,
+            format!(
+                "XSP update requires {required_with_reserve} bytes including reserve but only {available} bytes are available"
+            ),
+        ));
+    }
+    Ok(())
+}
 
 fn hex_value(byte: u8) -> Option<u8> {
     match byte {
@@ -194,13 +212,6 @@ where
         eprintln!("XSP update could not create destination: {error}");
         return ExitCode::FAILURE;
     }
-    let available_space = match fs2::available_space(output_root) {
-        Ok(space) => space,
-        Err(error) => {
-            eprintln!("XSP update could not inspect destination space: {error}");
-            return ExitCode::FAILURE;
-        }
-    };
     let _lock = match acquire_transaction_lock(output_root) {
         Ok(lock) => lock,
         Err(error) => {
@@ -210,6 +221,17 @@ where
     };
     if let Err(error) = recover_transactions(output_root) {
         eprintln!("XSP update could not recover a prior transaction: {error}");
+        return ExitCode::FAILURE;
+    }
+    let available_space = match fs2::available_space(output_root) {
+        Ok(space) => space,
+        Err(error) => {
+            eprintln!("XSP update could not inspect destination space: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Err(error) = validate_update_space(xsp.header.disk_space_required, available_space) {
+        eprintln!("XSP update rejected insufficient destination space: {error}");
         return ExitCode::FAILURE;
     }
     let (transaction, payload_root) = match new_transaction(output_root) {
@@ -368,6 +390,18 @@ mod tests {
         let error = super::read_bounded_text(&manifest, 5)
             .expect_err("hash manifest above the bound must fail");
         assert!(error.contains("exceeds"));
+    }
+
+    #[test]
+    fn xsp_space_validation_requires_a_twenty_percent_reserve() {
+        super::validate_update_space(100, 120)
+            .expect("capacity including reserve must be accepted");
+        let error = super::validate_update_space(100, 119)
+            .expect_err("capacity below the reserve must be rejected");
+        assert_eq!(error.kind(), std::io::ErrorKind::StorageFull);
+        let overflow = super::validate_update_space(u64::MAX, u64::MAX)
+            .expect_err("reserve arithmetic overflow must be rejected");
+        assert_eq!(overflow.kind(), std::io::ErrorKind::InvalidData);
     }
 
     #[tokio::test]
