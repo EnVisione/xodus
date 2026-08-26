@@ -11,7 +11,11 @@ use futures_util::{StreamExt, stream};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use msixvc::streaming;
 use msixvc::xvd::{SegmentFile, XvdFile};
-use rustix::fs::{AtFlags, CWD, Mode, OFlags, ResolveFlags, mkdirat, openat2, renameat, unlinkat};
+#[cfg(not(target_os = "linux"))]
+use rustix::fs::openat;
+use rustix::fs::{AtFlags, CWD, Mode, OFlags, mkdirat, renameat, unlinkat};
+#[cfg(target_os = "linux")]
+use rustix::fs::{ResolveFlags, openat2};
 use rustix::io::Errno;
 use tempfile::{Builder as TempDirBuilder, TempDir};
 use tokio::fs::{File, OpenOptions};
@@ -28,11 +32,17 @@ struct Job {
     content: SegmentFile,
 }
 
+#[cfg(target_os = "linux")]
 const OUTPUT_RESOLVE_FLAGS: ResolveFlags = ResolveFlags::BENEATH
     .union(ResolveFlags::NO_MAGICLINKS)
     .union(ResolveFlags::NO_SYMLINKS);
+#[cfg(not(target_os = "linux"))]
+const OUTPUT_RESOLVE_FLAGS: () = ();
+#[cfg(target_os = "linux")]
 const ROOT_RESOLVE_FLAGS: ResolveFlags =
     ResolveFlags::NO_MAGICLINKS.union(ResolveFlags::NO_SYMLINKS);
+#[cfg(not(target_os = "linux"))]
+const ROOT_RESOLVE_FLAGS: () = ();
 const TRANSACTION_DIRECTORY_PREFIX: &str = ".xodus-streaming-txn-";
 const TRANSACTION_PAYLOAD_DIRECTORY: &str = ".xodus-streaming-payload";
 const TRANSACTION_BACKUP_DIRECTORY: &str = ".xodus-streaming-backup";
@@ -45,9 +55,39 @@ fn invalid_package_path(message: impl Into<String>) -> io::Error {
     io::Error::new(ErrorKind::InvalidData, message.into())
 }
 
+#[cfg(target_os = "linux")]
+fn open_resolved<Fd, P>(
+    directory: Fd,
+    path: P,
+    flags: OFlags,
+    mode: Mode,
+    resolve: ResolveFlags,
+) -> rustix::io::Result<rustix::fd::OwnedFd>
+where
+    Fd: rustix::fd::AsFd,
+    P: rustix::path::Arg,
+{
+    openat2(directory, path, flags, mode, resolve)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn open_resolved<Fd, P>(
+    directory: Fd,
+    path: P,
+    flags: OFlags,
+    mode: Mode,
+    _resolve: (),
+) -> rustix::io::Result<rustix::fd::OwnedFd>
+where
+    Fd: rustix::fd::AsFd,
+    P: rustix::path::Arg,
+{
+    openat(directory, path, flags | OFlags::NOFOLLOW, mode)
+}
+
 fn open_package_root(root: &Path, message: &'static str) -> io::Result<std::fs::File> {
     let directory = std::fs::File::from(
-        openat2(
+        open_resolved(
             CWD,
             root,
             OFlags::RDONLY | OFlags::CLOEXEC,
@@ -154,7 +194,7 @@ pub(crate) fn open_package_output(root: &Path, package_path: &str) -> io::Result
             Err(error) => return Err(error.into()),
         }
         directory = std::fs::File::from(
-            openat2(
+            open_resolved(
                 &directory,
                 *component,
                 OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
@@ -169,7 +209,7 @@ pub(crate) fn open_package_output(root: &Path, package_path: &str) -> io::Result
         return Err(invalid_package_path("package path has no filename"));
     };
     Ok(std::fs::File::from(
-        openat2(
+        open_resolved(
             &directory,
             *filename,
             OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC | OFlags::CLOEXEC,
@@ -186,7 +226,7 @@ pub(crate) fn open_package_input(root: &Path, package_path: &str) -> io::Result<
 
     for component in &components[..components.len() - 1] {
         directory = std::fs::File::from(
-            openat2(
+            open_resolved(
                 &directory,
                 *component,
                 OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
@@ -201,7 +241,7 @@ pub(crate) fn open_package_input(root: &Path, package_path: &str) -> io::Result<
         return Err(invalid_package_path("package path has no filename"));
     };
     Ok(std::fs::File::from(
-        openat2(
+        open_resolved(
             &directory,
             *filename,
             OFlags::RDONLY | OFlags::CLOEXEC,
@@ -240,7 +280,7 @@ fn open_package_parent(
             }
         }
         directory = std::fs::File::from(
-            openat2(
+            open_resolved(
                 &directory,
                 component,
                 OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
@@ -487,7 +527,8 @@ fn open_transaction_file(root: &Path, name: &str, writable: bool) -> io::Result<
         Mode::empty()
     };
     Ok(std::fs::File::from(
-        openat2(&directory, name, flags, mode, OUTPUT_RESOLVE_FLAGS).map_err(io::Error::from)?,
+        open_resolved(&directory, name, flags, mode, OUTPUT_RESOLVE_FLAGS)
+            .map_err(io::Error::from)?,
     ))
 }
 
@@ -528,7 +569,7 @@ fn package_entry_is_regular(root: &Path, relative: &Path) -> io::Result<bool> {
         Err(error) => return Err(error),
     };
     let name = package_entry_name(relative)?;
-    let file = match openat2(
+    let file = match open_resolved(
         &parent,
         name,
         OFlags::RDONLY | OFlags::CLOEXEC,
@@ -906,7 +947,7 @@ pub(crate) fn recover_transactions(output_root: &Path) -> io::Result<()> {
 pub(crate) fn acquire_transaction_lock(output_root: &Path) -> io::Result<std::fs::File> {
     let root = open_package_root(output_root, "transaction root is not a directory")?;
     let lock = std::fs::File::from(
-        openat2(
+        open_resolved(
             &root,
             TRANSACTION_LOCK_FILE,
             OFlags::RDWR | OFlags::CREATE | OFlags::CLOEXEC,
