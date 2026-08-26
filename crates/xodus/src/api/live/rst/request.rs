@@ -73,6 +73,19 @@ fn append_response_chunk(
     Ok(())
 }
 
+fn collect_nonces(
+    tokens: &[soap::DerivedKeyToken],
+) -> Result<HashMap<String, String>, super::RSTError> {
+    let mut nonces = HashMap::new();
+    nonces
+        .try_reserve(tokens.len())
+        .map_err(|_| super::RSTError::DerivedKeyTokenAllocationFailed)?;
+    for token in tokens {
+        nonces.insert(token.id.clone(), token.nonce.clone());
+    }
+    Ok(nonces)
+}
+
 fn verify_and_decrypt_envelope<'a>(
     signature: Option<super::RSTSignature<'a>>,
     xml_text: String,
@@ -83,13 +96,7 @@ fn verify_and_decrypt_envelope<'a>(
         return Ok(envelope);
     };
     log::trace!("Decrypting soap::Envelope");
-    let nonces: HashMap<String, String> = envelope
-        .header
-        .security
-        .derived_key_tokens
-        .iter()
-        .map(|token| (token.id.clone(), token.nonce.clone()))
-        .collect();
+    let nonces = collect_nonces(&envelope.header.security.derived_key_tokens)?;
 
     if let Some(security_signature) = &envelope.header.security.signature
         && let Some(key_info) = &security_signature.key_info
@@ -132,7 +139,8 @@ fn verify_and_decrypt_envelope<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::{append_response_chunk, referenced_token_id};
+    use super::{append_response_chunk, collect_nonces, referenced_token_id};
+    use crate::models::soap;
 
     #[test]
     fn referenced_token_id_requires_nonempty_fragment_uri() {
@@ -146,5 +154,13 @@ mod tests {
     fn response_body_limit_rejects_oversized_chunks() {
         let mut body = Vec::new();
         append_response_chunk(&mut body, b"12345", 4).expect_err("response must be bounded");
+    }
+
+    #[test]
+    fn nonce_index_uses_the_derived_token_ids() {
+        let tokens = vec![soap::DerivedKeyToken::sign_key("nonce".to_owned())];
+        let nonces = collect_nonces(&tokens).expect("nonce index allocation must succeed");
+
+        assert_eq!(nonces.get("SignKey"), Some(&"nonce".to_owned()));
     }
 }

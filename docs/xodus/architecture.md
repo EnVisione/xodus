@@ -55,7 +55,7 @@ Device and user token exchange now validates the stored binary secret before con
 
 Device credential provisioning now propagates request serialization, HTTP status, transport, response-body allocation, response-body, and XML deserialization failures. Its bounded response reader reserves each chunk fallibly before appending. Provisioning stops without persisting a partial device record, and callers receive a failure instead of continuing with missing or corrupted credential state.
 
-Live RST responses enforce their declared body limit before XML parsing and reserve each streamed chunk fallibly. Allocation failure is reported as a typed response error, while oversized content remains a distinct limit failure.
+Live RST responses enforce their declared body limit before XML parsing and reserve each streamed chunk fallibly. The derived key token index also reserves its response sized map fallibly before signature verification or SOAP decryption. Allocation failure is reported as a typed response error, while oversized content remains a distinct limit failure.
 
 The BCrypt RSA private-key parser now validates magic, component extents, prime factors, modular inversion, and RSA construction through typed errors. Malformed persisted key blocks are rejected before slicing or signing, and device reauthentication returns the failure so the CLI and service cannot report or continue a false-success startup.
 
