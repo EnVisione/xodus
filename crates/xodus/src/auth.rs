@@ -273,7 +273,7 @@ async fn test_minecraft_win_auth() {
 
     let (_, resp, _) = do_sisu(&client, &tokens, "0000000040159362", 896928775)
         .await
-        .expect("ok");
+        .unwrap_or_else(|error| panic!("minecraft auth failed: {error}"));
 
     assert!(
         !resp.title_token.token.is_empty(),
