@@ -15,6 +15,8 @@ pub enum DisplayCatalogApiError {
     InvalidInput(&'static str),
     #[error("display catalog response body is {size} bytes, exceeding the limit {limit}")]
     ResponseBodyTooLarge { size: usize, limit: usize },
+    #[error("display catalog response body allocation failed at {size} bytes, limit {limit}")]
+    ResponseBodyAllocationFailed { size: usize, limit: usize },
     #[error("display catalog response is not valid json: {0}")]
     Json(#[from] serde_json::Error),
 }
@@ -132,6 +134,12 @@ fn append_json_response_chunk(
             limit: MAX_DISPLAY_CATALOG_JSON_RESPONSE_BYTES,
         });
     }
+    body.try_reserve(chunk.len()).map_err(|_| {
+        DisplayCatalogApiError::ResponseBodyAllocationFailed {
+            size: next_size,
+            limit: MAX_DISPLAY_CATALOG_JSON_RESPONSE_BYTES,
+        }
+    })?;
     body.extend_from_slice(chunk);
     Ok(())
 }

@@ -29,6 +29,8 @@ pub enum LicenseContentError {
 
     #[error("license response body is {size} bytes, exceeding the limit {limit}")]
     ResponseBodyTooLarge { size: usize, limit: usize },
+    #[error("license response body allocation failed at {size} bytes, limit {limit}")]
+    ResponseBodyAllocationFailed { size: usize, limit: usize },
 
     #[error("license response is not valid json: {0}")]
     InvalidJson(#[from] serde_json::Error),
@@ -90,6 +92,12 @@ fn append_license_response_chunk(
             limit: MAX_LICENSE_RESPONSE_BYTES,
         });
     }
+    body.try_reserve(chunk.len()).map_err(|_| {
+        LicenseContentError::ResponseBodyAllocationFailed {
+            size: next_size,
+            limit: MAX_LICENSE_RESPONSE_BYTES,
+        }
+    })?;
     body.extend_from_slice(chunk);
     Ok(())
 }

@@ -23,6 +23,8 @@ pub enum DeviceCredentialError {
     Deserialization(#[from] quick_xml::DeError),
     #[error("device credential response body is {size} bytes, exceeding the limit {limit}")]
     ResponseBodyTooLarge { size: usize, limit: usize },
+    #[error("device credential response body allocation failed at {size} bytes, limit {limit}")]
+    ResponseBodyAllocationFailed { size: usize, limit: usize },
     #[error("device credential response body is not valid utf 8: {0}")]
     InvalidUtf8(#[from] std::string::FromUtf8Error),
 }
@@ -65,6 +67,12 @@ fn append_response_chunk(body: &mut Vec<u8>, chunk: &[u8]) -> Result<(), DeviceC
             limit: MAX_DEVICE_CREDENTIAL_RESPONSE_BYTES,
         });
     }
+    body.try_reserve(chunk.len()).map_err(|_| {
+        DeviceCredentialError::ResponseBodyAllocationFailed {
+            size: next_size,
+            limit: MAX_DEVICE_CREDENTIAL_RESPONSE_BYTES,
+        }
+    })?;
     body.extend_from_slice(chunk);
     Ok(())
 }

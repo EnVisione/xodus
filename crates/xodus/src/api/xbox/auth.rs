@@ -11,6 +11,8 @@ pub enum XboxApiError {
     Request(#[from] reqwest::Error),
     #[error("xbox response body is {size} bytes, exceeding the limit {limit}")]
     ResponseBodyTooLarge { size: usize, limit: usize },
+    #[error("xbox response body allocation failed at {size} bytes, limit {limit}")]
+    ResponseBodyAllocationFailed { size: usize, limit: usize },
     #[error("xbox response is not valid json: {0}")]
     Json(#[from] serde_json::Error),
 }
@@ -62,6 +64,11 @@ fn append_json_response_chunk(body: &mut Vec<u8>, chunk: &[u8]) -> Result<(), Xb
             limit: MAX_XBOX_JSON_RESPONSE_BYTES,
         });
     }
+    body.try_reserve(chunk.len())
+        .map_err(|_| XboxApiError::ResponseBodyAllocationFailed {
+            size: next_size,
+            limit: MAX_XBOX_JSON_RESPONSE_BYTES,
+        })?;
     body.extend_from_slice(chunk);
     Ok(())
 }

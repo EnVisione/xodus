@@ -67,6 +67,8 @@ fn append_response_chunk(
     if body.len() > limit || chunk.len() > limit.saturating_sub(body.len()) {
         return Err(super::RSTError::ResponseBodyTooLarge { limit });
     }
+    body.try_reserve(chunk.len())
+        .map_err(|_| super::RSTError::ResponseBodyAllocationFailed { limit })?;
     body.extend_from_slice(chunk);
     Ok(())
 }

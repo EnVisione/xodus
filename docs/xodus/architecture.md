@@ -43,7 +43,7 @@ The shared binary parser now builds nested generic-array chunk references throug
 
 CLEP challenge reshaping is isolated to `clep_obfuscate` and `clep_deobfuscate`. The packed `ClepV2` and `ClepV4` layouts are each exactly 2,048 bytes with byte alignment, matching the fixed byte-array buffer. Runtime block traversal uses checked `as_chunks_mut` slices rather than a mutable layout transmute. Explicit size and alignment assertions plus the obfuscation round-trip test protect that invariant.
 
-Xbox package authentication now propagates token, exchange, HTTP status, JSON schema, unsupported-response, empty-collection, and missing-user-claim failures as explicit errors. Auth header construction also rejects empty XSTS tokens and user hashes. The shared JSON request path rejects non-success status before decoding and returns decode failures for incomplete responses. It no longer panics on a malformed or incomplete service response before package metadata access, and regression tests cover HTTP status, schema, and empty-claim failure handling.
+Xbox package authentication now propagates token, exchange, HTTP status, JSON schema, unsupported-response, empty-collection, response-body allocation, and missing-user-claim failures as explicit errors. Auth header construction also rejects empty XSTS tokens and user hashes. The shared JSON request path rejects non-success status before decoding, reserves each bounded response chunk fallibly, and returns decode failures for incomplete responses. It no longer panics on a malformed or incomplete service response before package metadata access, and regression tests cover HTTP status, schema, and empty-claim failure handling.
 
 Catalog subproduct discovery parses entitlement keys without allocating a temporary split vector. It accepts only the existing three-part `big` shape and reserves each collected subproduct fallibly, so a bounded but memory-constrained catalog response returns an error instead of aborting while preserving the existing redirect-cycle and depth limits.
 
@@ -51,7 +51,9 @@ SOAP passport token conversion now returns typed failures for missing encrypted 
 
 Device and user token exchange now validates the stored binary secret before constructing the fixed-size signing state. Missing, undecodable, and non-4096-byte secrets return typed RST failures before signing or network activity. The service path also reports missing device state and unsupported or empty exchange responses instead of panicking or using a placeholder.
 
-Device credential provisioning now propagates request serialization, HTTP status, transport, response-body, and XML deserialization failures. Provisioning stops without persisting a partial device record, and callers receive a failure instead of continuing with missing or corrupted credential state.
+Device credential provisioning now propagates request serialization, HTTP status, transport, response-body allocation, response-body, and XML deserialization failures. Its bounded response reader reserves each chunk fallibly before appending. Provisioning stops without persisting a partial device record, and callers receive a failure instead of continuing with missing or corrupted credential state.
+
+Live RST responses enforce their declared body limit before XML parsing and reserve each streamed chunk fallibly. Allocation failure is reported as a typed response error, while oversized content remains a distinct limit failure.
 
 The BCrypt RSA private-key parser now validates magic, component extents, prime factors, modular inversion, and RSA construction through typed errors. Malformed persisted key blocks are rejected before slicing or signing, and device reauthentication returns the failure so the CLI and service cannot report or continue a false-success startup.
 
@@ -77,7 +79,7 @@ TokenManager lifecycle regressions now cover scoped device and user token persis
 
 License acquisition and CIK export now propagate token, exchange, entitlement, SPLicense, key derivation, directory, file, and flush failures with nonzero command results. CIK paths are joined beneath the requested export directory and existing files are truncated before replacement.
 
-Content license responses now require a successful HTTP status, a nonempty key list, valid base64, valid UTF-8, and valid license XML. Malformed or incomplete service data returns typed `LicenseContentError` variants instead of indexing or decoding through unchecked operations.
+Content license responses now require a successful HTTP status, a nonempty key list, valid base64, valid UTF-8, and valid license XML. The bounded response reader reserves each chunk fallibly before appending. Malformed or incomplete service data returns typed `LicenseContentError` variants instead of indexing or decoding through unchecked operations.
 
 The MSIXVC2 install path has a synthetic update regression that installs the base fixture, promotes the update fixture into the same destination, removes the stale base package entry, and preserves the required package metadata without credentials or network access. A combined CLI regression now runs that package replacement before a valid XSP update and a failed XSP replacement, proving both package state preservation and transaction cleanup across the two local format paths. Direct package download retry coverage now also proves that a short transfer leaves an existing verified package in place and removes the failed staging transaction before a later complete response is promoted. These tests prove local transactional replacement and failed-download preservation only; they do not claim a real package update or target lifecycle.
 
