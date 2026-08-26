@@ -158,8 +158,25 @@ pub fn login_request(
     Ok(WebviewRequest::new("Xodus login", url.to_string(), headers))
 }
 
-pub fn finalize_request(url: String) -> WebviewRequest {
-    WebviewRequest::new("Xodus login", url, HeaderMap::new())
+pub fn finalize_request(url: String) -> Result<WebviewRequest, Box<dyn std::error::Error>> {
+    let parsed = reqwest::Url::parse(&url)?;
+    if parsed.scheme() != "https"
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "inline authentication URL must use HTTPS without credentials",
+        )
+        .into());
+    }
+
+    Ok(WebviewRequest::new(
+        "Xodus login",
+        parsed.to_string(),
+        HeaderMap::new(),
+    ))
 }
 
 pub fn run_sessions<T>(handler: T) -> HandlerResult<Option<T::Output>>
@@ -434,7 +451,7 @@ fn remove_session<T: SessionHandler>(state: &mut RuntimeState<T>, session_id: Se
 
 #[cfg(test)]
 mod tests {
-    use super::login_request;
+    use super::{finalize_request, login_request};
 
     #[cfg(target_os = "linux")]
     use super::should_disable_dmabuf_renderer;
@@ -453,6 +470,38 @@ mod tests {
         assert_eq!(query.get("mkt").map(String::as_str), Some("en-US&x"));
         assert_eq!(query.get("clientid").map(String::as_str), Some("client&id"));
         assert_eq!(query.get("hosted").map(String::as_str), Some("1"));
+    }
+
+    #[test]
+    fn finalize_request_rejects_insecure_or_credentialed_urls() {
+        for url in [
+            "http://login.live.com/ppsecure/InlineConnect.srf",
+            "https://user:password@login.live.com/ppsecure/InlineConnect.srf",
+        ] {
+            let error = match finalize_request(url.to_string()) {
+                Ok(_) => panic!("inline authentication URL must fail closed"),
+                Err(error) => error,
+            };
+            assert_eq!(
+                error
+                    .downcast_ref::<std::io::Error>()
+                    .map(|error| error.kind()),
+                Some(std::io::ErrorKind::InvalidData)
+            );
+        }
+        assert!(finalize_request("/relative/path".to_string()).is_err());
+    }
+
+    #[test]
+    fn finalize_request_preserves_secure_url() {
+        let request = finalize_request(
+            "https://login.live.com/ppsecure/InlineConnect.srf?mkt=en-US".to_string(),
+        )
+        .expect("secure inline authentication URL must remain supported");
+        assert_eq!(
+            request.url,
+            "https://login.live.com/ppsecure/InlineConnect.srf?mkt=en-US"
+        );
     }
 
     #[cfg(target_os = "linux")]

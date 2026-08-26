@@ -173,7 +173,7 @@ impl webview::SessionHandler for LoginHandler {
                 {
                     runtime.close_session(session_id);
                     self.finish = true;
-                    runtime.open_session(webview::finalize_request(auth_url));
+                    runtime.open_session(webview::finalize_request(auth_url)?);
                     return Ok(webview::HandlerControl::Continue);
                 }
 
