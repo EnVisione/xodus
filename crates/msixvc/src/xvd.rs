@@ -2319,6 +2319,13 @@ impl XvdFile {
     }
 
     pub async fn parse_file(path: String) -> Result<Self, XvdFileParseError> {
+        let metadata = tokio::fs::metadata(&path).await?;
+        if !metadata.is_file() {
+            return Err(XvdFileParseError::Io(Error::new(
+                ErrorKind::InvalidInput,
+                "XVD input is not a regular file",
+            )));
+        }
         let mut file = OpenOptions::new().read(true).open(path.clone()).await?;
         Self::parse(&mut file).await
     }
@@ -3997,6 +4004,21 @@ mod tests {
         assert!(matches!(
             error,
             XvdFileParseError::Io(error) if error.kind() == ErrorKind::Other
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn parse_file_rejects_non_regular_inputs_before_opening() {
+        let result = XvdFile::parse_file("/dev/null".to_owned()).await;
+        let error = match result {
+            Ok(_) => panic!("a device input must not parse as an XVD"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            XvdFileParseError::Io(error) if error.kind() == ErrorKind::InvalidInput
         ));
     }
 
