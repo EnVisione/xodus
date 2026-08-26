@@ -35,6 +35,8 @@ Public packagespc examples document legacy Xbox package roots using HTTP, which 
 
 On August 26, 2026, the same bounded routing checks were repeated with direct connections using `curl --noproxy '*'`. `assets1.xboxlive.com`, `d1.xboxlive.com`, and `d2.xboxlive.com` presented a certificate for `fallback.tls.fastly.net`, while `assets2.xboxlive.com` returned a TLS internal error. The direct results match the proxied checks, so the failure is not attributable only to the workstation proxy. `dlassets-ssl.xboxlive.com` presented a Microsoft wildcard certificate but returned `404 Not Found` for the routing probe, and no package-path equivalence has been established. No package bytes, credentials, signed URLs, or protected content were requested or retained.
 
+A bounded direct `curl --noproxy '*'` check of `xvcf1.xboxlive.com`, `xvcf2.xboxlive.com`, `dlassets.xboxlive.com`, and `dlassets2.xboxlive.com` also completed TLS negotiation but failed certificate hostname validation with curl error 60. These alternate aliases do not provide a safe package route, and Xodus continues to reject the legacy roots rather than weakening HTTPS validation.
+
 ### Versioned Package Retrieval Boundary
 
 The download command now accepts `--version-id` and uses the packages service `GetSpecificBasePackage/{content_id}/{version_id}` route to retrieve an exact previously recorded package revision. URL path segments are constructed through the URL API, so empty or control-bearing identifiers fail before authentication or network activity. This is the repository-owned acquisition path needed for a later source-to-target update exercise when an installed package manifest supplies its Microsoft `VersionId`.
