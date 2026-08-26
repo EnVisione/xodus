@@ -53,6 +53,12 @@ On August 26, 2026, the public `xodus-gaming/xgameruntime` repository was also c
 
 The xgameruntime source check therefore leaves EXT-003 and EXT-004 unavailable. No source checkout, build, installation, account state, package content, or protected executable was accessed during this check.
 
+### Fresh MCBE GDK Engine Release Metadata
+
+On August 26, 2026, the public `veedy-dev/mcbe-gdk-engine` repository was checked as another compatibility candidate. Its `v0.1.9` release points to commit `6c974bb9d81523bfb59780ef9b2c9fa772c10184`, is published as `GDK-Proton-mcbe-gdk-v0.1.9.tar.gz`, and reports the GitHub SHA-256 digest `e88e4ce2d2619ddef93c6596796989b78e36a0091bf26e5ec169e3246ae0354f`. A detached `.sha256` sidecar is also published. The repository reports `NOASSERTION` for its license. Its README identifies the project as compatibility-engine source and releases and states that Microsoft services and `XUser` are not implemented in the base engine.
+
+This release is therefore metadata evidence only. It has no recorded SHA-512 provenance or verified Xodus target compatibility, and it was not downloaded, installed, built, or used for a protected executable or target launch. EXT-003 and EXT-004 remain unavailable.
+
 No HDMI connector was exposed by the current Hyprland monitor state. HDMI resolution and refresh verification therefore remains pending until the connector is present.
 
 No account, keychain, browser storage, package content, or protected executable was accessed during this check.
