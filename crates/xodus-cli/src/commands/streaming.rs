@@ -1036,7 +1036,6 @@ fn recover_transaction_dir(transaction_root: &Path, output_root: &Path) -> io::R
 }
 
 pub(crate) fn recover_transactions(output_root: &Path) -> io::Result<()> {
-    let mut transactions = Vec::new();
     for entry in std::fs::read_dir(output_root)? {
         let entry = entry?;
         let path = entry.path();
@@ -1044,11 +1043,8 @@ pub(crate) fn recover_transactions(output_root: &Path) -> io::Result<()> {
             continue;
         };
         if name.starts_with(TRANSACTION_DIRECTORY_PREFIX) && entry.file_type()?.is_dir() {
-            transactions.push(path);
+            recover_transaction_dir(&path, output_root)?;
         }
-    }
-    for transaction in transactions {
-        recover_transaction_dir(&transaction, output_root)?;
     }
     Ok(())
 }
