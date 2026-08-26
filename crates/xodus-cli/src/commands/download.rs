@@ -163,6 +163,15 @@ fn validate_file_hash(expected: Option<[u8; 32]>, actual: [u8; 32]) -> io::Resul
     Ok(())
 }
 
+fn checked_package_file_size(file_name: &str, file_size: i64) -> io::Result<u64> {
+    u64::try_from(file_size).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("package file {file_name} has an invalid size"),
+        )
+    })
+}
+
 struct DownloadAttemptRequest<'a> {
     client: &'a reqwest::Client,
     url: &'a str,
@@ -334,6 +343,13 @@ pub async fn run(
     };
     println!();
     for file in files {
+        let file_size = match checked_package_file_size(&file.file_name, file.file_size) {
+            Ok(file_size) => file_size,
+            Err(error) => {
+                eprintln!("{error}");
+                return ExitCode::FAILURE;
+            }
+        };
         let urls = match package_download_urls(
             &file.cdn_root_paths,
             &file.background_cdn_root_paths,
@@ -355,10 +371,6 @@ pub async fn run(
             continue;
         }
 
-        let Ok(file_size) = u64::try_from(file.file_size) else {
-            eprintln!("package file {} has an invalid size", file.file_name);
-            return ExitCode::FAILURE;
-        };
         let expected_hash = match decode_file_hash(&file.file_hash) {
             Ok(hash) => hash,
             Err(error) => {
@@ -446,9 +458,10 @@ mod tests {
 
     use super::{
         DOWNLOAD_RETRY_LIMIT, DownloadAttemptRequest, MAX_FILE_HASH_BASE64_CHARS,
-        checked_download_total, consume_download_retry, decode_file_hash, download_file_attempt,
-        download_file_attempt_with_hook, is_retryable_package_download_status,
-        validate_declared_download_length, validate_download_space, validate_file_hash,
+        checked_download_total, checked_package_file_size, consume_download_retry,
+        decode_file_hash, download_file_attempt, download_file_attempt_with_hook,
+        is_retryable_package_download_status, validate_declared_download_length,
+        validate_download_space, validate_file_hash,
     };
     use crate::commands::streaming::recover_transactions;
     use crate::package::package_download_urls;
@@ -458,6 +471,15 @@ mod tests {
         let error = package_download_urls(&[], &[], "/file.xvd")
             .expect_err("a package without a CDN root must fail before HTTP");
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn package_file_size_rejects_negative_before_url_construction() {
+        let error = checked_package_file_size("package.msixvc", -1)
+            .expect_err("negative package size must fail before URL construction");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("package.msixvc"));
+        assert_eq!(checked_package_file_size("package.msixvc", 42).unwrap(), 42);
     }
 
     #[test]
