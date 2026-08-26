@@ -18,7 +18,7 @@ use rustix::fs::{AtFlags, CWD, Mode, OFlags, mkdirat, renameat, unlinkat};
 use rustix::fs::{ResolveFlags, openat2};
 use rustix::io::Errno;
 use tempfile::{Builder as TempDirBuilder, TempDir};
-use tokio::fs::{File, OpenOptions};
+use tokio::fs::File;
 use tokio::io::AsyncRead;
 use tokio::sync::mpsc::{Receiver, Sender};
 use uuid::Uuid;
@@ -1370,8 +1370,6 @@ where
     };
     let transaction_root = transaction.path().to_path_buf();
     let cache_path = transaction_payload.join(".xodus-streaming-tmp.msixvc");
-    let final_path = out.join(".xodus-streaming.msixvc");
-
     let mut remote_file = match streaming::PrefixCacheFile::new(reader, l, cache_path.clone()).await
     {
         Ok(file) => file,
@@ -1429,11 +1427,14 @@ where
         rfiles.extend(sfiles);
     }
 
-    let file = OpenOptions::new()
-        .read(true)
-        .open(final_path.to_owned())
-        .await
-        .ok();
+    let file = match open_package_input(out, ".xodus-streaming.msixvc") {
+        Ok(file) => Some(File::from_std(file)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => {
+            eprintln!("ignoring invalid local package cache: {error}");
+            None
+        }
+    };
 
     if let Some(mut file) = file {
         match XvdFile::parse(&mut file).await {
