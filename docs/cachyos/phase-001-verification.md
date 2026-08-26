@@ -14,7 +14,7 @@
 
 ## Current Baseline Refresh
 
-On August 25, 2026, `baseline.json` was refreshed at signed checkpoint `c0d85aa2f4c6f1285eb0ccba66eb14bf24618142` after the verified HTTP and cache cursor overflow coverage. The refresh binds the current branch, fork and upstream heads, Cargo lock and metadata digests, package database digest, and observed CachyOS graphics state. The original Phase 001 record above remains historical evidence for the merged baseline and is not changed into a Phase 2 completion claim.
+On August 25, 2026, `baseline.json` was refreshed at signed checkpoint `70ffb4458053903966c528cf02e946d712f5de9e`, binding source revision `00ec5a719959d352d5002153fe00bb9c6900d7ff` after the verified parser fuzz and MSIXVC2 capacity coverage. The refresh binds the current branch, fork and upstream heads, Cargo lock and metadata digests, package database digest, and observed CachyOS graphics state. The original Phase 001 record above remains historical evidence for the merged baseline and is not changed into a Phase 2 completion claim.
 
 ## Commands and Results
 
