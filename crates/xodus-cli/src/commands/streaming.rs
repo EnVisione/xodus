@@ -11,7 +11,7 @@ use futures_util::{StreamExt, stream};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use msixvc::streaming;
 use msixvc::xvd::{SegmentFile, XvdFile};
-use rustix::fs::{AtFlags, Mode, OFlags, ResolveFlags, mkdirat, openat2, renameat, unlinkat};
+use rustix::fs::{AtFlags, CWD, Mode, OFlags, ResolveFlags, mkdirat, openat2, renameat, unlinkat};
 use rustix::io::Errno;
 use tempfile::{Builder as TempDirBuilder, TempDir};
 use tokio::fs::{File, OpenOptions};
@@ -31,6 +31,8 @@ struct Job {
 const OUTPUT_RESOLVE_FLAGS: ResolveFlags = ResolveFlags::BENEATH
     .union(ResolveFlags::NO_MAGICLINKS)
     .union(ResolveFlags::NO_SYMLINKS);
+const ROOT_RESOLVE_FLAGS: ResolveFlags =
+    ResolveFlags::NO_MAGICLINKS.union(ResolveFlags::NO_SYMLINKS);
 const TRANSACTION_DIRECTORY_PREFIX: &str = ".xodus-streaming-txn-";
 const TRANSACTION_PAYLOAD_DIRECTORY: &str = ".xodus-streaming-payload";
 const TRANSACTION_BACKUP_DIRECTORY: &str = ".xodus-streaming-backup";
@@ -41,6 +43,23 @@ const MAX_TRANSACTION_JOURNAL_BYTES: usize = 64 * 1024 * 1024;
 
 fn invalid_package_path(message: impl Into<String>) -> io::Error {
     io::Error::new(ErrorKind::InvalidData, message.into())
+}
+
+fn open_package_root(root: &Path, message: &'static str) -> io::Result<std::fs::File> {
+    let directory = std::fs::File::from(
+        openat2(
+            CWD,
+            root,
+            OFlags::RDONLY | OFlags::CLOEXEC,
+            Mode::empty(),
+            ROOT_RESOLVE_FLAGS,
+        )
+        .map_err(io::Error::from)?,
+    );
+    if !directory.metadata()?.is_dir() {
+        return Err(io::Error::new(ErrorKind::InvalidInput, message));
+    }
+    Ok(directory)
 }
 
 fn package_path_components(path: &str) -> io::Result<Vec<&str>> {
@@ -127,13 +146,7 @@ fn is_windows_reserved_name(component: &str) -> bool {
 
 pub(crate) fn open_package_output(root: &Path, package_path: &str) -> io::Result<std::fs::File> {
     let components = package_path_components(package_path)?;
-    let mut directory = std::fs::File::open(root)?;
-    if !directory.metadata()?.is_dir() {
-        return Err(io::Error::new(
-            ErrorKind::InvalidInput,
-            "transaction root is not a directory",
-        ));
-    }
+    let mut directory = open_package_root(root, "transaction root is not a directory")?;
 
     for component in &components[..components.len() - 1] {
         match mkdirat(&directory, *component, Mode::RWXU) {
@@ -169,13 +182,7 @@ pub(crate) fn open_package_output(root: &Path, package_path: &str) -> io::Result
 
 pub(crate) fn open_package_input(root: &Path, package_path: &str) -> io::Result<std::fs::File> {
     let components = package_path_components(package_path)?;
-    let mut directory = std::fs::File::open(root)?;
-    if !directory.metadata()?.is_dir() {
-        return Err(io::Error::new(
-            ErrorKind::InvalidInput,
-            "package root is not a directory",
-        ));
-    }
+    let mut directory = open_package_root(root, "package root is not a directory")?;
 
     for component in &components[..components.len() - 1] {
         directory = std::fs::File::from(
@@ -218,13 +225,7 @@ fn open_package_parent(
     package_path: &Path,
     create_parent: bool,
 ) -> io::Result<std::fs::File> {
-    let mut directory = std::fs::File::open(root)?;
-    if !directory.metadata()?.is_dir() {
-        return Err(io::Error::new(
-            ErrorKind::InvalidInput,
-            "package root is not a directory",
-        ));
-    }
+    let mut directory = open_package_root(root, "package root is not a directory")?;
 
     for component in package_path.parent().into_iter().flat_map(Path::components) {
         let std::path::Component::Normal(component) = component else {
@@ -474,12 +475,7 @@ fn read_transaction_journal(root: &Path) -> io::Result<Option<Vec<PromotionEntry
 }
 
 fn open_transaction_file(root: &Path, name: &str, writable: bool) -> io::Result<std::fs::File> {
-    let directory = std::fs::File::open(root)?;
-    if !directory.metadata()?.is_dir() {
-        return Err(invalid_package_path(
-            "transaction journal root is not a directory",
-        ));
-    }
+    let directory = open_package_root(root, "transaction journal root is not a directory")?;
     let flags = if writable {
         OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC | OFlags::CLOEXEC
     } else {
@@ -903,13 +899,7 @@ pub(crate) fn recover_transactions(output_root: &Path) -> io::Result<()> {
 }
 
 pub(crate) fn acquire_transaction_lock(output_root: &Path) -> io::Result<std::fs::File> {
-    let root = std::fs::File::open(output_root)?;
-    if !root.metadata()?.is_dir() {
-        return Err(io::Error::new(
-            ErrorKind::InvalidInput,
-            "transaction root is not a directory",
-        ));
-    }
+    let root = open_package_root(output_root, "transaction root is not a directory")?;
     let lock = std::fs::File::from(
         openat2(
             &root,
@@ -1638,10 +1628,10 @@ mod tests {
 
     use super::{
         PromotionState, SegmentFile, TRANSACTION_DIRECTORY_PREFIX, TRANSACTION_JOURNAL,
-        TRANSACTION_JOURNAL_TEMP, acquire_transaction_lock, changed_jobs, checked_progress_length,
-        new_transaction, open_package_input, open_package_output, package_path_components,
-        promote_transaction, promote_transaction_with_interruption, promotion_entries,
-        promotion_entries_with_removals, promotion_entry_capacity,
+        TRANSACTION_JOURNAL_TEMP, TRANSACTION_LOCK_FILE, acquire_transaction_lock, changed_jobs,
+        checked_progress_length, new_transaction, open_package_input, open_package_output,
+        package_path_components, promote_transaction, promote_transaction_with_interruption,
+        promotion_entries, promotion_entries_with_removals, promotion_entry_capacity,
         read_bounded_transaction_journal, read_transaction_journal, recover_transaction_dir,
         recover_transactions, rollback_transaction, write_transaction_journal,
     };
@@ -1826,6 +1816,24 @@ mod tests {
         assert!(open_package_output(&root, r"escape\payload.bin").is_err());
         assert!(open_package_input(&root, r"escape\payload.bin").is_err());
         assert!(!outside.join("payload.bin").exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn package_root_refuses_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("transaction");
+        let outside = temporary.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        symlink(&outside, &root).unwrap();
+
+        assert!(open_package_output(&root, "payload.bin").is_err());
+        assert!(open_package_input(&root, "payload.bin").is_err());
+        assert!(acquire_transaction_lock(&root).is_err());
+        assert!(!outside.join("payload.bin").exists());
+        assert!(!outside.join(TRANSACTION_LOCK_FILE).exists());
     }
 
     #[cfg(unix)]
