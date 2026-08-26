@@ -37,6 +37,12 @@ No local `xgameruntime`, `XGameRuntime`, WineGDK, or GDK Proton artifact was fou
 
 An external GDK Proton candidate is now visible upstream. The `release10-32` release is based on GE-Proton10-32 and publishes `GDK-Proton10-32.tar.gz` with the recorded SHA-256 digest `1e80f4e714f877f42101d5775bd38ca0a15a38d304e24af1f15c6deec4ebac2d` and a size of 524743374 bytes. A disposable download matched that digest and its archive manifest contains `xgameruntime.dll` and `xgameruntime.dll.threading`. The extracted `xgameruntime.dll` is a 64 bit Wine PE DLL with SHA-256 `d68dab5b5e8e8252dbcc9d12e43fa4e7c2c85a333721ee504a46716ac55e3b06`; its export table exposes only the component initialization and error entrypoints, and its strings include XUser and repeated `not implemented, returning E_NOINTERFACE` stubs. The upstream README also states that XUser is not implemented. The candidate was not installed or used to launch a target, so it does not satisfy the required account backed Game Runtime or target title lifecycle gates. See the [release](https://github.com/Weather-OS/GDK-Proton/releases/tag/release10-32) and [upstream README](https://github.com/Weather-OS/GDK-Proton) for the source records.
 
+### Fresh WineGDK Source Activity
+
+On August 25, 2026, the current `Weather-OS/WineGDK` metadata was checked again. Its `master` branch contains commit `0645543e5c26f7d12918b82036274d6725d652a0`, dated August 13, 2026, which adds more `xgameruntime` `XUser` implementation and related Xodus service changes. The repository still reports `NOASSERTION` for its license and has no GitHub release or versioned binary artifact. This is useful upstream progress, but it is source activity only and does not provide the pinned EXT-003 or EXT-004 artifact manifest, reproducible build, security review, or protected executable compatibility evidence.
+
+The fresh metadata therefore leaves EXT-003 and EXT-004 unavailable. No source checkout, build, installation, account state, package content, or protected executable was accessed during this check.
+
 No HDMI connector was exposed by the current Hyprland monitor state. HDMI resolution and refresh verification therefore remains pending until the connector is present.
 
 No account, keychain, browser storage, package content, or protected executable was accessed during this check.
