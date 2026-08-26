@@ -72,7 +72,12 @@ fn read_bounded_text(path: &Path, limit: usize) -> Result<String, String> {
         .ok()
         .and_then(|limit| limit.checked_add(1))
         .ok_or_else(|| "hash manifest size limit is invalid".to_owned())?;
+    let read_limit_usize = usize::try_from(read_limit)
+        .map_err(|_| "hash manifest size limit is invalid".to_owned())?;
     let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(read_limit_usize)
+        .map_err(|_| "hash manifest allocation failed".to_owned())?;
     file.take(read_limit)
         .read_to_end(&mut bytes)
         .map_err(|error| format!("could not read hash manifest: {error}"))?;

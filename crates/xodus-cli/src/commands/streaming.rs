@@ -500,7 +500,12 @@ fn read_bounded_transaction_journal<R: Read>(reader: R, max_bytes: usize) -> io:
         .map_err(|_| invalid_package_path("transaction journal size limit is invalid"))?
         .checked_add(1)
         .ok_or_else(|| invalid_package_path("transaction journal size limit overflows"))?;
+    let read_limit_usize = usize::try_from(read_limit)
+        .map_err(|_| invalid_package_path("transaction journal size limit is invalid"))?;
     let mut contents = Vec::new();
+    contents
+        .try_reserve_exact(read_limit_usize)
+        .map_err(|_| invalid_package_path("transaction journal allocation failed"))?;
     reader.take(read_limit).read_to_end(&mut contents)?;
     if contents.len() > max_bytes {
         return Err(invalid_package_path(
