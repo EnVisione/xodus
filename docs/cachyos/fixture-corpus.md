@@ -80,6 +80,8 @@ The August 26, 2026 parser campaign discovered an unchecked FILETIME arithmetic 
 
 The reduced input was replayed through the fuzz target from a disposable corpus entry at signed checkpoint `6381072`. The raw crash artifact and generated corpus were removed after the deterministic regressions and the clean 10,000 execution rerun were verified. No package content, credential, or signed title data is retained.
 
+A post-change campaign at signed checkpoint `2771c2c` reran 10,000 executions over the same 11 synthetic fixtures, reached final coverage 1,649 and feature count 4,625, added 375 non-crash units, and reported no crash artifact or sanitizer failure. Its exact disposable corpus and generated artifacts were removed after completion.
+
 ## Remaining Work
 
 The required EXT-009 entry artifacts now exist: deterministic malformed, truncated, adversarial-path, integrity, synthetic update, rollback, and interrupted-update recovery inputs, with complete provenance and security review. The authoritative plan classifies EXT-009 as available entry evidence only. The XSP subset has bounded repository parser coverage; consumers for the remaining corpus artifacts are XODUS-PHASE-002 implementation and exit evidence. A real authorized package exercise remains mandatory evidence for XODUS-REQ-004 and cannot be replaced by these synthetic fixtures.
