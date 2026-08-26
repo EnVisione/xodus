@@ -6,6 +6,7 @@ use futures_util::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use inquire::MultiSelect;
 use inquire::validator::Validation;
+use reqwest::header::{CONTENT_ENCODING, HeaderMap};
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 use xodus::models::packagespc::PackageFile;
@@ -76,6 +77,25 @@ fn validate_download_response_scheme(
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "https package request redirected to an insecure scheme",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_download_response_encoding(headers: &HeaderMap) -> io::Result<()> {
+    let Some(value) = headers.get(CONTENT_ENCODING) else {
+        return Ok(());
+    };
+    let value = value.to_str().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "package response uses an invalid content encoding",
+        )
+    })?;
+    if !value.trim().eq_ignore_ascii_case("identity") {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "package response uses unsupported content encoding",
         ));
     }
     Ok(())
@@ -217,6 +237,7 @@ where
         .await
         .map_err(request_download_error)?;
     validate_download_response_scheme(url, response.url()).map_err(fatal_download_error)?;
+    validate_download_response_encoding(response.headers()).map_err(fatal_download_error)?;
     let response = response
         .error_for_status()
         .map_err(request_download_error)?;
@@ -438,6 +459,7 @@ pub async fn run(
 mod tests {
     use base64::Engine;
     use indicatif::ProgressBar;
+    use reqwest::header::{CONTENT_ENCODING, HeaderMap, HeaderValue};
     use sha2::{Digest, Sha256};
     use std::io::{Read as _, Write as _};
     use std::net::TcpListener as StdTcpListener;
@@ -448,8 +470,8 @@ mod tests {
         DOWNLOAD_RETRY_LIMIT, DownloadAttemptRequest, checked_download_total,
         checked_package_file_size, consume_download_retry, decode_file_hash, download_file_attempt,
         download_file_attempt_with_hook, is_retryable_package_download_status,
-        validate_declared_download_length, validate_download_response_scheme,
-        validate_download_space, validate_file_hash,
+        validate_declared_download_length, validate_download_response_encoding,
+        validate_download_response_scheme, validate_download_space, validate_file_hash,
     };
     use crate::commands::streaming::recover_transactions;
     use crate::package::{MAX_FILE_HASH_BASE64_CHARS, package_download_urls};
@@ -472,6 +494,28 @@ mod tests {
             error.to_string(),
             "https package request redirected to an insecure scheme"
         );
+    }
+
+    #[test]
+    fn download_response_encoding_rejects_transformed_package_bytes() {
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+        let error = validate_download_response_encoding(&headers)
+            .expect_err("transformed package responses must fail before staging");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("unsupported content encoding"));
+    }
+
+    #[test]
+    fn download_response_encoding_accepts_identity_or_missing_header() {
+        let mut identity = HeaderMap::new();
+        identity.insert(CONTENT_ENCODING, HeaderValue::from_static(" identity "));
+        validate_download_response_encoding(&identity)
+            .expect("identity package responses preserve raw bytes");
+
+        let missing = HeaderMap::new();
+        validate_download_response_encoding(&missing)
+            .expect("missing encoding must preserve raw package bytes");
     }
 
     #[test]
