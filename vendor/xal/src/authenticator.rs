@@ -298,7 +298,10 @@ impl XalAuthenticator {
         for (k, v) in form_urlencoded::parse(fragment.as_bytes()) {
             match k.as_ref() {
                 "expires_in" => {
-                    kv_pairs.insert(k.to_string(), json!(v.parse::<u64>().unwrap()));
+                    let expires_in = v.parse::<u64>().map_err(|_| {
+                        Error::InvalidRedirectUrl("Invalid expires_in value".to_string())
+                    })?;
+                    kv_pairs.insert(k.to_string(), json!(expires_in));
                 }
                 "state" => {
                     state_resp = Some(v.to_string());
@@ -1464,5 +1467,23 @@ mod test {
             live_tokens.scopes().unwrap().first().unwrap().to_string(),
             "service::user.auth.xboxlive.com::MBI_SSL"
         );
+    }
+
+    #[test]
+    fn implicit_grant_rejects_invalid_expiry_without_panicking() {
+        let redirect_url = Url::parse(
+            "https://login.live.com/oauth20_desktop.srf#access_token=token&token_type=bearer&expires_in=invalid",
+        )
+        .expect("test redirect URL must parse");
+
+        let result = std::panic::catch_unwind(|| {
+            XalAuthenticator::parse_implicit_grant_url(&redirect_url, None)
+        })
+        .expect("invalid expires_in must return an error without panicking");
+
+        assert!(matches!(
+            result,
+            Err(Error::InvalidRedirectUrl(message)) if message.contains("expires_in")
+        ));
     }
 }
