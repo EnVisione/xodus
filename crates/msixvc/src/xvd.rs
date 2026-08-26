@@ -910,6 +910,10 @@ pub enum DownloadFileHttpError {
     InvalidResponseContentRange,
     #[error("download HTTP response uses unsupported content encoding")]
     InvalidResponseContentEncoding,
+    #[error("download request URL is invalid")]
+    InvalidRequestUrl,
+    #[error("download HTTPS request redirected to an insecure scheme")]
+    InsecureResponseScheme,
     #[error(
         "download response start {actual_start} does not match requested start {expected_start}"
     )]
@@ -2042,6 +2046,16 @@ fn validate_download_response_encoding(headers: &HeaderMap) -> Result<(), Downlo
     Ok(())
 }
 
+fn validate_download_response_scheme(
+    request_url: &reqwest::Url,
+    response_url: &reqwest::Url,
+) -> Result<(), DownloadFileHttpError> {
+    if request_url.scheme() == "https" && response_url.scheme() != "https" {
+        return Err(DownloadFileHttpError::InsecureResponseScheme);
+    }
+    Ok(())
+}
+
 fn is_retryable_download_error(error: &DownloadFileHttpError) -> bool {
     matches!(
         error,
@@ -2083,10 +2097,12 @@ async fn open_download_response(
     expected_total: Option<u64>,
     stall_timeout: tokio::time::Duration,
 ) -> Result<(reqwest::Response, u64), DownloadFileHttpError> {
+    let request_url =
+        reqwest::Url::parse(url).map_err(|_| DownloadFileHttpError::InvalidRequestUrl)?;
     let response = timeout(
         stall_timeout,
         client
-            .get(url)
+            .get(request_url.clone())
             .header(RANGE, format!("bytes={}-{}", request.start, request.end))
             .send(),
     )
@@ -2099,6 +2115,7 @@ async fn open_download_response(
     })?
     .map_err(|error| DownloadFileHttpError::Io(Error::other(error)))?;
 
+    validate_download_response_scheme(&request_url, response.url())?;
     let content_range = response
         .headers()
         .get(CONTENT_RANGE)
@@ -3232,10 +3249,10 @@ mod tests {
         required_gpt_partition_start, reserve_segment_path, reserve_xvc_region_entries,
         segment_file_name, segment_metadata_reader_capacity, sync_substream_absolute_target,
         validate_download_response_encoding, validate_download_response_extent,
-        validate_package_files_table_cursor, validate_segment_metadata_table_extent,
-        validate_user_data_header_extent, validate_user_data_header_length,
-        validate_xvc_region_hash_entry_addresses, verify_page_hash, write_all_with_retry,
-        xvd_stream_absolute_seek_target,
+        validate_download_response_scheme, validate_package_files_table_cursor,
+        validate_segment_metadata_table_extent, validate_user_data_header_extent,
+        validate_user_data_header_length, validate_xvc_region_hash_entry_addresses,
+        verify_page_hash, write_all_with_retry, xvd_stream_absolute_seek_target,
     };
 
     const XVD_HEADER_SIZE: usize = 4096;
@@ -5531,6 +5548,31 @@ mod tests {
         ));
         validate_download_response_encoding(&HeaderMap::new())
             .expect("missing content encoding must preserve raw package bytes");
+    }
+
+    #[test]
+    fn download_response_scheme_rejects_https_downgrade() {
+        let request_url = reqwest::Url::parse("https://cdn.example/package").unwrap();
+        let response_url = reqwest::Url::parse("http://cdn.example/package").unwrap();
+
+        let error = validate_download_response_scheme(&request_url, &response_url)
+            .expect_err("https package redirects must not downgrade to http");
+
+        assert!(matches!(
+            error,
+            DownloadFileHttpError::InsecureResponseScheme
+        ));
+    }
+
+    #[test]
+    fn download_response_scheme_accepts_secure_and_local_http_sources() {
+        let https = reqwest::Url::parse("https://cdn.example/package").unwrap();
+        validate_download_response_scheme(&https, &https)
+            .expect("an https response must remain secure");
+
+        let http = reqwest::Url::parse("http://127.0.0.1/package").unwrap();
+        validate_download_response_scheme(&http, &http)
+            .expect("local http fixtures must remain available");
     }
 
     #[test]
