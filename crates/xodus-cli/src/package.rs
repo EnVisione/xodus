@@ -739,6 +739,20 @@ mod tests {
     }
 
     #[test]
+    fn package_response_validation_rejects_insecure_cdn_root() {
+        let mut package = package();
+        package.package_files[0].cdn_root_paths = vec!["http://cdn.example/".to_owned()];
+
+        let error = validate_package_details(&package, "content-id", None)
+            .expect_err("insecure package CDN roots must fail before URL selection");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(
+            error.to_string(),
+            "package CDN root rejected, requires HTTPS"
+        );
+    }
+
+    #[test]
     fn content_id_redirects_accept_distinct_products() {
         let mut visited = std::collections::HashSet::new();
 
