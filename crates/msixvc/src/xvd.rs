@@ -8,7 +8,7 @@ use aes::Aes128;
 use aes::cipher::KeyInit;
 use futures_util::StreamExt;
 use msixvc_common::parse::{BinaryParse, BinaryTryParse};
-use reqwest::header::{CONTENT_LENGTH, CONTENT_RANGE, RANGE};
+use reqwest::header::{CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_RANGE, HeaderMap, RANGE};
 use sha2::{Digest, Sha256};
 use tokio::fs::OpenOptions;
 use tokio::io::{
@@ -905,6 +905,8 @@ pub enum DownloadFileHttpError {
     MissingResponseContentRange,
     #[error("download HTTP response has invalid Content-Range")]
     InvalidResponseContentRange,
+    #[error("download HTTP response uses unsupported content encoding")]
+    InvalidResponseContentEncoding,
     #[error(
         "download response start {actual_start} does not match requested start {expected_start}"
     )]
@@ -2024,6 +2026,19 @@ fn validate_download_response_extent(
     Ok(total)
 }
 
+fn validate_download_response_encoding(headers: &HeaderMap) -> Result<(), DownloadFileHttpError> {
+    let Some(value) = headers.get(CONTENT_ENCODING) else {
+        return Ok(());
+    };
+    let value = value
+        .to_str()
+        .map_err(|_| DownloadFileHttpError::InvalidResponseContentEncoding)?;
+    if !value.trim().eq_ignore_ascii_case("identity") {
+        return Err(DownloadFileHttpError::InvalidResponseContentEncoding);
+    }
+    Ok(())
+}
+
 fn is_retryable_download_error(error: &DownloadFileHttpError) -> bool {
     matches!(
         error,
@@ -2085,6 +2100,7 @@ async fn open_download_response(
         .headers()
         .get(CONTENT_RANGE)
         .and_then(|value| value.to_str().ok());
+    validate_download_response_encoding(response.headers())?;
     let total = validate_download_response_extent(
         response.status().as_u16(),
         request.start,
@@ -3186,6 +3202,7 @@ mod tests {
     };
 
     use msixvc_common::parse::BinaryParse;
+    use reqwest::header::{CONTENT_ENCODING, HeaderMap, HeaderValue};
     use sha2::{Digest, Sha256};
     use tokio::{
         io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf},
@@ -3211,10 +3228,11 @@ mod tests {
         ntfs_partition_extents, package_file_name, required_gpt_partition_length,
         required_gpt_partition_start, reserve_segment_path, reserve_xvc_region_entries,
         segment_file_name, segment_metadata_reader_capacity, sync_substream_absolute_target,
-        validate_download_response_extent, validate_package_files_table_cursor,
-        validate_segment_metadata_table_extent, validate_user_data_header_extent,
-        validate_user_data_header_length, validate_xvc_region_hash_entry_addresses,
-        verify_page_hash, write_all_with_retry, xvd_stream_absolute_seek_target,
+        validate_download_response_encoding, validate_download_response_extent,
+        validate_package_files_table_cursor, validate_segment_metadata_table_extent,
+        validate_user_data_header_extent, validate_user_data_header_length,
+        validate_xvc_region_hash_entry_addresses, verify_page_hash, write_all_with_retry,
+        xvd_stream_absolute_seek_target,
     };
 
     const XVD_HEADER_SIZE: usize = 4096;
@@ -5459,6 +5477,21 @@ mod tests {
         assert_eq!(plan.page_length, PAGE_SIZE as u64);
         assert_eq!(plan.initial_request.start, 64);
         assert_eq!(plan.initial_request.end, 64 + PAGE_SIZE as u64 - 1);
+    }
+
+    #[test]
+    fn download_response_encoding_rejects_transformed_package_bytes() {
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+        let error = validate_download_response_encoding(&headers)
+            .expect_err("encoded package responses must fail before promotion");
+
+        assert!(matches!(
+            error,
+            DownloadFileHttpError::InvalidResponseContentEncoding
+        ));
+        validate_download_response_encoding(&HeaderMap::new())
+            .expect("missing content encoding must preserve raw package bytes");
     }
 
     #[test]

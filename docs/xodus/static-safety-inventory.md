@@ -79,3 +79,5 @@ This is a static inventory. It does not prove dynamic behavior, external service
 The prefix cache creates its file exclusively and clones the reader handle from that created file instead of reopening the caller path. This keeps both handles bound to the file that passed exclusive creation even if the directory entry changes afterward.
 
 HTTP package readers reject response content encodings other than identity before accepting lengths, ranges, or payload bytes. This keeps reqwest decompression from changing the byte stream covered by the declared package extent and hash contract. Deterministic tests cover rejection of gzip responses and acceptance of identity or missing encoding.
+
+The ranged XVD downloader applies the same content encoding boundary before validating `Content-Range` or promoting output. Its typed `InvalidResponseContentEncoding` failure and deterministic gzip regression keep direct downloads and streamed reads aligned.
