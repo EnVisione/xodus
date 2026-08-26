@@ -882,6 +882,8 @@ pub enum DownloadFileHttpError {
     DataUnitIndexTooLarge { page_in_section: u64 },
     #[error("download page advancement overflows for page {page_in_section}")]
     PageAdvanceOverflow { page_in_section: u64 },
+    #[error("download write length {write_length} cannot fit in usize")]
+    WriteLengthTooLarge { write_length: u64 },
     #[error("download received chunk length cannot fit in u64: {chunk_length}")]
     ReceivedChunkLengthTooLarge { chunk_length: usize },
     #[error(
@@ -1769,6 +1771,11 @@ fn checked_download_pending_capacity(
             pending_length,
             page_size: PAGE_SIZE,
         })
+}
+
+fn checked_download_write_length(write_length: u64) -> Result<usize, DownloadFileHttpError> {
+    usize::try_from(write_length)
+        .map_err(|_| DownloadFileHttpError::WriteLengthTooLarge { write_length })
 }
 
 fn extract_file_end(file_offset: u64, file_length: u64) -> Result<u64, ExtractFileError> {
@@ -3071,7 +3078,9 @@ impl XvdFile {
                             });
                         }
                     }
-                    let to_write_remaining = remaining.min(PAGE_SIZE as u64) as usize;
+                    let to_write_remaining = remaining.min(PAGE_SIZE as u64);
+                    let to_write_remaining_usize =
+                        checked_download_write_length(to_write_remaining)?;
                     let to_write = if let Some(tweak) = tweak.as_mut() {
                         let s = s.ok_or(DownloadFileHttpError::MissingEncryptedSection)?;
                         let data_unit = match &s.data_units {
@@ -3094,15 +3103,15 @@ impl XvdFile {
                             .as_ref()
                             .ok_or(DownloadFileHttpError::MissingCipher)?;
                         decrypt_page_xts(&mut page, *tweak, tweak_cipher, data_cipher);
-                        to_write_remaining
+                        to_write_remaining_usize
                     } else if sfile.keep_encrypted {
                         // Decryption needs full 4k blocks
                         PAGE_SIZE
                     } else {
-                        to_write_remaining
+                        to_write_remaining_usize
                     };
                     write_all_with_retry(out, &page[..to_write]).await?;
-                    remaining -= to_write_remaining as u64;
+                    remaining -= to_write_remaining;
 
                     page_in_section = next_download_page(page_in_section)?;
                 }
@@ -3288,12 +3297,13 @@ mod tests {
         SEGMENT_METADATA_READER_CAPACITY, SegmentFile, SegmentMetadataParseError, SyncSubstream,
         UserPackageFile, UserPackageFilesParseError, XvcRegionId, XvdFile, XvdFileParseError,
         XvdSegmentMetadataSegment, XvdStream, checked_download_pending_capacity,
-        collect_ntfs_segment_files, consume_download_retry_budget, download_encrypted_section,
-        download_file_end, download_page_plan, download_request_range, extract_data_unit_index,
-        extract_encrypted_section, extract_file_end, extract_page_loop_end, extract_page_plan,
-        extract_progress_bytes, extract_write_length, hash_entry_read_offset, hash_page_index,
-        is_retryable_download_error, is_retryable_download_status, is_retryable_output_error,
-        next_download_page, next_download_received_byte_count, next_package_files_table_offset,
+        checked_download_write_length, collect_ntfs_segment_files, consume_download_retry_budget,
+        download_encrypted_section, download_file_end, download_page_plan, download_request_range,
+        extract_data_unit_index, extract_encrypted_section, extract_file_end,
+        extract_page_loop_end, extract_page_plan, extract_progress_bytes, extract_write_length,
+        hash_entry_read_offset, hash_page_index, is_retryable_download_error,
+        is_retryable_download_status, is_retryable_output_error, next_download_page,
+        next_download_received_byte_count, next_package_files_table_offset,
         next_segment_page_offset, non_encrypted_prefix_len, ntfs_drive_extents,
         ntfs_partition_extents, package_file_name, required_gpt_partition_length,
         required_gpt_partition_start, reserve_segment_path, reserve_xvc_region_entries,
@@ -3580,6 +3590,28 @@ mod tests {
         assert!(matches!(
             error,
             DownloadFileHttpError::PendingBufferExceeded { .. }
+        ));
+    }
+
+    #[test]
+    fn download_write_length_checks_usize_conversion() {
+        assert_eq!(
+            checked_download_write_length(PAGE_SIZE as u64)
+                .expect("a page-sized write must fit in usize"),
+            PAGE_SIZE
+        );
+    }
+
+    #[cfg(target_pointer_width = "32")]
+    #[test]
+    fn download_write_length_rejects_unrepresentable_value() {
+        let error = checked_download_write_length(u64::MAX)
+            .expect_err("an unrepresentable write length must fail");
+        assert!(matches!(
+            error,
+            DownloadFileHttpError::WriteLengthTooLarge {
+                write_length: u64::MAX
+            }
         ));
     }
 
