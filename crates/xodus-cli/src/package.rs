@@ -330,6 +330,12 @@ fn validate_package_file(file: &PackageFile, content_id: &str, version_id: &str)
             "package file name is empty",
         ));
     }
+    crate::commands::streaming::package_path_components(&file.file_name).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("package file name is unsafe: {error}"),
+        )
+    })?;
     decode_file_hash(&file.file_hash)?;
     validate_package_download_metadata(
         &file.cdn_root_paths,
@@ -662,6 +668,24 @@ mod tests {
     fn package_response_validation_accepts_matching_specific_identity() {
         validate_package_details(&package(), "content-id", Some("version-id"))
             .expect("matching specific package metadata must validate");
+    }
+
+    #[test]
+    fn package_response_validation_rejects_unsafe_file_names() {
+        for file_name in [
+            "../outside.bin",
+            "/absolute.bin",
+            r"..\outside.bin",
+            "content//empty.bin",
+            "content/NUL.bin",
+        ] {
+            let mut package = package();
+            package.package_files[0].file_name = file_name.to_owned();
+
+            let error = validate_package_details(&package, "content-id", None)
+                .expect_err("unsafe package file names must fail before download selection");
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        }
     }
 
     #[test]

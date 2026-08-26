@@ -181,7 +181,7 @@ pub(crate) fn ensure_package_root(root: &Path) -> io::Result<()> {
     }
 }
 
-fn package_path_components(path: &str) -> io::Result<Vec<&str>> {
+pub(crate) fn package_path_components(path: &str) -> io::Result<Vec<&str>> {
     if path.is_empty() || path.contains('\0') {
         return Err(invalid_package_path(
             "package path is empty or contains a null byte",
