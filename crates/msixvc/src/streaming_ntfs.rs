@@ -8,6 +8,10 @@ use ntfs::attribute_value::{
 use ntfs::{Ntfs, NtfsAttributeType, NtfsFile};
 
 const NTFS_ATTRIBUTE_LIST_BUFFER_BYTES: usize = 4096;
+const MAX_NTFS_LAYOUT_REPORTS: usize = 1_048_576;
+const MAX_NTFS_DATA_RUNS_PER_REPORT: usize = 1_048_576;
+const MAX_NTFS_DIRECTORY_DEPTH: usize = 256;
+const MAX_NTFS_PATH_BYTES: usize = 128 * 1024;
 
 fn allocation_error(context: &'static str, error: TryReserveError) -> ntfs::NtfsError {
     ntfs::NtfsError::Io(std::io::Error::other(format!("{context}: {error}")))
@@ -18,6 +22,24 @@ fn arithmetic_error(context: &'static str) -> ntfs::NtfsError {
         std::io::ErrorKind::InvalidData,
         context,
     ))
+}
+
+fn collection_limit_error(context: &'static str) -> ntfs::NtfsError {
+    ntfs::NtfsError::Io(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        context,
+    ))
+}
+
+fn ensure_collection_capacity(
+    current: usize,
+    limit: usize,
+    context: &'static str,
+) -> ntfs::Result<()> {
+    if current >= limit {
+        return Err(collection_limit_error(context));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -52,7 +74,7 @@ where
 
     let root = ntfs.root_directory(fs)?;
     let mut reports = Vec::new();
-    collect_directory_stream_layouts(&ntfs, fs, &root, Path::new(""), &mut reports)?;
+    collect_directory_stream_layouts(&ntfs, fs, &root, Path::new(""), &mut reports, 0)?;
     Ok(reports)
 }
 
@@ -81,10 +103,17 @@ fn collect_directory_stream_layouts<T>(
     dir: &NtfsFile<'_>,
     base_path: &Path,
     reports: &mut Vec<NtfsStreamLayoutReport>,
+    depth: usize,
 ) -> ntfs::Result<()>
 where
     T: Read + Seek,
 {
+    if depth > MAX_NTFS_DIRECTORY_DEPTH {
+        return Err(collection_limit_error(
+            "NTFS directory depth exceeds supported maximum",
+        ));
+    }
+
     let index = dir.directory_index(fs)?;
     let mut entries = index.entries();
 
@@ -101,10 +130,18 @@ where
         }
 
         let path = join_ntfs_path(base_path, name.as_ref());
+        if path.to_string_lossy().len() > MAX_NTFS_PATH_BYTES {
+            return Err(collection_limit_error(
+                "NTFS path exceeds supported maximum length",
+            ));
+        }
         let file = entry.to_file(ntfs, fs)?;
 
         if file.is_directory() {
-            collect_directory_stream_layouts(ntfs, fs, &file, &path, reports)?;
+            let next_depth = depth.checked_add(1).ok_or_else(|| {
+                collection_limit_error("NTFS directory depth arithmetic overflow")
+            })?;
+            collect_directory_stream_layouts(ntfs, fs, &file, &path, reports, next_depth)?;
         } else {
             collect_file_stream_layouts(fs, &file, &path, reports)?;
         }
@@ -138,6 +175,11 @@ where
         } else {
             format!("{}:{}", path.display(), stream_name)
         };
+        if full_path.len() > MAX_NTFS_PATH_BYTES {
+            return Err(collection_limit_error(
+                "NTFS stream path exceeds supported maximum length",
+            ));
+        }
         let value_length = attribute.value_length();
         let value = attribute.value(fs)?;
 
@@ -153,6 +195,11 @@ where
             NtfsAttributeValue::NonResident(value) => {
                 let mut data_runs = Vec::new();
                 for data_run in value.data_runs() {
+                    ensure_collection_capacity(
+                        data_runs.len(),
+                        MAX_NTFS_DATA_RUNS_PER_REPORT,
+                        "NTFS data-run count exceeds supported maximum",
+                    )?;
                     data_runs.try_reserve(1).map_err(|error| {
                         allocation_error("NTFS data-run allocation failed", error)
                     })?;
@@ -183,6 +230,11 @@ where
             },
         };
 
+        ensure_collection_capacity(
+            reports.len(),
+            MAX_NTFS_LAYOUT_REPORTS,
+            "NTFS layout report count exceeds supported maximum",
+        )?;
         reports
             .try_reserve(1)
             .map_err(|error| allocation_error("NTFS report allocation failed", error))?;
@@ -254,6 +306,11 @@ fn append_run_segment(
         }
     }
 
+    ensure_collection_capacity(
+        runs.len(),
+        MAX_NTFS_DATA_RUNS_PER_REPORT,
+        "NTFS data-run count exceeds supported maximum",
+    )?;
     runs.try_reserve(1)
         .map_err(|error| allocation_error("NTFS data-run allocation failed", error))?;
     runs.push(NtfsDataRunReport { start, length });
@@ -283,7 +340,20 @@ fn join_ntfs_path(base_path: &Path, name: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{NtfsDataRunReport, append_run_segment};
+    use super::{NtfsDataRunReport, append_run_segment, ensure_collection_capacity};
+
+    #[test]
+    fn collection_capacity_rejects_the_configured_bound() {
+        let error = ensure_collection_capacity(4, 4, "bounded collection")
+            .expect_err("collection at its bound must fail");
+
+        match error {
+            ntfs::NtfsError::Io(error) => {
+                assert_eq!(error.kind(), std::io::ErrorKind::InvalidData)
+            }
+            other => panic!("unexpected collection limit error: {other:?}"),
+        }
+    }
 
     #[test]
     fn append_run_segment_merges_contiguous_runs() {

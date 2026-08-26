@@ -68,6 +68,18 @@ The two new XSP files originate exclusively from the tracked owned valid fixture
 
 This review confirms containment and provenance of the completed entry fixture set. It does not certify all current package parsers or retail transaction paths. The XSP parser and synthetic consumer now have bounded in-memory and async stream coverage for forward and rollback descriptors, including source and target hash validation. The XVD parser's formerly aborting XVC-information seek now returns a typed I/O failure in an in-memory synthetic-header regression test, an XVC region count above 4,096 returns a typed rejection before region-header reads or allocation, an unsupported encrypted key ID returns a typed rejection while key ID zero remains supported, an encrypted region offset below user data is rejected before subtraction, an overflowing region end is rejected before page calculation, and an unreservable maximal region length fails before hash reads. Remaining corpus formats still require repository consumers before format or retail transaction safety can be claimed.
 
+## Parser Crash Regression Manifest
+
+The August 26, 2026 parser campaign discovered an unchecked FILETIME arithmetic overflow in arbitrary XVD input. The reduced regression is retained as deterministic tests rather than raw fuzz bytes:
+
+| Fixture | Trigger | Expected result | Coverage |
+| --- | --- | --- | --- |
+| `xvd-filetime-overflow-header` | XVD header FILETIME at offset `0x210` set to `i64::MAX` | `XvdFileParseError::Header(XvdHeaderParseError::Filetime(_))` | `crates/msixvc/src/xvd.rs::parse_rejects_filetime_overflow_without_panicking` |
+| `xvd-filetime-overflow-xvc-info` | XVC information FILETIME at offset `0xd30` set to `i64::MAX` | `XvdFileParseError::XvcInfo(XvcInfoParseError::Filetime(_))` | `crates/msixvc/src/xvd.rs::parse_rejects_xvc_info_filetime_overflow_without_panicking` |
+| `filetime-overflow-value` | Eight byte little-endian `i64::MAX` FILETIME value | `FiletimeParseError::OutOfRange` | `crates/msixvc-common/src/parse/structs.rs::filetime_rejects_timestamp_arithmetic_overflow` |
+
+The reduced input was replayed through the fuzz target from a disposable corpus entry at signed checkpoint `6381072`. The raw crash artifact and generated corpus were removed after the deterministic regressions and the clean 10,000 execution rerun were verified. No package content, credential, or signed title data is retained.
+
 ## Remaining Work
 
 The required EXT-009 entry artifacts now exist: deterministic malformed, truncated, adversarial-path, integrity, synthetic update, rollback, and interrupted-update recovery inputs, with complete provenance and security review. The authoritative plan classifies EXT-009 as available entry evidence only. The XSP subset has bounded repository parser coverage; consumers for the remaining corpus artifacts are XODUS-PHASE-002 implementation and exit evidence. A real authorized package exercise remains mandatory evidence for XODUS-REQ-004 and cannot be replaced by these synthetic fixtures.
