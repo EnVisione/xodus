@@ -59,10 +59,18 @@ On August 26, 2026, the public `veedy-dev/mcbe-gdk-engine` repository was checke
 
 This release is therefore metadata evidence only. It has no recorded SHA-512 provenance or verified Xodus target compatibility, and it was not downloaded, installed, built, or used for a protected executable or target launch. EXT-003 and EXT-004 remain unavailable.
 
+### Fresh Bedrock on Linux Versioned Engine Release
+
+On August 26, 2026, the public `Wyze3306/BedrockOnLinux` repository was checked for a newer versioned engine candidate. Its `engine-wow64-archs-native17` release points to commit `2b36a07679914eab45fec1728c5d8a042379a5d2` and publishes `GDK-Proton-xuser-wow64-archs-native17.tar.gz`. The 862643267 byte artifact matched SHA-256 `12fa379f012410832eab54c719efaa4e0e327a3b6839b0859f851d1b952abed2` and SHA-512 `474cd5dd1c9503b8e21c04ad3e6466ec9f087ddff66c6789ce1ebb6ba562cc64b141258ffd6ca56fc288ba9aaf5af257411dc95efc7460ec632e16ed574d8833`. GitHub artifact attestation verification succeeded for the repository workflow `build-engine.yml` on the `engine/native17` ref, with the signed source commit above.
+
+The archive manifest records build revision `wow64-archs-native17`, DXVK `3.0.1`, and the Bedrock on Linux VKD3D DGC variants. It includes 32 bit and 64 bit `xgameruntime.dll` files plus the 64 bit threading sidecar. The manifest records SHA-256 values `3de30278475669c15677cf348d881ec4476423b63c60580ce3cf0ce391aad417` for the 32 bit DLL, `37ba3dd6404fca00378e6694c61f4fbf4d8e2a8f3a103b45920b8523a64d482b` for the 64 bit DLL, and `4c3e3faf5bcd86779e4a69677902dd8b36a16e1136a5901e616c36d8a02b68f6` for the threading sidecar. Its embedded WineGDK provenance pins commit `75637b674e1f191e65753663c4c0c32bea05ba6e`, the native5 patch series, source manifest SHA-256 `0feb01ca058086eccf4f4a0e6895f541547ae89aa0d2ab86f08291224de5ed46`, and a Debian Bullseye build with a glibc ceiling of 2.31.
+
+The embedded native5 README describes native GDK identity, XUser, Xbox context, and Realms support, along with the protected executable mapping path and the explicit failure behavior for the unimplemented Microsoft Store backend. A PE export inspection confirmed the standard Game Runtime initialization ABI and internal XUser implementation symbols. This is stronger than the earlier GDK Proton candidate, but it remains an uninstalled external candidate. No target login, entitlement, license, protected executable mapping, online service, anti cheat, install, update, launch, save, repair, or uninstall test has passed with it. EXT-003 and EXT-004 therefore remain partially available for review, but their runtime acceptance gates remain open.
+
 No HDMI connector was exposed by the current Hyprland monitor state. HDMI resolution and refresh verification therefore remains pending until the connector is present.
 
 No account, keychain, browser storage, package content, or protected executable was accessed during this check.
 
 ## Gate Classification
 
-This record verifies the Tier 1 presentation baseline only. It does not close EXT-003, EXT-004, XODUS-REQ-007, XODUS-REQ-008, XODUS-REQ-010, XODUS-REQ-011, XODUS-REQ-012, XODUS-REQ-013, XODUS-REQ-015, or XODUS-REQ-016. The missing versioned runtime artifacts and absent HDMI connector are external prerequisites for the corresponding runtime and display gates.
+This record verifies the Tier 1 presentation baseline and records one attested versioned runtime candidate. It does not close EXT-003, EXT-004, XODUS-REQ-007, XODUS-REQ-008, XODUS-REQ-010, XODUS-REQ-011, XODUS-REQ-012, XODUS-REQ-013, XODUS-REQ-015, or XODUS-REQ-016. Target runtime acceptance, protected executable mapping, account backed service behavior, and the absent HDMI connector remain open for the corresponding gates.
