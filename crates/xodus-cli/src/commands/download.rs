@@ -1,4 +1,5 @@
 use std::io;
+use std::net::IpAddr;
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -73,13 +74,76 @@ fn validate_download_response_scheme(
     let request_url = reqwest::Url::parse(request_url).map_err(|_| {
         io::Error::new(io::ErrorKind::InvalidData, "package request URL is invalid")
     })?;
+    if !response_url.username().is_empty() || response_url.password().is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "package response URL must not contain credentials",
+        ));
+    }
     if request_url.scheme() == "https" && response_url.scheme() != "https" {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "https package request redirected to an insecure scheme",
         ));
     }
+    if request_url.scheme() == "http" && response_url.scheme() == "http" {
+        let host = response_url.host_str().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "package response URL must include a host",
+            )
+        })?;
+        let is_loopback = host.eq_ignore_ascii_case("localhost")
+            || host
+                .parse::<IpAddr>()
+                .is_ok_and(|address| address.is_loopback());
+        if !is_loopback {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "loopback package request redirected to nonlocal http",
+            ));
+        }
+    }
+    if response_url.scheme() != "https" && response_url.scheme() != "http" {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "package response URL uses an unsupported scheme",
+        ));
+    }
     Ok(())
+}
+
+fn validate_download_request_url(url: &reqwest::Url) -> io::Result<()> {
+    if !url.username().is_empty() || url.password().is_some() || url.host_str().is_none() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "package request URL is invalid",
+        ));
+    }
+    match url.scheme() {
+        "https" => Ok(()),
+        "http" => {
+            let host = url.host_str().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "package request URL is invalid")
+            })?;
+            if host.eq_ignore_ascii_case("localhost")
+                || host
+                    .parse::<IpAddr>()
+                    .is_ok_and(|address| address.is_loopback())
+            {
+                Ok(())
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "package request URL is invalid",
+                ))
+            }
+        }
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "package request URL is invalid",
+        )),
+    }
 }
 
 fn validate_download_response_encoding(headers: &HeaderMap) -> io::Result<()> {
@@ -231,8 +295,15 @@ where
     progress_bar.set_position(0);
     let available_space = fs2::available_space(output_root).map_err(fatal_download_error)?;
     validate_download_space(file_size, available_space).map_err(fatal_download_error)?;
+    let request_url = reqwest::Url::parse(url).map_err(|_| {
+        fatal_download_error(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "package request URL is invalid",
+        ))
+    })?;
+    validate_download_request_url(&request_url).map_err(fatal_download_error)?;
     let response = client
-        .get(url)
+        .get(request_url)
         .send()
         .await
         .map_err(request_download_error)?;
@@ -470,8 +541,9 @@ mod tests {
         DOWNLOAD_RETRY_LIMIT, DownloadAttemptRequest, checked_download_total,
         checked_package_file_size, consume_download_retry, decode_file_hash, download_file_attempt,
         download_file_attempt_with_hook, is_retryable_package_download_status,
-        validate_declared_download_length, validate_download_response_encoding,
-        validate_download_response_scheme, validate_download_space, validate_file_hash,
+        validate_declared_download_length, validate_download_request_url,
+        validate_download_response_encoding, validate_download_response_scheme,
+        validate_download_space, validate_file_hash,
     };
     use crate::commands::streaming::recover_transactions;
     use crate::package::{MAX_FILE_HASH_BASE64_CHARS, package_download_urls};
@@ -493,6 +565,51 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "https package request redirected to an insecure scheme"
+        );
+    }
+
+    #[test]
+    fn download_request_url_requires_secure_or_loopback_http() {
+        for source in [
+            "http://cdn.example/package",
+            "https://user:password@cdn.example/package",
+            "ftp://cdn.example/package",
+        ] {
+            let url = reqwest::Url::parse(source).expect("test URL must parse");
+            validate_download_request_url(&url)
+                .expect_err("unsafe package URLs must fail before network activity");
+        }
+
+        for source in [
+            "https://cdn.example/package",
+            "http://localhost:8080/package",
+            "http://127.0.0.1:8080/package",
+        ] {
+            let url = reqwest::Url::parse(source).expect("test URL must parse");
+            validate_download_request_url(&url)
+                .expect("secure and loopback package URLs must remain supported");
+        }
+    }
+
+    #[test]
+    fn download_response_scheme_rejects_credentials_and_nonlocal_http() {
+        let credentialed =
+            reqwest::Url::parse("https://user:password@cdn.example/package").unwrap();
+        let error = validate_download_response_scheme("https://cdn.example/package", &credentialed)
+            .expect_err("redirects must not introduce URL credentials");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(
+            error.to_string(),
+            "package response URL must not contain credentials"
+        );
+
+        let remote_http = reqwest::Url::parse("http://cdn.example/package").unwrap();
+        let error = validate_download_response_scheme("http://127.0.0.1/package", &remote_http)
+            .expect_err("loopback fixtures must not redirect to nonlocal http");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(
+            error.to_string(),
+            "loopback package request redirected to nonlocal http"
         );
     }
 
