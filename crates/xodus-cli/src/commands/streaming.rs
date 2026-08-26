@@ -390,7 +390,14 @@ fn read_transaction_journal(root: &Path) -> io::Result<Option<Vec<PromotionEntry
         return Ok(None);
     }
 
+    let line_count = contents.lines().count();
+    let mut seen = HashSet::new();
+    seen.try_reserve(line_count)
+        .map_err(|_| invalid_package_path("transaction journal path index allocation failed"))?;
     let mut entries = Vec::new();
+    entries
+        .try_reserve(line_count)
+        .map_err(|_| invalid_package_path("transaction journal entry allocation failed"))?;
     for line in contents.lines() {
         let mut fields = line.split('\t');
         let state = PromotionState::parse(fields.next().unwrap_or_default())?;
@@ -426,10 +433,23 @@ fn read_transaction_journal(root: &Path) -> io::Result<Option<Vec<PromotionEntry
                 "transaction journal has too many fields",
             ));
         }
+        let staged_relative = package_relative_path(staged_text)?;
+        let final_relative = package_relative_path(final_text)?;
+        let backup_relative = package_relative_path(backup_text)?;
+        if backup_relative != PathBuf::from(TRANSACTION_BACKUP_DIRECTORY).join(&final_relative) {
+            return Err(invalid_package_path(
+                "transaction journal backup path does not match its final path",
+            ));
+        }
+        if !seen.insert(final_relative.clone()) {
+            return Err(invalid_package_path(
+                "transaction journal contains a duplicate package path",
+            ));
+        }
         entries.push(PromotionEntry {
-            staged_relative: package_relative_path(staged_text)?,
-            final_relative: package_relative_path(final_text)?,
-            backup_relative: package_relative_path(backup_text)?,
+            staged_relative,
+            final_relative,
+            backup_relative,
             had_previous,
             remove_final,
             state,
@@ -2070,6 +2090,25 @@ mod tests {
             .expect("legacy journal must be recoverable");
         assert_eq!(entries.len(), 1);
         assert!(!entries[0].remove_final);
+    }
+
+    #[test]
+    fn transaction_journal_rejects_duplicate_final_paths() {
+        let temporary = tempfile::tempdir().unwrap();
+        let output = temporary.path().join("output");
+        std::fs::create_dir(&output).unwrap();
+        let (transaction, _) = new_transaction(&output).unwrap();
+        let journal = transaction.path().join(TRANSACTION_JOURNAL);
+        std::fs::write(
+            journal,
+            "pending\tfirst.bin\tgame.bin\t.xodus-streaming-backup/game.bin\t0\n\
+             pending\tsecond.bin\tgame.bin\t.xodus-streaming-backup/game.bin\t0\n",
+        )
+        .unwrap();
+
+        let error = read_transaction_journal(transaction.path())
+            .expect_err("duplicate final paths must be rejected");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     }
 
     #[test]
