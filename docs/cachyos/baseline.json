@@ -1,10 +1,10 @@
 {
   "schema_version": 1,
-  "evidence_id": "xodus-cachyos-baseline-2026-08-25-http-cursor",
-  "captured_at": "2026-08-25T19:51:55-05:00",
+  "evidence_id": "xodus-cachyos-baseline-2026-08-25-cache-cursor",
+  "captured_at": "2026-08-25T19:54:58-05:00",
   "classification": "sanitized-observed-baseline",
   "source_revision": {
-    "xodus_commit": "0856c3bd25a652ebbb0749b7be40a92cfe49c5cc",
+    "xodus_commit": "c0d85aa2f4c6f1285eb0ccba66eb14bf24618142",
     "origin_main_commit": "5b77e06eaa5e3cea78af122436d35a9b02992834",
     "upstream_main_commit": "467edc0b0724c700ccd5ab1959fbef1a0f6b6f7d",
     "cargo_lock_sha256": "108a22142041ce3b2704f11f65cf875d50668581575ce394d02fb9bbaa898580",
