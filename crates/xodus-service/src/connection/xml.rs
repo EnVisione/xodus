@@ -14,6 +14,9 @@ fn validate_msa_client_id(client_id: &str) -> std::io::Result<()> {
     if client_id.is_empty()
         || client_id.len() > MAX_MSA_CLIENT_ID_BYTES
         || client_id.chars().any(char::is_control)
+        || !client_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
     {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -209,6 +212,8 @@ mod tests {
     fn msa_client_id_rejects_empty_control_and_oversized_values() {
         assert!(validate_msa_client_id("").is_err());
         assert!(validate_msa_client_id("client\nvalue").is_err());
+        assert!(validate_msa_client_id("client&id").is_err());
+        assert!(validate_msa_client_id("client id").is_err());
         assert!(validate_msa_client_id(&"x".repeat(MAX_MSA_CLIENT_ID_BYTES + 1)).is_err());
     }
 
