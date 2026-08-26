@@ -16,6 +16,28 @@ const XVD_HEADER_BYTES: u64 = 4096;
 const SPACE_RESERVE_MULTIPLIER: u64 = 6;
 const SPACE_RESERVE_DIVISOR: u64 = 5;
 
+fn open_regular_manifest(path: &Path) -> io::Result<std::fs::File> {
+    let metadata = std::fs::metadata(path)?;
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "hash manifest is not a regular file",
+        ));
+    }
+    std::fs::File::open(path)
+}
+
+async fn open_regular_input(path: &Path) -> io::Result<File> {
+    let metadata = tokio::fs::metadata(path).await?;
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "XSP input is not a regular file",
+        ));
+    }
+    File::open(path).await
+}
+
 fn validate_update_space(required: u64, available: u64) -> io::Result<()> {
     let required_with_reserve = required
         .checked_mul(SPACE_RESERVE_MULTIPLIER)
@@ -84,7 +106,7 @@ fn read_hashes(path: &Path) -> Result<Vec<[u8; 20]>, String> {
 }
 
 fn read_bounded_text(path: &Path, limit: usize) -> Result<String, String> {
-    let file = std::fs::File::open(path)
+    let file = open_regular_manifest(path)
         .map_err(|error| format!("could not read hash manifest: {error}"))?;
     let read_limit = u64::try_from(limit)
         .ok()
@@ -113,7 +135,7 @@ async fn validate_base_identity(base: &Path, xsp: &XspFile) -> Result<(), String
         return Ok(());
     }
 
-    let base_file = File::open(base)
+    let base_file = open_regular_input(base)
         .await
         .map_err(|error| format!("could not open base content header: {error}"))?;
     let header = XvdFile::parse_header(base_file)
@@ -167,7 +189,7 @@ where
         rollback,
     } = request;
     let descriptor_path = Path::new(&descriptor);
-    let mut descriptor_file = match File::open(descriptor_path).await {
+    let mut descriptor_file = match open_regular_input(descriptor_path).await {
         Ok(file) => file,
         Err(error) => {
             eprintln!("XSP update could not open descriptor: {error}");
@@ -242,14 +264,14 @@ where
         }
     };
 
-    let mut base_file = match File::open(Path::new(&base)).await {
+    let mut base_file = match open_regular_input(Path::new(&base)).await {
         Ok(file) => file,
         Err(error) => {
             eprintln!("XSP update could not open base content: {error}");
             return ExitCode::FAILURE;
         }
     };
-    let mut new_data_file = match File::open(Path::new(&new_data)).await {
+    let mut new_data_file = match open_regular_input(Path::new(&new_data)).await {
         Ok(file) => file,
         Err(error) => {
             eprintln!("XSP update could not open new data: {error}");
@@ -332,7 +354,7 @@ mod tests {
     use crate::commands::install_msixvc2::run as install_msixvc2;
     use crate::commands::streaming::recover_transactions;
 
-    use super::{ApplyXspRequest, run, run_with_hook};
+    use super::{ApplyXspRequest, open_regular_input, read_bounded_text, run, run_with_hook};
 
     fn fixture(name: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -390,6 +412,27 @@ mod tests {
         let error = super::read_bounded_text(&manifest, 5)
             .expect_err("hash manifest above the bound must fail");
         assert!(error.contains("exceeds"));
+    }
+
+    #[test]
+    fn bounded_hash_manifest_reader_rejects_non_regular_inputs() {
+        let temporary = tempfile::tempdir().expect("temporary directory must exist");
+
+        let error = read_bounded_text(temporary.path(), 5)
+            .expect_err("a directory must not be opened as a hash manifest stream");
+
+        assert!(error.contains("not a regular file"));
+    }
+
+    #[tokio::test]
+    async fn xsp_input_open_rejects_non_regular_files_before_opening() {
+        let temporary = tempfile::tempdir().expect("temporary directory must exist");
+
+        let error = open_regular_input(temporary.path())
+            .await
+            .expect_err("a directory must not be opened as an XSP input stream");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
     }
 
     #[test]
