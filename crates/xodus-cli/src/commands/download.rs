@@ -65,6 +65,22 @@ fn request_download_error(error: reqwest::Error) -> DownloadAttemptError {
     }
 }
 
+fn validate_download_response_scheme(
+    request_url: &str,
+    response_url: &reqwest::Url,
+) -> io::Result<()> {
+    let request_url = reqwest::Url::parse(request_url).map_err(|_| {
+        io::Error::new(io::ErrorKind::InvalidData, "package request URL is invalid")
+    })?;
+    if request_url.scheme() == "https" && response_url.scheme() != "https" {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "https package request redirected to an insecure scheme",
+        ));
+    }
+    Ok(())
+}
+
 fn consume_download_retry(remaining: &mut usize) -> io::Result<()> {
     if *remaining == 0 {
         return Err(io::Error::other("package download retry budget exhausted"));
@@ -199,7 +215,9 @@ where
         .get(url)
         .send()
         .await
-        .map_err(request_download_error)?
+        .map_err(request_download_error)?;
+    validate_download_response_scheme(url, response.url()).map_err(fatal_download_error)?;
+    let response = response
         .error_for_status()
         .map_err(request_download_error)?;
     validate_declared_download_length(file_size, response.content_length())
@@ -430,7 +448,8 @@ mod tests {
         DOWNLOAD_RETRY_LIMIT, DownloadAttemptRequest, checked_download_total,
         checked_package_file_size, consume_download_retry, decode_file_hash, download_file_attempt,
         download_file_attempt_with_hook, is_retryable_package_download_status,
-        validate_declared_download_length, validate_download_space, validate_file_hash,
+        validate_declared_download_length, validate_download_response_scheme,
+        validate_download_space, validate_file_hash,
     };
     use crate::commands::streaming::recover_transactions;
     use crate::package::{MAX_FILE_HASH_BASE64_CHARS, package_download_urls};
@@ -440,6 +459,19 @@ mod tests {
         let error = package_download_urls(&[], &[], "/file.xvd")
             .expect_err("a package without a CDN root must fail before HTTP");
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn download_response_scheme_rejects_https_downgrade() {
+        let response_url = reqwest::Url::parse("http://cdn.example/package").unwrap();
+        let error = validate_download_response_scheme("https://cdn.example/package", &response_url)
+            .expect_err("https package redirects must not downgrade to http");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(
+            error.to_string(),
+            "https package request redirected to an insecure scheme"
+        );
     }
 
     #[test]
