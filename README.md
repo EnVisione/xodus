@@ -118,7 +118,7 @@ Commands:
   login       
   streaming   Download and extract the game through streaming algorithm
   clep        Generate or decrypt base64-encoded CLEP challenge data
-  sp-license  Decode SPLicenseBlock
+  sp-license  Validate SPLicenseBlock key material
   help        Print this message or the help of the given subcommand(s)
 
 Options:
