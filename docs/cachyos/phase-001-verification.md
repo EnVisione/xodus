@@ -16,6 +16,8 @@
 
 On August 25, 2026, `baseline.json` was refreshed at signed checkpoint `70ffb4458053903966c528cf02e946d712f5de9e`, binding source revision `00ec5a719959d352d5002153fe00bb9c6900d7ff` after the verified parser fuzz and MSIXVC2 capacity coverage. The refresh binds the current branch, fork and upstream heads, Cargo lock and metadata digests, package database digest, and observed CachyOS graphics state. The original Phase 001 record above remains historical evidence for the merged baseline and is not changed into a Phase 2 completion claim.
 
+The refreshed verifier passed `--source`, `--environment`, and `--all`. The complete workspace reproduction includes the current parser, transaction, install capacity, and recovery tests, zero warning workspace Clippy, and the release build. These results refresh baseline evidence only and do not establish account, retail package, target runtime, performance, Tier 2, or release completion.
+
 ## Commands and Results
 
 The following commands passed against the frozen source revision. They are read only except for Cargo build output under the ignored `target/` directory.
