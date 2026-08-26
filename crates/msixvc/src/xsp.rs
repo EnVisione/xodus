@@ -105,6 +105,8 @@ pub enum XspUpdateApplyError {
     Validation(#[from] XspUpdateValidationError),
     #[error("XSP base image has {actual} bytes but requires at least {required}")]
     BaseImageTooShort { actual: usize, required: usize },
+    #[error("XSP base image has {actual} bytes but requires exactly {required}")]
+    BaseImageTooLong { actual: usize, required: usize },
     #[error("XSP new data has {actual} bytes but requires at least {required}")]
     NewDataTooShort { actual: usize, required: usize },
     #[error("XSP new data has {actual} bytes but requires exactly {required}")]
@@ -129,6 +131,8 @@ pub enum XspStreamApplyError {
     BlockAllocationFailed { size: u64 },
     #[error("XSP source block {block} ended before the declared block size")]
     SourceBlockTooShort { block: u64 },
+    #[error("XSP source image has {actual} bytes but requires at most {required}")]
+    SourceImageTooLong { actual: u64, required: u64 },
     #[error("XSP new data block {block} ended before the declared block size")]
     NewDataBlockTooShort { block: u64 },
     #[error("XSP new data contains bytes beyond the declared block payload")]
@@ -288,6 +292,17 @@ impl XspFile {
         })?;
         block.resize(block_size, 0);
 
+        let source_length = u64::try_from(base_state.block_hashes.len())
+            .map_err(|_| XspStreamApplyError::OffsetOverflow)?
+            .checked_mul(validated.block_size)
+            .ok_or(XspStreamApplyError::OffsetOverflow)?;
+        let base_length = base.seek(std::io::SeekFrom::End(0)).await?;
+        if base_length > source_length {
+            return Err(XspStreamApplyError::SourceImageTooLong {
+                actual: base_length,
+                required: source_length,
+            });
+        }
         base.seek(std::io::SeekFrom::Start(0)).await?;
         for (index, expected_hash) in base_state.block_hashes.iter().enumerate() {
             let block_index =
@@ -557,6 +572,12 @@ impl XspFile {
             usize::try_from(source_length).map_err(|_| XspUpdateApplyError::LengthOverflow)?;
         if base_bytes.len() < source_length_usize {
             return Err(XspUpdateApplyError::BaseImageTooShort {
+                actual: base_bytes.len(),
+                required: source_length_usize,
+            });
+        }
+        if base_bytes.len() > source_length_usize {
+            return Err(XspUpdateApplyError::BaseImageTooLong {
                 actual: base_bytes.len(),
                 required: source_length_usize,
             });
@@ -1051,6 +1072,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rejects_trailing_base_bytes_in_byte_apply() {
+        let xsp = parse(VALID_XSP).await.expect("valid synthetic XSP fixture");
+        let base_hashes = [hash20(b"base")];
+        let target_hashes = [hash20(b"new!"), hash20(b"base")];
+        let base = XspBaseState {
+            content_id: xsp.header.content_id,
+            version: xsp.header.upgrade_from_version,
+            block_hashes: &base_hashes,
+        };
+        let input = XspUpdateInput {
+            expected_source_hashes: &base_hashes,
+            target_hashes: &target_hashes,
+            available_space: u64::MAX,
+            block_size: 4,
+        };
+
+        let error = xsp
+            .apply_update_to_bytes(base, input, b"baseextra", b"new!")
+            .expect_err("trailing base bytes must fail");
+
+        assert_eq!(
+            error,
+            XspUpdateApplyError::BaseImageTooLong {
+                actual: 9,
+                required: 4,
+            }
+        );
+    }
+
+    #[tokio::test]
     async fn applies_a_bounded_rollback_to_bytes() {
         let mut xsp = parse(ROLLBACK_XSP)
             .await
@@ -1147,6 +1198,47 @@ mod tests {
 
         assert!(matches!(error, XspStreamApplyError::NewDataTooLong));
         assert_eq!(output.0, b"new!base");
+    }
+
+    #[tokio::test]
+    async fn stream_update_rejects_trailing_base_bytes_before_output() {
+        let xsp = parse(VALID_XSP).await.expect("valid synthetic XSP fixture");
+        let base_hashes = [hash20(b"base")];
+        let target_hashes = [hash20(b"new!"), hash20(b"base")];
+        let base = XspBaseState {
+            content_id: xsp.header.content_id,
+            version: xsp.header.upgrade_from_version,
+            block_hashes: &base_hashes,
+        };
+        let input = XspUpdateInput {
+            expected_source_hashes: &base_hashes,
+            target_hashes: &target_hashes,
+            available_space: u64::MAX,
+            block_size: 4,
+        };
+        let mut base_reader = TestReader::new(b"baseextra");
+        let mut new_data_reader = TestReader::new(b"new!");
+        let mut output = TestWriter(Vec::new());
+
+        let error = xsp
+            .apply_update_stream(
+                &mut base_reader,
+                &mut new_data_reader,
+                &mut output,
+                base,
+                input,
+            )
+            .await
+            .expect_err("trailing base bytes must fail");
+
+        assert!(matches!(
+            error,
+            XspStreamApplyError::SourceImageTooLong {
+                actual: 9,
+                required: 4,
+            }
+        ));
+        assert!(output.0.is_empty());
     }
 
     #[tokio::test]
