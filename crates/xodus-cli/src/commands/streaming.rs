@@ -881,7 +881,25 @@ where
             let _ = rollback_transaction(transaction_root, output_root, entries);
             return Err(error);
         }
-        if std::fs::symlink_metadata(&final_path).is_ok() {
+        let final_exists = match std::fs::symlink_metadata(&final_path) {
+            Ok(metadata) => {
+                if !metadata.file_type().is_file() {
+                    let error = invalid_package_path(format!(
+                        "existing package path is not a regular file: {}",
+                        final_path.display()
+                    ));
+                    let _ = rollback_transaction(transaction_root, output_root, entries);
+                    return Err(error);
+                }
+                true
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => false,
+            Err(error) => {
+                let _ = rollback_transaction(transaction_root, output_root, entries);
+                return Err(error);
+            }
+        };
+        if final_exists {
             entries[index].had_previous = true;
             entries[index].state = PromotionState::BackupPending;
             if let Err(error) = write_transaction_journal(transaction_root, entries, false) {
@@ -2188,6 +2206,26 @@ mod tests {
             std::fs::read(output.join("content/game.bin")).unwrap(),
             b"new sidecar"
         );
+    }
+
+    #[test]
+    fn transaction_promotion_rejects_existing_directory_at_file_path() {
+        let temporary = tempfile::tempdir().unwrap();
+        let output = temporary.path().join("output");
+        std::fs::create_dir(&output).unwrap();
+        let conflicting_path = output.join("game.bin");
+        std::fs::create_dir(&conflicting_path).unwrap();
+        let (transaction, payload) = new_transaction(&output).unwrap();
+        std::fs::write(payload.join("game.bin"), b"new package").unwrap();
+
+        let mut entries =
+            promotion_entries(&[("game.bin".to_owned(), "game.bin".to_owned())]).unwrap();
+        let error = promote_transaction(transaction.path(), &output, &mut entries)
+            .expect_err("a directory must not be replaced as a package file");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(conflicting_path.is_dir());
+        assert!(!conflicting_path.join("nested").exists());
     }
 
     #[test]
