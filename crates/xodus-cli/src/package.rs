@@ -277,8 +277,18 @@ fn validate_package_details(
             "package response contains no files",
         ));
     }
+    let mut file_names = HashSet::new();
+    file_names
+        .try_reserve(package.package_files.len())
+        .map_err(|_| io::Error::other("package file name allocation failed"))?;
     for file in &package.package_files {
         validate_package_file(file, &package.content_id, &package.version_id)?;
+        if !file_names.insert(file.file_name.as_str()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "package response contains duplicate file names",
+            ));
+        }
     }
     Ok(())
 }
@@ -622,6 +632,15 @@ mod tests {
         package.package_files[0].content_id = "other-content".to_owned();
         let error = validate_package_details(&package, "content-id", None)
             .expect_err("mismatched file identity must fail");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn package_response_validation_rejects_duplicate_file_names() {
+        let mut package = package();
+        package.package_files.push(package.package_files[0].clone());
+        let error = validate_package_details(&package, "content-id", None)
+            .expect_err("duplicate package file names must fail");
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     }
 
