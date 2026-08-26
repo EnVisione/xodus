@@ -1495,6 +1495,30 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
 
+    #[tokio::test]
+    async fn http_read_rejects_logical_position_beyond_total_before_polling() {
+        let mut reader = super::HttpRead {
+            client: reqwest::Client::new(),
+            url: "http://invalid.test/file".to_owned(),
+            len: 1,
+            pos: 2,
+            pending_open: None,
+            active: None,
+            pending_chunk: None,
+            pending_chunk_offset: 0,
+            retry_budget: 0,
+            progress: None,
+        };
+
+        let error = reader
+            .read_to_end(&mut Vec::new())
+            .await
+            .expect_err("a logical position beyond the declared total must fail before polling");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("logical position"));
+    }
+
     #[test]
     fn http_read_rejects_active_offset_overflow() {
         let error = super::checked_active_http_offset(u64::MAX, 1, u64::MAX)
