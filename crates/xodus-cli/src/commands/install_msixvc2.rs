@@ -13,6 +13,24 @@ use crate::commands::streaming::{
 
 const MAX_INSTALL_UNCOMPRESSED_BYTES: u64 = 1_u64 << 40;
 
+fn validate_available_space(required: u64, available: u64) -> io::Result<()> {
+    let required_with_reserve = required
+        .checked_mul(6)
+        .map(|value| value.div_ceil(5))
+        .ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "MSIXVC2 install size overflow")
+        })?;
+    if required_with_reserve > available {
+        return Err(io::Error::new(
+            io::ErrorKind::StorageFull,
+            format!(
+                "MSIXVC2 install requires {required_with_reserve} bytes including reserve but only {available} bytes are available"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 fn normalized_package_path(path: &str) -> String {
     path.replace('\\', "/")
 }
@@ -141,6 +159,17 @@ where
         eprintln!("MSIXVC2 install could not recover a prior transaction: {error}");
         return ExitCode::FAILURE;
     }
+    let available_space = match fs2::available_space(output_root) {
+        Ok(space) => space,
+        Err(error) => {
+            eprintln!("MSIXVC2 install could not inspect destination space: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Err(error) = validate_available_space(archive.uncompressed_size, available_space) {
+        eprintln!("MSIXVC2 install rejected insufficient destination space: {error}");
+        return ExitCode::FAILURE;
+    }
     let removals = match collect_stale_package_files(output_root, &specs) {
         Ok(removals) => removals,
         Err(error) => {
@@ -211,7 +240,7 @@ mod tests {
 
     use crate::commands::streaming::recover_transactions;
 
-    use super::{run, run_with_hook};
+    use super::{run, run_with_hook, validate_available_space};
 
     fn fixture(name: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -245,6 +274,14 @@ mod tests {
                     .to_string_lossy()
                     .starts_with(".xodus-streaming-txn-"))
         );
+    }
+
+    #[test]
+    fn install_space_check_rejects_insufficient_capacity() {
+        validate_available_space(100, 120).expect("capacity including reserve must be accepted");
+        let error = validate_available_space(100, 119)
+            .expect_err("an install larger than available space must fail before staging");
+        assert_eq!(error.kind(), std::io::ErrorKind::StorageFull);
     }
 
     #[test]
