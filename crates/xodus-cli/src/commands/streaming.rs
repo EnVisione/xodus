@@ -93,7 +93,7 @@ fn open_package_root(root: &Path, message: &'static str) -> io::Result<std::fs::
         open_resolved(
             CWD,
             root,
-            OFlags::RDONLY | OFlags::CLOEXEC,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
             Mode::empty(),
             ROOT_RESOLVE_FLAGS,
         )
@@ -1803,7 +1803,7 @@ mod tests {
         PromotionState, SegmentFile, TRANSACTION_DIRECTORY_PREFIX, TRANSACTION_JOURNAL,
         TRANSACTION_JOURNAL_TEMP, TRANSACTION_LOCK_FILE, acquire_transaction_lock, changed_jobs,
         checked_progress_length, ensure_package_root, new_transaction, open_package_input,
-        open_package_output, package_path_components, promote_transaction,
+        open_package_output, open_package_root, package_path_components, promote_transaction,
         promote_transaction_with_interruption, promotion_entries, promotion_entries_with_removals,
         promotion_entry_capacity, read_bounded_transaction_journal, read_transaction_journal,
         recover_transaction_dir, recover_transactions, rollback_transaction,
@@ -2054,6 +2054,21 @@ mod tests {
                 .file_type()
                 .is_symlink()
         );
+    }
+
+    #[test]
+    fn package_root_rejects_non_directory_without_opening_it_as_a_stream() {
+        let temporary = tempfile::tempdir().unwrap();
+        let file = temporary.path().join("not-a-directory");
+        std::fs::write(&file, b"fixture").unwrap();
+
+        let error = open_package_root(&file, "package root must be a directory")
+            .expect_err("a regular file must not be accepted as a package root");
+
+        assert!(matches!(
+            error.kind(),
+            std::io::ErrorKind::NotADirectory | std::io::ErrorKind::InvalidInput
+        ));
     }
 
     #[cfg(unix)]
