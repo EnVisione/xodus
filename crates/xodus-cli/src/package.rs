@@ -47,6 +47,33 @@ fn register_content_id_redirect(
     Ok(())
 }
 
+fn append_subproduct(subproducts: &mut Vec<String>, entitlement_key: &str) -> io::Result<()> {
+    let mut parts = entitlement_key.split(':');
+    let Some(prefix) = parts.next() else {
+        return Ok(());
+    };
+    let Some(subproduct_text) = parts.next() else {
+        return Ok(());
+    };
+    let Some(_) = parts.next() else {
+        return Ok(());
+    };
+    if prefix != "big" || parts.next().is_some() {
+        return Ok(());
+    }
+
+    subproducts
+        .try_reserve(1)
+        .map_err(|_| io::Error::other("package subproduct allocation failed"))?;
+    let mut subproduct = String::new();
+    subproduct
+        .try_reserve(subproduct_text.len())
+        .map_err(|_| io::Error::other("package subproduct allocation failed"))?;
+    subproduct.push_str(subproduct_text);
+    subproducts.push(subproduct);
+    Ok(())
+}
+
 fn package_endpoint_url(content_id: &str, version_id: Option<&str>) -> io::Result<reqwest::Url> {
     let mut url = reqwest::Url::parse(XBOX_LIVE_PACKAGES_PC).map_err(|_| {
         io::Error::new(
@@ -244,10 +271,7 @@ pub async fn get_content_id(
                 if let Some(licensing_data) = &availability.licensing_data {
                     for satisfies in &licensing_data.satisfying_entitlement_keys {
                         for entitlement_key in &satisfies.entitlement_keys {
-                            let key: Vec<&str> = entitlement_key.split(":").collect();
-                            if key.len() == 3 && key[0] == "big" {
-                                subprods.push(key[1].to_string());
-                            }
+                            append_subproduct(&mut subprods, entitlement_key)?;
                         }
                     }
                 }
@@ -351,9 +375,22 @@ async fn get_packages_at_endpoint(
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_CONTENT_ID_REDIRECTS, MAX_PACKAGE_ID_BYTES, package_download_url_capacity,
-        package_endpoint_url, register_content_id_redirect,
+        MAX_CONTENT_ID_REDIRECTS, MAX_PACKAGE_ID_BYTES, append_subproduct,
+        package_download_url_capacity, package_endpoint_url, register_content_id_redirect,
     };
+
+    #[test]
+    fn subproduct_parser_accepts_only_three_part_big_keys() {
+        let mut subproducts = Vec::new();
+        append_subproduct(&mut subproducts, "big:product:sku").expect("subproduct allocation");
+        append_subproduct(&mut subproducts, "big:product").expect("subproduct allocation");
+        append_subproduct(&mut subproducts, "small:product:sku").expect("subproduct allocation");
+        append_subproduct(&mut subproducts, "big:product:sku:extra")
+            .expect("subproduct allocation");
+        append_subproduct(&mut subproducts, "big:product:").expect("subproduct allocation");
+
+        assert_eq!(subproducts, vec!["product", "product"]);
+    }
 
     #[test]
     fn package_endpoint_url_selects_latest_or_specific_route() {
