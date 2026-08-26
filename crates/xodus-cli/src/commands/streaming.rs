@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::io::{self, ErrorKind, Read, Write};
+use std::net::IpAddr;
 #[cfg(target_os = "linux")]
 use std::path::Component;
 use std::path::{Path, PathBuf};
@@ -1151,6 +1152,37 @@ fn validate_streaming_space(required: u64, available: u64) -> io::Result<()> {
     Ok(())
 }
 
+fn validate_streaming_source_url(source: &str) -> io::Result<()> {
+    let url = reqwest::Url::parse(source)
+        .map_err(|_| invalid_package_path("stream source URL is invalid"))?;
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(invalid_package_path(
+            "stream source URL must not contain credentials",
+        ));
+    }
+
+    let host = url
+        .host_str()
+        .ok_or_else(|| invalid_package_path("stream source URL must include a host"))?;
+    match url.scheme() {
+        "https" => Ok(()),
+        "http"
+            if host.eq_ignore_ascii_case("localhost")
+                || host
+                    .parse::<IpAddr>()
+                    .is_ok_and(|address| address.is_loopback()) =>
+        {
+            Ok(())
+        }
+        "http" => Err(invalid_package_path(
+            "nonlocal stream source URLs must use HTTPS",
+        )),
+        _ => Err(invalid_package_path(
+            "stream source URL must use HTTPS or loopback HTTP",
+        )),
+    }
+}
+
 async fn run_with_cancellation<Operation, Cancellation>(
     operation: Operation,
     cancellation: Cancellation,
@@ -1245,6 +1277,10 @@ pub async fn run(
     } else {
         let (urls, expected_length) =
             if source.starts_with("http://") || source.starts_with("https://") {
+                if let Err(error) = validate_streaming_source_url(&source) {
+                    eprintln!("could not use remote package source: {error}");
+                    return ExitCode::FAILURE;
+                }
                 (vec![source], None)
             } else {
                 let content_id = if Uuid::try_parse(&source).is_err() {
@@ -1839,8 +1875,8 @@ mod tests {
         package_path_components, promote_transaction, promote_transaction_with_interruption,
         promotion_entries, promotion_entries_with_removals, promotion_entry_capacity,
         read_bounded_transaction_journal, read_transaction_journal, recover_transaction_dir,
-        recover_transactions, rollback_transaction, validate_streaming_space,
-        write_transaction_journal,
+        recover_transactions, rollback_transaction, validate_streaming_source_url,
+        validate_streaming_space, write_transaction_journal,
     };
 
     #[test]
@@ -1855,6 +1891,28 @@ mod tests {
         let error = validate_streaming_space(100, 119)
             .expect_err("capacity below the reserve must be rejected");
         assert_eq!(error.kind(), std::io::ErrorKind::StorageFull);
+    }
+
+    #[test]
+    fn streaming_source_url_rejects_nonlocal_http() {
+        let error = validate_streaming_source_url("http://packages.example.test/game.msixvc")
+            .expect_err("nonlocal package sources must use https");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn streaming_source_url_allows_https_and_loopback_http() {
+        validate_streaming_source_url("https://packages.example.test/game.msixvc")
+            .expect("https package sources must remain supported");
+        validate_streaming_source_url("http://127.0.0.1:8080/game.msixvc")
+            .expect("loopback http fixtures must remain supported");
+
+        let error = validate_streaming_source_url(
+            "https://user:password@packages.example.test/game.msixvc",
+        )
+        .expect_err("package sources must not embed credentials");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     }
 
     #[tokio::test]
