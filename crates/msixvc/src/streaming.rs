@@ -512,7 +512,7 @@ where
             .write(true)
             .open(cache_path)
             .await?;
-        let cache_reader = OpenOptions::new().read(true).open(cache_path).await?;
+        let cache_reader = cache_writer.try_clone().await?;
 
         Ok(Self {
             upstream,

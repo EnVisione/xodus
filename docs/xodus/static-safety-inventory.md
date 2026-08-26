@@ -75,3 +75,5 @@ A redacted `gitleaks dir` scan over an exact archive of the current `HEAD` track
 ## Limits
 
 This is a static inventory. It does not prove dynamic behavior, external service compatibility, protected executable launch, or target game lifecycle completion. Mutation regressions, bounded fixture tests, the fuzz harness runtime, workspace Clippy, account-backed verification, runtime traces, and real target exercises remain separate required evidence. The bounded campaign produced no crash corpus, so no crash-specific regression is claimed beyond the existing deterministic parser and transaction tests.
+
+The prefix cache creates its file exclusively and clones the reader handle from that created file instead of reopening the caller path. This keeps both handles bound to the file that passed exclusive creation even if the directory entry changes afterward.
