@@ -2,7 +2,6 @@ use std::io;
 use std::path::Path;
 use std::process::ExitCode;
 
-use base64::Engine;
 use futures_util::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use inquire::MultiSelect;
@@ -16,10 +15,11 @@ use crate::commands::streaming::{
     acquire_transaction_lock, new_transaction, open_package_output, promote_transaction,
     promotion_entries,
 };
-use crate::package::{get_content_id, get_packages, get_specific_packages, package_download_urls};
+use crate::package::{
+    decode_file_hash, get_content_id, get_packages, get_specific_packages, package_download_urls,
+};
 use crate::package_manifest::write_package_revision_manifest;
 
-const MAX_FILE_HASH_BASE64_CHARS: usize = 64;
 const DOWNLOAD_RETRY_LIMIT: usize = 3;
 
 #[derive(Debug)]
@@ -119,36 +119,6 @@ fn checked_download_total(current: u64, chunk: usize, expected: u64) -> io::Resu
         ));
     }
     Ok(next)
-}
-
-fn decode_file_hash(value: &str) -> io::Result<Option<[u8; 32]>> {
-    let value = value.trim();
-    if value.is_empty() {
-        return Ok(None);
-    }
-    if value.len() > MAX_FILE_HASH_BASE64_CHARS {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "package file hash is too long",
-        ));
-    }
-
-    let decoded = base64::engine::general_purpose::STANDARD
-        .decode(value)
-        .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(value))
-        .map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "package file hash is not valid base64",
-            )
-        })?;
-    let hash = decoded.as_slice().try_into().map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "package file hash is not a 32 byte SHA-256 digest",
-        )
-    })?;
-    Ok(Some(hash))
 }
 
 fn validate_file_hash(expected: Option<[u8; 32]>, actual: [u8; 32]) -> io::Result<()> {
@@ -457,14 +427,13 @@ mod tests {
     use tokio::net::TcpListener;
 
     use super::{
-        DOWNLOAD_RETRY_LIMIT, DownloadAttemptRequest, MAX_FILE_HASH_BASE64_CHARS,
-        checked_download_total, checked_package_file_size, consume_download_retry,
-        decode_file_hash, download_file_attempt, download_file_attempt_with_hook,
-        is_retryable_package_download_status, validate_declared_download_length,
-        validate_download_space, validate_file_hash,
+        DOWNLOAD_RETRY_LIMIT, DownloadAttemptRequest, checked_download_total,
+        checked_package_file_size, consume_download_retry, decode_file_hash, download_file_attempt,
+        download_file_attempt_with_hook, is_retryable_package_download_status,
+        validate_declared_download_length, validate_download_space, validate_file_hash,
     };
     use crate::commands::streaming::recover_transactions;
-    use crate::package::package_download_urls;
+    use crate::package::{MAX_FILE_HASH_BASE64_CHARS, package_download_urls};
 
     #[test]
     fn package_download_urls_reject_missing_cdn_root() {

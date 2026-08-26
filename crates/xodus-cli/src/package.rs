@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::io;
 
+use base64::Engine;
 use inquire::Select;
 use xodus::XBOX_LIVE_PACKAGES_PC;
 use xodus::api::displaycatalog::find_products_by_id;
@@ -12,6 +13,7 @@ const MAX_CONTENT_ID_REDIRECTS: usize = 8;
 const MAX_PACKAGE_ID_BYTES: usize = 512;
 const MAX_PACKAGE_CDN_ROOT_BYTES: usize = 4096;
 const MAX_PACKAGE_RELATIVE_URL_BYTES: usize = 4096;
+pub(crate) const MAX_FILE_HASH_BASE64_CHARS: usize = 64;
 
 fn package_download_url_capacity(
     cdn_root_count: usize,
@@ -318,6 +320,7 @@ fn validate_package_file(file: &PackageFile, content_id: &str, version_id: &str)
             "package file name is empty",
         ));
     }
+    decode_file_hash(&file.file_hash)?;
     validate_package_download_metadata(
         &file.cdn_root_paths,
         &file.background_cdn_root_paths,
@@ -334,6 +337,36 @@ fn validate_package_file(file: &PackageFile, content_id: &str, version_id: &str)
         ));
     }
     Ok(())
+}
+
+pub(crate) fn decode_file_hash(value: &str) -> io::Result<Option<[u8; 32]>> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if value.len() > MAX_FILE_HASH_BASE64_CHARS {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "package file hash is too long",
+        ));
+    }
+
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(value)
+        .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(value))
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "package file hash is not valid base64",
+            )
+        })?;
+    let hash = decoded.as_slice().try_into().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "package file hash is not a 32 byte SHA-256 digest",
+        )
+    })?;
+    Ok(Some(hash))
 }
 
 fn has_encoded_path_escape(value: &str) -> bool {
@@ -641,6 +674,15 @@ mod tests {
         package.package_files.push(package.package_files[0].clone());
         let error = validate_package_details(&package, "content-id", None)
             .expect_err("duplicate package file names must fail");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn package_response_validation_rejects_invalid_file_hash() {
+        let mut package = package();
+        package.package_files[0].file_hash = "not-a-digest".to_owned();
+        let error = validate_package_details(&package, "content-id", None)
+            .expect_err("invalid package file hashes must fail");
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     }
 
