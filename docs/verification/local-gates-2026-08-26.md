@@ -53,6 +53,8 @@ Both returned `package CDN root rejected, requires HTTPS` before file selection 
 
 An additional bounded TLS and routing probe used the Microsoft wildcard endpoint `23.36.184.7` with the advertised asset hostnames. The certificate matched `*.xboxlive.com`, but every host returned `503 Service Unavailable`. No package path was requested or retained, and no supported replacement route was found.
 
+A fresh public DNS and certificate check on August 27, 2026 found no usable replacement route. `assets1.xboxlive.com` and `d1.xboxlive.com` returned a TLS internal error, `assets2.xboxlive.com` presented an Akamai certificate without the requested hostname, and `d2.xboxlive.com` presented `fallback.tls.fastly.net`. The check requested only host roots and no package path, signed URL, credential, or package bytes.
+
 ## Expected Baseline Result
 
 `bash scripts/cachyos/verify-baseline.sh --all` fails at the source comparison with `source-sensitive paths differ from the frozen baseline`. This is an expected stale baseline signal because the current branch contains verified changes after the frozen source revision. The manifest, environment, and workspace portions pass independently.

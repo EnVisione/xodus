@@ -47,6 +47,8 @@ A bounded direct `curl --noproxy '*'` check of `xvcf1.xboxlive.com`, `xvcf2.xbox
 
 One additional bounded routing probe pinned each advertised asset hostname to the resolved Microsoft wildcard endpoint `23.36.184.7`. The certificate then matched `*.xboxlive.com`, but `assets1`, `assets2`, `d1`, and `d2` each returned `503 Service Unavailable` for the routing probe. No package path equivalence was established, so this does not provide a supported replacement route.
 
+On August 27, 2026, a fresh public DNS resolution was checked without requesting package content. The advertised names resolved through Microsoft delivery aliases to mixed CDN endpoints. `assets1.xboxlive.com` and `d1.xboxlive.com` each produced a TLS internal error when addressed by their requested hostname. `assets2.xboxlive.com` presented an Akamai certificate without the requested hostname, and `d2.xboxlive.com` presented the known `fallback.tls.fastly.net` certificate. Direct hostname validation therefore still fails across the current DNS answers. No package path, signed URL, credential, or package byte was requested or retained, and no safe route was found.
+
 ### Versioned Package Retrieval Boundary
 
 The download command now accepts `--version-id` and uses the packages service `GetSpecificBasePackage/{content_id}/{version_id}` route to retrieve an exact previously recorded package revision. URL path segments are constructed through the URL API, so empty or control-bearing identifiers fail before authentication or network activity. This is the repository-owned acquisition path needed for a later source-to-target update exercise when an installed package manifest supplies its Microsoft `VersionId`.
