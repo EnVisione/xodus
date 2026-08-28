@@ -51,6 +51,8 @@ target/release/xodus-cli download 9NNX1VVR3KNQ --market neutral --dry-run
 
 Both returned `package CDN root rejected, requires HTTPS` before file selection or package transfer. No package bytes, signed URLs, or credentials were retained. This confirms current account access and isolates the remaining acquisition failure to the service supplied CDN route.
 
+An additional bounded TLS and routing probe used the Microsoft wildcard endpoint `23.36.184.7` with the advertised asset hostnames. The certificate matched `*.xboxlive.com`, but every host returned `503 Service Unavailable`. No package path was requested or retained, and no supported replacement route was found.
+
 ## Expected Baseline Result
 
 `bash scripts/cachyos/verify-baseline.sh --all` fails at the source comparison with `source-sensitive paths differ from the frozen baseline`. This is an expected stale baseline signal because the current branch contains verified changes after the frozen source revision. The manifest, environment, and workspace portions pass independently.
