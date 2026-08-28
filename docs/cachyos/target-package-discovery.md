@@ -49,6 +49,8 @@ One additional bounded routing probe pinned each advertised asset hostname to th
 
 On August 27, 2026, a fresh public DNS resolution was checked without requesting package content. The advertised names resolved through Microsoft delivery aliases to mixed CDN endpoints. `assets1.xboxlive.com` and `d1.xboxlive.com` each produced a TLS internal error when addressed by their requested hostname. `assets2.xboxlive.com` presented an Akamai certificate without the requested hostname, and `d2.xboxlive.com` presented the known `fallback.tls.fastly.net` certificate. Direct hostname validation therefore still fails across the current DNS answers. No package path, signed URL, credential, or package byte was requested or retained, and no safe route was found.
 
+The same check was repeated against public resolvers `1.1.1.1`, `8.8.8.8`, and `9.9.9.9` to rule out a stale local resolver answer. They returned different Microsoft delivery and CDN addresses, including Fastly, Akamai, and Global CDN endpoints, but each tested address still failed the requested hostname certificate check or TLS negotiation. This cross-resolver result does not establish a package-path mapping and does not justify weakening HTTPS validation.
+
 ### Versioned Package Retrieval Boundary
 
 The download command now accepts `--version-id` and uses the packages service `GetSpecificBasePackage/{content_id}/{version_id}` route to retrieve an exact previously recorded package revision. URL path segments are constructed through the URL API, so empty or control-bearing identifiers fail before authentication or network activity. This is the repository-owned acquisition path needed for a later source-to-target update exercise when an installed package manifest supplies its Microsoft `VersionId`.

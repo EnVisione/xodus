@@ -55,6 +55,8 @@ An additional bounded TLS and routing probe used the Microsoft wildcard endpoint
 
 A fresh public DNS and certificate check on August 27, 2026 found no usable replacement route. `assets1.xboxlive.com` and `d1.xboxlive.com` returned a TLS internal error, `assets2.xboxlive.com` presented an Akamai certificate without the requested hostname, and `d2.xboxlive.com` presented `fallback.tls.fastly.net`. The check requested only host roots and no package path, signed URL, credential, or package bytes.
 
+The route check was repeated against public DNS resolvers `1.1.1.1`, `8.8.8.8`, and `9.9.9.9`. Their differing CDN answers did not provide a valid route. Every tested address either failed TLS negotiation or presented a certificate that did not match the requested Xbox hostname. No package path was requested.
+
 ## Expected Baseline Result
 
 `bash scripts/cachyos/verify-baseline.sh --all` fails at the source comparison with `source-sensitive paths differ from the frozen baseline`. This is an expected stale baseline signal because the current branch contains verified changes after the frozen source revision. The manifest, environment, and workspace portions pass independently.
