@@ -8,7 +8,7 @@ use crate::licensing::utils;
 use crate::models::devicecredential::License;
 use crate::models::licensing::{
     DeviceContext, LicenseContent, LicenseContentRequest, LicenseContentResponse,
-    LicenseUserIdentity,
+    LicenseTokenRequest, LicenseTokenResponse, LicenseUserIdentity,
 };
 
 const MAX_LICENSE_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
@@ -117,6 +117,19 @@ async fn decode_license_response(
     Ok(serde_json::from_slice(&body)?)
 }
 
+async fn decode_license_token_response(
+    mut response: reqwest::Response,
+) -> Result<LicenseTokenResponse, LicenseContentError> {
+    validate_license_response_length(response.content_length())?;
+
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        append_license_response_chunk(&mut body, &chunk)?;
+    }
+
+    Ok(serde_json::from_slice(&body)?)
+}
+
 fn decode_license_content(content: &LicenseContent) -> Result<License, LicenseContentError> {
     let value = content
         .keys
@@ -180,13 +193,51 @@ pub async fn get_license_content(
     Ok((content, license))
 }
 
+pub async fn get_license_token(
+    client: &reqwest::Client,
+    device_ms_token: String,
+    user_ms_token: String,
+    ticket_reference: String,
+    parent_product_id: String,
+    products: Vec<String>,
+    custom_developer_string: String,
+) -> Result<String, LicenseContentError> {
+    let response = client
+        .post("https://licensing.mp.microsoft.com/v8.0/licenseToken")
+        .header("from", "XboxLicenseManager")
+        .header("Authorization", device_ms_token)
+        .header(
+            "user-agent",
+            "XboxLm-PC/Microsoft.GamingServices_32.107.4002.0_x64__8wekyb3d8bbwe",
+        )
+        .json(&LicenseTokenRequest {
+            parent_product_id,
+            enforce_sellable_by: true,
+            related_product_ids: products,
+            custom_developer_string,
+            beneficiaries: vec![LicenseUserIdentity {
+                identity_type: "Msa".to_string(),
+                identity_value: user_ms_token,
+                local_ticket_reference: ticket_reference,
+            }],
+        })
+        .send()
+        .await?;
+    crate::api::ensure_https_url(response.url())
+        .map_err(|_| LicenseContentError::InsecureRedirect)?;
+
+    let token_response = decode_license_token_response(response.error_for_status()?).await?;
+    Ok(token_response.license_token)
+}
+
 #[cfg(test)]
 mod tests {
     use base64::Engine;
 
     use super::{
-        LicenseContent, LicenseContentError, append_license_response_chunk, decode_license_content,
-        decode_license_value, validate_license_response_length,
+        LicenseContent, LicenseContentError, LicenseTokenRequest, LicenseTokenResponse,
+        append_license_response_chunk, decode_license_content, decode_license_value,
+        validate_license_response_length,
     };
     use crate::models::licensing::LicenseKeys;
 
@@ -264,5 +315,25 @@ mod tests {
             decode_license_content(&content),
             Err(LicenseContentError::InvalidXml(_))
         ));
+    }
+
+    #[test]
+    fn license_token_models_use_camel_case_and_decode() {
+        let request = LicenseTokenRequest {
+            parent_product_id: "parent".into(),
+            enforce_sellable_by: true,
+            related_product_ids: vec!["product".into()],
+            custom_developer_string: "developer".into(),
+            beneficiaries: Vec::new(),
+        };
+        let value = serde_json::to_value(request).expect("license token request must serialize");
+        assert_eq!(value["parentProductId"], "parent");
+        assert_eq!(value["enforceSellableBy"], true);
+        assert_eq!(value["relatedProductIds"][0], "product");
+        assert_eq!(value["customDeveloperString"], "developer");
+
+        let response: LicenseTokenResponse = serde_json::from_str(r#"{"licenseToken":"token"}"#)
+            .expect("license token response must deserialize");
+        assert_eq!(response.license_token, "token");
     }
 }

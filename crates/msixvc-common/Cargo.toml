@@ -7,9 +7,9 @@ license.workspace = true
 [dependencies]
 tokio = { workspace = true }
 chrono = { workspace = true }
-uuid = "1.23.1"
+thiserror = { workspace = true }
+uuid = { workspace = true }
 typenum = { version = "1.20.1", features = ["const-generics"] }
-generic-array = "1.4.4"
+generic-array = "1.4.5"
 bitflags = "2.13.1"
-thiserror = "2.0.20"
 num_enum = "0.7.6"

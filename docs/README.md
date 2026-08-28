@@ -7,3 +7,4 @@ Knowledge dump and design documentation
 - [Xbox Services API traces](./xbox/README.md)
 - [CachyOS Evidence](./cachyos/README.md)
 - [Local Verification Record](./verification/local-gates-2026-08-26.md)
+- [Upstream Merge Verification](./verification/upstream-merge-2026-08-27.md)

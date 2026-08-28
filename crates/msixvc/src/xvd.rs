@@ -5,8 +5,8 @@ use std::io::{self, Error, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::mem::size_of;
 use std::net::IpAddr;
 
-use aes::Aes128;
 use aes::cipher::KeyInit;
+use aes::{Aes128Dec, Aes128Enc};
 use futures_util::StreamExt;
 use msixvc_common::parse::{BinaryParse, BinaryTryParse};
 use reqwest::header::{CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_RANGE, HeaderMap, RANGE};
@@ -18,9 +18,10 @@ use tokio::io::{
 use tokio::task::block_in_place;
 use tokio::time::{sleep, timeout};
 use tokio_util::io::SyncIoBridge;
+use uuid::Uuid;
 use zerocopy::IntoBytes;
 
-use crate::crypt::{Tweak, decrypt_page_xts};
+use crate::crypt::{TweakGenerator, decrypt_page_xts};
 use crate::math::{
     ArithmeticError, bytes_to_pages, calculate_hash_block_num_and_run_for_block_num,
     offset_to_page_number,
@@ -2331,6 +2332,12 @@ pub struct EncryptedSectionInfo {
     data_hashs: Vec<[u8; 20]>,
 }
 
+fn vduid_uuid(vduid: [u8; 8]) -> Uuid {
+    let mut bytes = [0_u8; 16];
+    bytes[..vduid.len()].copy_from_slice(&vduid);
+    Uuid::from_bytes_le(bytes)
+}
+
 pub struct UserPackageFile {
     pub offset: u64,
     pub length: u64,
@@ -2932,9 +2939,9 @@ impl XvdFile {
             tweak_key.copy_from_slice(&full_key[..16]);
             data_key.copy_from_slice(&full_key[16..]);
 
-            tweak = Some(Tweak::new(0, s.header_id, s.vduid));
-            tweak_cipher = Some(Aes128::new((&tweak_key).into()));
-            data_cipher = Some(Aes128::new((&data_key).into()));
+            tweak = Some(TweakGenerator::new(s.header_id, vduid_uuid(s.vduid)));
+            tweak_cipher = Some(Aes128Enc::new((&tweak_key).into()));
+            data_cipher = Some(Aes128Dec::new((&data_key).into()));
         }
         let page_plan = download_page_plan(file_offset_in_section, sfile.offset, sfile.length)?;
 
@@ -3081,7 +3088,7 @@ impl XvdFile {
                     let to_write_remaining = remaining.min(PAGE_SIZE as u64);
                     let to_write_remaining_usize =
                         checked_download_write_length(to_write_remaining)?;
-                    let to_write = if let Some(tweak) = tweak.as_mut() {
+                    let to_write = if let Some(tweak_generator) = tweak.as_ref() {
                         let s = s.ok_or(DownloadFileHttpError::MissingEncryptedSection)?;
                         let data_unit = match &s.data_units {
                             Some(units) => {
@@ -3095,14 +3102,14 @@ impl XvdFile {
                             }
                             None => download_data_unit_index(page_in_section)?,
                         };
-                        tweak.update_data_unit(data_unit);
+                        let tweak = tweak_generator.with_data_unit(data_unit);
                         let tweak_cipher = tweak_cipher
                             .as_ref()
                             .ok_or(DownloadFileHttpError::MissingCipher)?;
                         let data_cipher = data_cipher
                             .as_ref()
                             .ok_or(DownloadFileHttpError::MissingCipher)?;
-                        decrypt_page_xts(&mut page, *tweak, tweak_cipher, data_cipher);
+                        decrypt_page_xts(&mut page, tweak, tweak_cipher, data_cipher);
                         to_write_remaining_usize
                     } else if sfile.keep_encrypted {
                         // Decryption needs full 4k blocks
@@ -3151,7 +3158,7 @@ impl XvdFile {
         let file_offset_in_section = extract_file_offset_in_section(sfile.offset, section)?;
         let page_plan = extract_page_plan(file_offset_in_section, sfile.length)?;
 
-        let mut decryption = if let Some(section) = section
+        let decryption = if let Some(section) = section
             && (!sfile.keep_encrypted || decrypt_all)
         {
             let mut tweak_key = [0u8; 16];
@@ -3160,9 +3167,9 @@ impl XvdFile {
             data_key.copy_from_slice(&full_key[16..]);
 
             Some((
-                Tweak::new(0, section.header_id, section.vduid),
-                Aes128::new((&tweak_key).into()),
-                Aes128::new((&data_key).into()),
+                TweakGenerator::new(section.header_id, vduid_uuid(section.vduid)),
+                Aes128Enc::new((&tweak_key).into()),
+                Aes128Dec::new((&data_key).into()),
             ))
         } else {
             None
@@ -3201,29 +3208,30 @@ impl XvdFile {
                 }
             }
             let write_length = extract_write_length(progress_bytes, sfile.length)?;
-            let to_write = if let Some((tweak, tweak_cipher, data_cipher)) = decryption.as_mut() {
-                let section = section.ok_or(ExtractFileError::MissingEncryptedSection)?;
-                let data_unit = match &section.data_units {
-                    Some(units) => {
-                        let page_index = extract_page_index(page_in_section)?;
-                        *units
-                            .get(page_index)
-                            .ok_or(ExtractFileError::DataUnitMissing {
-                                page_in_section,
-                                data_unit_count: units.len(),
-                            })?
-                    }
-                    None => extract_data_unit_index(page_in_section)?,
+            let to_write =
+                if let Some((tweak_generator, tweak_cipher, data_cipher)) = decryption.as_ref() {
+                    let section = section.ok_or(ExtractFileError::MissingEncryptedSection)?;
+                    let data_unit = match &section.data_units {
+                        Some(units) => {
+                            let page_index = extract_page_index(page_in_section)?;
+                            *units
+                                .get(page_index)
+                                .ok_or(ExtractFileError::DataUnitMissing {
+                                    page_in_section,
+                                    data_unit_count: units.len(),
+                                })?
+                        }
+                        None => extract_data_unit_index(page_in_section)?,
+                    };
+                    let tweak = tweak_generator.with_data_unit(data_unit);
+                    decrypt_page_xts(&mut page, tweak, tweak_cipher, data_cipher);
+                    write_length
+                } else if sfile.keep_encrypted {
+                    // Decryption needs full 4k blocks
+                    PAGE_SIZE
+                } else {
+                    write_length
                 };
-                tweak.update_data_unit(data_unit);
-                decrypt_page_xts(&mut page, *tweak, tweak_cipher, data_cipher);
-                write_length
-            } else if sfile.keep_encrypted {
-                // Decryption needs full 4k blocks
-                PAGE_SIZE
-            } else {
-                write_length
-            };
             write_all_with_retry(out, &page[..to_write]).await?;
         }
         Ok(())
