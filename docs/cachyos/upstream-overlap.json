@@ -53,7 +53,23 @@
         "reason": "Adopt the XStore license token API after preserving bounded response, status, redirect, and secret handling checks."
       }
     ],
-    "evidence_status": "Evidence touching an affected path is stale until the merged tree passes the required verification gates."
+    "evidence_status": "Evidence touching an affected path is revalidated by the signed merge commit and the serialized offline verification gates below. Retail package evidence remains open."
+  },
+  "post_merge": {
+    "merge_commit": "bcf24f56feb049364cd87bb9dbce22f8bfa03944",
+    "branch": "envy/target-metadata-evidence",
+    "remote_ref": "origin/envy/target-metadata-evidence",
+    "remote_commit": "bcf24f56feb049364cd87bb9dbce22f8bfa03944",
+    "verification": {
+      "cargo_fmt_check": "passed",
+      "cargo_check_workspace_all_targets": "passed",
+      "cargo_clippy_workspace_all_targets_all_features": "passed with existing vendored xal deprecation warnings",
+      "cargo_test_workspace_all_targets_no_run": "passed",
+      "cargo_test_workspace_all_targets_serialized": "passed, 482 tests, 2 credential backed tests skipped",
+      "cargo_build_release_workspace": "passed"
+    },
+    "main_unchanged": true,
+    "credentials_or_package_content_accessed": false
   },
   "decision_contract": {
     "allowed_decisions": ["adopt", "supersede", "isolate", "defer"],
