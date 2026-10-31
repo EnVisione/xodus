@@ -312,13 +312,13 @@ impl Flows {
         let mut authenticator = Into::<XalAuthenticator>::into(ts.clone());
 
         info!("Refreshing windows live tokens");
-        let refreshed_wl_tokens = authenticator
-            .refresh_token(ts.live_token.refresh_token().unwrap())
-            .await
-            .expect("Failed to exchange refresh token for fresh WL tokens");
+        let refresh_token = ts
+            .live_token
+            .refresh_token()
+            .ok_or(Error::MissingRefreshToken)?;
+        let refreshed_wl_tokens = authenticator.refresh_token(refresh_token).await?;
 
-        debug!("Windows Live tokens: {:?}", refreshed_wl_tokens);
-        ts.live_token = refreshed_wl_tokens.clone();
+        ts.live_token = refreshed_wl_tokens;
 
         Ok(authenticator)
     }
@@ -362,12 +362,11 @@ impl Flows {
     {
         trace!("Initiating device code flow");
         let device_code_flow = authenticator.initiate_device_code_auth().await?;
-        debug!("Device code={:?}", device_code_flow);
 
         trace!("Reaching into callback to notify caller about device code url");
         cb.call(device_code_flow.clone().into())
             .await
-            .map_err(|e| Error::GeneralError(format!("Failed getting redirect URL err={e}")))?;
+            .map_err(|_| Error::GeneralError("Authentication callback failed".into()))?;
 
         trace!("Polling for device code");
         let live_tokens = authenticator
@@ -431,12 +430,10 @@ impl Flows {
         let redirect_url = cb
             .call(url.into())
             .await
-            .map_err(|e| Error::GeneralError(format!("Failed getting redirect URL err={e}")))?
+            .map_err(|_| Error::GeneralError("Authentication callback failed".into()))?
             .ok_or(Error::GeneralError(
                 "Failed receiving redirect URL".to_string(),
             ))?;
-
-        debug!("From callback: Redirect URL={:?}", redirect_url);
 
         let live_tokens = if implicit {
             trace!("Parsing (implicit grant) redirect URI");
@@ -445,7 +442,6 @@ impl Flows {
             trace!("Parsing (authorization code) redirect URI");
             let authorization_code =
                 XalAuthenticator::parse_authorization_code_response(&redirect_url, Some(&state))?;
-            debug!("Authorization Code: {:?}", authorization_code);
 
             trace!("Getting Windows Live tokens (exchange code)");
             authenticator
@@ -498,50 +494,37 @@ impl Flows {
     ) -> Result<TokenStore, Error> {
         trace!("Getting device token");
         let device_token = authenticator.get_device_token().await?;
-        debug!("Device token={:?}", device_token);
         let (code_challenge, code_verifier) = XalAuthenticator::generate_code_verifier();
-        trace!("Generated Code verifier={:?}", code_verifier);
-        trace!("Generated Code challenge={:?}", code_challenge);
         let state = XalAuthenticator::generate_random_state();
-        trace!("Generated random state={:?}", state);
 
         trace!("Fetching SISU authentication URL and Session Id");
         let (auth_resp, session_id) = authenticator
             .sisu_authenticate(&device_token, &code_challenge, &state)
             .await?;
-        debug!(
-            "SISU Authenticate response={:?} Session Id={:?}",
-            auth_resp, session_id
-        );
 
         // Passing redirect URL to callback and expecting redirect url + authorization token back
         trace!("Reaching into callback to receive authentication redirect URL");
         let redirect_url = callback
             .call(auth_resp.into())
             .await
-            .map_err(|e| Error::GeneralError(format!("Failed getting redirect URL err={e}")))?
+            .map_err(|_| Error::GeneralError("Authentication callback failed".into()))?
             .ok_or(Error::GeneralError(
                 "Did not receive any Redirect URL from RedirectUrl callback".to_string(),
             ))?;
-
-        debug!("From callback: Redirect URL={:?}", redirect_url);
 
         trace!("Parsing redirect URI");
         let authorization_code =
             XalAuthenticator::parse_authorization_code_response(&redirect_url, Some(&state))?;
 
-        debug!("Authorization Code: {:?}", authorization_code);
         trace!("Getting Windows Live tokens (exchange code)");
         let live_tokens = authenticator
             .exchange_code_for_token(authorization_code, Some(code_verifier))
             .await?;
-        debug!("Windows live tokens={:?}", live_tokens);
 
         trace!("Getting Sisu authorization response");
         let sisu_resp = authenticator
             .sisu_authorize(&live_tokens, &device_token, Some(session_id))
             .await?;
-        debug!("Sisu authorizatione response={:?}", sisu_resp);
 
         let ts = TokenStore {
             app_params: authenticator.app_params(),
@@ -628,24 +611,19 @@ impl Flows {
         access_token_prefix: AccessTokenPrefix,
         request_title_token: bool,
     ) -> Result<TokenStore, Error> {
-        debug!("Windows live tokens={:?}", live_tokens);
         trace!("Getting device token");
         let device_token = authenticator.get_device_token().await?;
-        debug!("Device token={:?}", device_token);
 
         trace!("Getting user token");
         let user_token = authenticator
             .get_user_token(&live_tokens, access_token_prefix)
             .await?;
 
-        debug!("User token={:?}", user_token);
-
         let maybe_title_token = if request_title_token {
             trace!("Getting title token");
             let title_token = authenticator
                 .get_title_token(&live_tokens, &device_token)
                 .await?;
-            debug!("Title token={:?}", title_token);
 
             Some(title_token)
         } else {
@@ -662,7 +640,6 @@ impl Flows {
                 &xsts_relying_party,
             )
             .await?;
-        debug!("XSTS token={:?}", authorization_token);
 
         let ts = TokenStore {
             app_params: authenticator.app_params(),
@@ -716,10 +693,8 @@ impl Flows {
         authenticator: &mut XalAuthenticator,
         live_tokens: WindowsLiveTokens,
     ) -> Result<TokenStore, Error> {
-        debug!("Windows live tokens={:?}", live_tokens);
         trace!("Getting device token");
         let device_token = authenticator.get_device_token().await?;
-        debug!("Device token={:?}", device_token);
 
         trace!("Getting user token");
         let resp = authenticator
@@ -749,6 +724,39 @@ mod tests {
     use oauth2::{EndUserVerificationUrl, VerificationUriComplete};
 
     use super::{AuthPromptData, Error};
+
+    struct RejectingCallback;
+
+    #[async_trait::async_trait]
+    impl super::AuthPromptCallback for RejectingCallback {
+        async fn call(
+            &self,
+            _: AuthPromptData,
+        ) -> Result<Option<url::Url>, Box<dyn std::error::Error>> {
+            Err(std::io::Error::other("synthetic-sensitive-marker").into())
+        }
+    }
+
+    #[tokio::test]
+    async fn authentication_callback_error_does_not_expose_callback_details() {
+        let mut authenticator = crate::XalAuthenticator::default();
+        let error =
+            super::Flows::ms_authorization_flow(&mut authenticator, RejectingCallback, true)
+                .await
+                .unwrap_err();
+        assert!(matches!(error, Error::GeneralError(_)));
+        assert!(!format!("{error:?}").contains("synthetic-sensitive-marker"));
+    }
+
+    #[tokio::test]
+    async fn refresh_without_refresh_token_fails_without_mutating_store() {
+        let input = r#"{"app_params":{"client_id":"test","title_id":"42","auth_scopes":[],"redirect_uri":"https://example.test/"},"client_params":{"user_agent":"test","device_type":"NINTENDO","client_version":"0","query_display":"touch"},"sandbox_id":"RETAIL","live_token":{"access_token":"synthetic","token_type":"bearer"}}"#;
+        let mut store: crate::TokenStore = serde_json::from_str(input).unwrap();
+        let before = serde_json::to_value(&store).unwrap();
+        let result = super::Flows::try_refresh_live_tokens_from_tokenstore(&mut store).await;
+        assert!(matches!(result, Err(Error::MissingRefreshToken)));
+        assert_eq!(serde_json::to_value(&store).unwrap(), before);
+    }
 
     #[test]
     fn redirect_prompt_uses_the_validated_url() {

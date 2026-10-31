@@ -577,9 +577,9 @@ impl SignaturePolicyCache {
         }
 
         if !["http", "https"].contains(&url.scheme()) {
-            return Err(Error::GeneralError(format!(
-                "Url with invalid protocol passed, expected http or https, url={url}"
-            )));
+            return Err(Error::GeneralError(
+                "Url with invalid protocol passed, expected http or https".into(),
+            ));
         }
 
         let endpoints = match self.endpoints.as_ref() {
@@ -615,7 +615,7 @@ impl SignaturePolicyCache {
 
         match matching_endpoint {
             Some(ep) => {
-                debug!("Identified Title endpoint={ep:?} for URL={url} {url:?}");
+                debug!("Identified signing policy for request");
                 let policy_index = ep.signature_policy_index.unwrap() as usize;
                 let policy =
                     endpoints
@@ -628,7 +628,7 @@ impl SignaturePolicyCache {
                 Ok(Some(policy.to_owned()))
             }
             None => {
-                warn!("No matched SigningPolicy for url={url:?} found");
+                warn!("No matched signing policy found");
                 Ok(None)
             }
         }
@@ -645,9 +645,9 @@ impl SignaturePolicyCache {
         }
 
         if !["http", "https"].contains(&url.scheme()) {
-            return Err(Error::GeneralError(format!(
-                "Url with invalid protocol passed, expected http or https, url={url}"
-            )));
+            return Err(Error::GeneralError(
+                "Url with invalid protocol passed, expected http or https".into(),
+            ));
         }
 
         let endpoints = match self.endpoints.as_ref() {

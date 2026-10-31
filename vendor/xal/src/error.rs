@@ -46,18 +46,24 @@ pub enum Error {
     /// JSON De/Serialization error
     #[error("JSON De/Serialization error")]
     JsonError(#[from] serde_json::Error),
+    /// JSON response exceeds the supported size
+    #[error("JSON response exceeds the supported size")]
+    JsonResponseTooLarge,
+    /// Memory could not be reserved for the JSON response
+    #[error("unable to allocate JSON response buffer")]
+    JsonResponseAllocationFailed,
     /// HTTP response failed to parse into JSON model
     #[error("HTTP JSON Deserialization")]
     JsonHttpResponseError {
         /// HTTP status code
         status: http::StatusCode,
-        /// Target HTTP url
+        /// Redacted target URL
         url: String,
-        /// HTTP headers
+        /// Redacted HTTP headers
         headers: Box<http::HeaderMap>,
-        /// HTTP message body
+        /// Redacted HTTP message body
         body: String,
-        /// [`serde_json`] error
+        /// Sanitized [`serde_json`] error location
         inner: serde_json::Error,
     },
     /// Base64 decoding error
@@ -78,6 +84,9 @@ pub enum Error {
     /// XSTS response did not contain a usable token
     #[error("xsts response missing token")]
     MissingXstsToken,
+    /// Windows Live response did not contain a refresh token
+    #[error("windows live response missing refresh token")]
+    MissingRefreshToken,
     /// Unknown error
     #[error("unknown xal error")]
     Unknown,
