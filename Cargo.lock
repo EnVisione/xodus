@@ -6186,6 +6186,7 @@ name = "xodus-cli"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "aws-lc-rs",
  "base64 0.23.1",
  "chrono",
  "clap",
@@ -6197,6 +6198,7 @@ dependencies = [
  "inquire",
  "log",
  "msixvc",
+ "msixvc-common",
  "nix",
  "reqwest 0.13.5",
  "rustix",

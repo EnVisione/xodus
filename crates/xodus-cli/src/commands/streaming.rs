@@ -295,6 +295,21 @@ fn is_windows_reserved_name(component: &str) -> bool {
 }
 
 pub(crate) fn open_package_output(root: &Path, package_path: &str) -> io::Result<std::fs::File> {
+    open_package_output_with_access(root, package_path, OFlags::WRONLY)
+}
+
+pub(crate) fn open_package_output_readwrite(
+    root: &Path,
+    package_path: &str,
+) -> io::Result<std::fs::File> {
+    open_package_output_with_access(root, package_path, OFlags::RDWR)
+}
+
+fn open_package_output_with_access(
+    root: &Path,
+    package_path: &str,
+    access: OFlags,
+) -> io::Result<std::fs::File> {
     let components = package_path_components(package_path)?;
     let mut directory = open_package_root(root, "transaction root is not a directory")?;
 
@@ -322,7 +337,7 @@ pub(crate) fn open_package_output(root: &Path, package_path: &str) -> io::Result
         open_resolved(
             &directory,
             *filename,
-            OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC | OFlags::CLOEXEC,
+            access | OFlags::CREATE | OFlags::TRUNC | OFlags::CLOEXEC,
             Mode::RUSR | Mode::WUSR,
             OUTPUT_RESOLVE_FLAGS,
         )
@@ -1715,13 +1730,16 @@ struct StreamingRun<'a> {
     adopt_existing: bool,
 }
 
-struct StreamingIdentity {
+pub(crate) struct StreamingIdentity {
     content_id: Uuid,
     package_id: Uuid,
     version: String,
 }
 
-fn parse_streaming_identity(content_id: &str, revision: &str) -> io::Result<StreamingIdentity> {
+pub(crate) fn parse_streaming_identity(
+    content_id: &str,
+    revision: &str,
+) -> io::Result<StreamingIdentity> {
     let invalid = || {
         io::Error::new(
             ErrorKind::InvalidData,
@@ -1756,7 +1774,7 @@ fn parse_streaming_identity(content_id: &str, revision: &str) -> io::Result<Stre
     })
 }
 
-fn validate_streaming_identity(
+pub(crate) fn validate_streaming_identity(
     content_id: Uuid,
     package_id: Uuid,
     version: &str,

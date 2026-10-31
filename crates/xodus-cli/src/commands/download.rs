@@ -7,15 +7,19 @@ use futures_util::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use inquire::MultiSelect;
 use inquire::validator::Validation;
+use msixvc::authenticated_xvd::AuthenticatedXvd;
+use msixvc::signature::PinnedXvdKey;
 use reqwest::header::{CONTENT_ENCODING, HeaderMap};
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 use xodus::models::packagespc::PackageFile;
 use xodus::tokens::TokenManager;
 
+use crate::commands::apply_xsp::validate_authenticated_extent;
 use crate::commands::streaming::{
-    TransactionLock, acquire_transaction_lock, new_transaction, open_package_output,
-    promote_owned_transaction, promotion_entries, recover_transactions,
+    StreamingIdentity, TransactionLock, acquire_transaction_lock, new_transaction,
+    open_package_output_readwrite, parse_streaming_identity, promote_owned_transaction,
+    promotion_entries, recover_transactions, validate_streaming_identity,
 };
 use crate::package::{
     decode_file_hash, get_content_id, get_packages, get_specific_packages, package_download_urls,
@@ -247,9 +251,52 @@ struct DownloadAttemptRequest<'a> {
     url: &'a str,
     file_name: &'a str,
     file_size: u64,
-    expected_hash: Option<[u8; 32]>,
+    integrity: DownloadIntegrity<'a>,
     output_root: &'a Path,
     progress_bar: &'a ProgressBar,
+}
+
+#[derive(Clone, Copy, Default)]
+struct DownloadIntegrity<'a> {
+    expected_hash: Option<[u8; 32]>,
+    signed_xvd: Option<(&'a PinnedXvdKey, &'a StreamingIdentity)>,
+}
+
+fn requires_signed_xvd(file_name: &str) -> bool {
+    file_name.to_ascii_lowercase().ends_with(".msixvc")
+}
+
+async fn verify_downloaded_xvd(
+    file: &mut tokio::fs::File,
+    key: &PinnedXvdKey,
+    expected: &StreamingIdentity,
+) -> io::Result<()> {
+    let actual_length = file.metadata().await?.len();
+    let reader = tokio::io::BufReader::with_capacity(1024 * 1024, file);
+    let mut xvd = AuthenticatedXvd::open_signed(reader, key)
+        .await
+        .map_err(io::Error::other)?;
+    let header = xvd.header();
+    validate_streaming_identity(
+        header.vduid,
+        header.pduid,
+        &header.package_version.to_string(),
+        Some(expected),
+    )?;
+    let layout = xvd.layout();
+    if layout.embedded_xvd.len.0 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "embedded XVD verification is not supported",
+        ));
+    }
+    validate_authenticated_extent(
+        actual_length,
+        layout.user_data.start.to_bytes().0,
+        layout.hash_tree_layout.level0.num_hashes.0,
+    )?;
+    xvd.verify_all().await.map_err(io::Error::other)?;
+    Ok(())
 }
 
 fn lock_and_recover_download_root(output_root: &Path) -> io::Result<TransactionLock> {
@@ -263,7 +310,7 @@ async fn download_file_attempt(
     url: &str,
     file_name: &str,
     file_size: u64,
-    expected_hash: Option<[u8; 32]>,
+    integrity: DownloadIntegrity<'_>,
     output_root: &Path,
     progress_bar: &ProgressBar,
 ) -> Result<(), DownloadAttemptError> {
@@ -273,7 +320,7 @@ async fn download_file_attempt(
             url,
             file_name,
             file_size,
-            expected_hash,
+            integrity,
             output_root,
             progress_bar,
         },
@@ -294,10 +341,16 @@ where
         url,
         file_name,
         file_size,
-        expected_hash,
+        integrity,
         output_root,
         progress_bar,
     } = request;
+    if requires_signed_xvd(file_name) && integrity.signed_xvd.is_none() {
+        return Err(fatal_download_error(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "MSIXVC download requires signed package identity verification",
+        )));
+    }
     progress_bar.set_position(0);
     let available_space = fs2::available_space(output_root).map_err(fatal_download_error)?;
     validate_download_space(file_size, available_space).map_err(fatal_download_error)?;
@@ -324,7 +377,8 @@ where
     let (transaction, payload_root) = new_transaction(output_root).map_err(fatal_download_error)?;
     let mut promotion = promotion_entries(&[(file_name.to_owned(), file_name.to_owned())])
         .map_err(fatal_download_error)?;
-    let output = open_package_output(&payload_root, file_name).map_err(fatal_download_error)?;
+    let output =
+        open_package_output_readwrite(&payload_root, file_name).map_err(fatal_download_error)?;
     let mut output = tokio::fs::File::from_std(output);
     let mut stream = response.bytes_stream();
     let mut downloaded = 0_u64;
@@ -354,8 +408,14 @@ where
             format!("received {downloaded} bytes, expected {file_size}"),
         )));
     }
-    validate_file_hash(expected_hash, hasher.finalize().into()).map_err(fatal_download_error)?;
+    validate_file_hash(integrity.expected_hash, hasher.finalize().into())
+        .map_err(fatal_download_error)?;
     output.sync_all().await.map_err(fatal_download_error)?;
+    if let Some((key, expected)) = integrity.signed_xvd {
+        verify_downloaded_xvd(&mut output, key, expected)
+            .await
+            .map_err(fatal_download_error)?;
+    }
     drop(output);
     promote_owned_transaction(transaction, output_root, &mut promotion)
         .map_err(fatal_download_error)?;
@@ -464,6 +524,29 @@ pub async fn run(
                 return ExitCode::FAILURE;
             }
         };
+        let signed_xvd = if requires_signed_xvd(&file.file_name) {
+            let identity = match parse_streaming_identity(&package.content_id, &package.version) {
+                Ok(identity) => identity,
+                Err(error) => {
+                    eprintln!("refusing {}: {error}", file.file_name);
+                    return ExitCode::FAILURE;
+                }
+            };
+            let key = match PinnedXvdKey::microsoft_retail() {
+                Ok(key) => key,
+                Err(error) => {
+                    eprintln!("could not load package signing key: {error}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            Some((key, identity))
+        } else {
+            None
+        };
+        let integrity = DownloadIntegrity {
+            expected_hash,
+            signed_xvd: signed_xvd.as_ref().map(|(key, identity)| (key, identity)),
+        };
         let progress_style = ProgressStyle::with_template(
             "[{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}) ({eta})",
         )
@@ -482,7 +565,7 @@ pub async fn run(
                     url,
                     &file.file_name,
                     file_size,
-                    expected_hash,
+                    integrity,
                     output_root,
                     &progress_bar,
                 )
@@ -544,7 +627,7 @@ mod tests {
     use tokio::net::TcpListener;
 
     use super::{
-        DOWNLOAD_RETRY_LIMIT, DownloadAttemptRequest, checked_download_total,
+        DOWNLOAD_RETRY_LIMIT, DownloadAttemptRequest, DownloadIntegrity, checked_download_total,
         checked_package_file_size, consume_download_retry, decode_file_hash, download_file_attempt,
         download_file_attempt_with_hook, is_retryable_package_download_status,
         validate_declared_download_length, validate_download_request_url,
@@ -552,6 +635,193 @@ mod tests {
         validate_download_space, validate_file_hash,
     };
     use crate::package::{MAX_FILE_HASH_BASE64_CHARS, package_download_urls};
+
+    fn signed_package_fixture() -> (Vec<u8>, msixvc::signature::PinnedXvdKey, usize, usize) {
+        use aws_lc_rs::rand::SystemRandom;
+        use aws_lc_rs::rsa::{KeyPair as RsaKeyPair, KeySize};
+        use aws_lc_rs::signature::{KeyPair, RSA_PSS_SHA256};
+        use msixvc::layout::PAGE_SIZE;
+        use msixvc::models::xvd::XvdHeader;
+        use msixvc_common::parse::BinaryTryParse;
+
+        let pair = RsaKeyPair::generate(KeySize::Rsa4096).unwrap();
+        let public = pair.public_key();
+        let modulus = public.modulus().big_endian_without_leading_zero();
+        let exponent = public.exponent().big_endian_without_leading_zero();
+        let mut blob = Vec::new();
+        for field in [
+            0x3141_5352_u32,
+            4096,
+            exponent.len() as u32,
+            modulus.len() as u32,
+            0,
+            0,
+        ] {
+            blob.extend_from_slice(&field.to_le_bytes());
+        }
+        blob.extend_from_slice(exponent);
+        blob.extend_from_slice(modulus);
+        let key =
+            msixvc::signature::PinnedXvdKey::from_bcrypt_blob(&blob, &Sha256::digest(&blob).into())
+                .unwrap();
+        let mut header = [0_u8; PAGE_SIZE];
+        header[0x200..0x208].copy_from_slice(b"msft-xvd");
+        header[0x210..0x218].copy_from_slice(&116_444_736_000_000_000_i64.to_le_bytes());
+        header[0x218..0x220].copy_from_slice(&(2_u64 * PAGE_SIZE as u64).to_le_bytes());
+        header[0x220..0x230].copy_from_slice(&uuid::Uuid::from_u128(1).to_bytes_le());
+        header[0x3ac..0x3bc].copy_from_slice(&uuid::Uuid::from_u128(2).to_bytes_le());
+        for (index, part) in [4_u16, 3, 2, 1].into_iter().enumerate() {
+            header[0x3bc + index * 2..0x3be + index * 2].copy_from_slice(&part.to_le_bytes());
+        }
+        let layout = XvdHeader::try_from_slice(&header)
+            .unwrap()
+            .layout()
+            .unwrap();
+        assert_eq!(layout.hash_tree_layout.top_level(), 0);
+        let tree = layout.hash_tree.start.to_bytes().0 as usize;
+        let data = layout.user_data.start.to_bytes().0 as usize;
+        let mut file = vec![0_u8; data + 2 * PAGE_SIZE];
+        for index in 0..2 {
+            let start = data + index * PAGE_SIZE;
+            file[start..start + PAGE_SIZE].fill(index as u8 + 1);
+            let hash = Sha256::digest(&file[start..start + PAGE_SIZE]);
+            file[tree + index * 24..tree + index * 24 + 20].copy_from_slice(&hash[..20]);
+            file[tree + index * 24 + 20..tree + index * 24 + 24]
+                .copy_from_slice(&(index as u32).to_le_bytes());
+        }
+        header[0x240..0x260].copy_from_slice(&Sha256::digest(&file[tree..tree + PAGE_SIZE]));
+        let (signature, signed) = header.split_at_mut(512);
+        pair.sign(&RSA_PSS_SHA256, &SystemRandom::new(), signed, signature)
+            .unwrap();
+        file[..PAGE_SIZE].copy_from_slice(&header);
+        (file, key, data, tree)
+    }
+
+    #[tokio::test]
+    async fn msixvc_download_requires_signed_identity_before_network() {
+        let directory = tempfile::tempdir().unwrap();
+        let progress = ProgressBar::hidden();
+        let error = download_file_attempt(
+            &reqwest::Client::new(),
+            "http://127.0.0.1:0/package",
+            "package.MSIXVC",
+            4,
+            DownloadIntegrity::default(),
+            directory.path(),
+            &progress,
+        )
+        .await
+        .expect_err("an MSIXVC requires independently selected identity");
+        assert_eq!(error.error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(
+            error
+                .error
+                .to_string()
+                .contains("requires signed package identity")
+        );
+        assert!(!error.retryable && !error.try_next_url);
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn signed_download_verifies_before_replacing_the_existing_file() {
+        let (valid, key, data, tree) = signed_package_fixture();
+        let mut damaged_page = valid.clone();
+        damaged_page[data + msixvc::layout::PAGE_SIZE] ^= 1;
+        let mut damaged_signature = valid.clone();
+        damaged_signature[0] ^= 1;
+        let mut damaged_tree = valid.clone();
+        damaged_tree[tree] ^= 1;
+        let mut appended = valid.clone();
+        appended.extend_from_slice(&[0_u8; msixvc::layout::PAGE_SIZE]);
+        let replies = [
+            valid.clone(),
+            damaged_page,
+            damaged_signature,
+            damaged_tree,
+            valid.clone(),
+            appended,
+        ];
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for body in replies {
+                let (mut connection, _) = listener.accept().await.unwrap();
+                let mut request = [0; 1024];
+                assert!(connection.read(&mut request).await.unwrap() > 0);
+                connection
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+                connection.write_all(&body).await.unwrap();
+            }
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("package.msixvc");
+        std::fs::write(&path, b"existing package").unwrap();
+        let expected = crate::commands::streaming::parse_streaming_identity(
+            &uuid::Uuid::from_u128(1).to_string(),
+            &format!("1.2.3.4.{}", uuid::Uuid::from_u128(2)),
+        )
+        .unwrap();
+        let wrong = crate::commands::streaming::parse_streaming_identity(
+            &uuid::Uuid::from_u128(1).to_string(),
+            &format!("1.2.3.4.{}", uuid::Uuid::from_u128(3)),
+        )
+        .unwrap();
+        let client = reqwest::Client::new();
+        let url = format!("http://{address}/package");
+        let progress = ProgressBar::hidden();
+        for (index, identity) in [
+            &expected, &expected, &expected, &expected, &wrong, &expected,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let result = download_file_attempt(
+                &client,
+                &url,
+                "package.msixvc",
+                (valid.len()
+                    + if index == 5 {
+                        msixvc::layout::PAGE_SIZE
+                    } else {
+                        0
+                    }) as u64,
+                DownloadIntegrity {
+                    expected_hash: None,
+                    signed_xvd: Some((&key, identity)),
+                },
+                directory.path(),
+                &progress,
+            )
+            .await;
+            if index == 0 {
+                assert!(result.is_ok());
+            } else {
+                let error = result.expect_err("corrupt or mismatched package must fail");
+                let expected_error = [
+                    "",
+                    "XVD data page",
+                    "XVD header signature is invalid",
+                    "XVD hash-tree page",
+                    "signed package identity does not match",
+                    "XVD length does not match the signed data extent",
+                ][index];
+                assert!(error.error.to_string().contains(expected_error));
+                assert!(!error.retryable && !error.try_next_url);
+            }
+            assert_eq!(std::fs::read(&path).unwrap(), valid);
+            assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+        }
+        server.await.unwrap();
+    }
 
     #[tokio::test]
     async fn download_errors_hide_package_urls_and_preserve_retry_classification() {
@@ -867,7 +1137,7 @@ mod tests {
             &url,
             "package.bin",
             4,
-            None,
+            DownloadIntegrity::default(),
             directory.path(),
             &progress,
         )
@@ -880,7 +1150,7 @@ mod tests {
             &url,
             "package.bin",
             4,
-            None,
+            DownloadIntegrity::default(),
             directory.path(),
             &progress,
         )
@@ -931,7 +1201,7 @@ mod tests {
             &url,
             "package.bin",
             4,
-            None,
+            DownloadIntegrity::default(),
             directory.path(),
             &progress,
         )
@@ -958,7 +1228,7 @@ mod tests {
             &url,
             "package.bin",
             4,
-            None,
+            DownloadIntegrity::default(),
             directory.path(),
             &progress,
         )
@@ -1006,7 +1276,10 @@ mod tests {
             &url,
             "package.bin",
             4,
-            Some(expected_hash),
+            DownloadIntegrity {
+                expected_hash: Some(expected_hash),
+                signed_xvd: None,
+            },
             directory.path(),
             &progress,
         )
@@ -1115,7 +1388,7 @@ mod tests {
                 url: &url.to_string_lossy(),
                 file_name: "package.bin",
                 file_size: 16,
-                expected_hash: None,
+                integrity: DownloadIntegrity::default(),
                 output_root: &output,
                 progress_bar: &progress,
             },

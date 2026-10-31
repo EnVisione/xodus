@@ -279,7 +279,7 @@ async fn authenticate_update_image(
     Ok(())
 }
 
-fn validate_authenticated_extent(
+pub(crate) fn validate_authenticated_extent(
     actual_length: u64,
     data_start: u64,
     page_count: u32,

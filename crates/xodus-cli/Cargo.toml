@@ -33,5 +33,9 @@ rustix = "1.1.4"
 ctrlc = "3.5.2"
 nix = "0.31.3"
 
+[dev-dependencies]
+aws-lc-rs = { version = "1.19.0", features = ["ring-io"] }
+msixvc-common = { path = "../msixvc-common", version = "0.1.0" }
+
 [features]
 tokio_console = ["dep:console-subscriber"]
