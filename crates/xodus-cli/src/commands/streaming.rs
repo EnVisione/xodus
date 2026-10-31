@@ -21,6 +21,7 @@ use rustix::fs::{AtFlags, CWD, Mode, OFlags, mkdirat, renameat, unlinkat};
 #[cfg(target_os = "linux")]
 use rustix::fs::{ResolveFlags, openat2};
 use rustix::io::Errno;
+use sha2::{Digest, Sha256};
 use tempfile::{Builder as TempDirBuilder, TempDir};
 use tokio::fs::File;
 use tokio::io::AsyncRead;
@@ -1329,7 +1330,29 @@ fn installed_file_length(file: &SegmentFile) -> io::Result<u64> {
     }
 }
 
-fn changed_jobs(
+async fn protected_file_matches(file: std::fs::File, expected: &SegmentFile) -> io::Result<bool> {
+    use tokio::io::AsyncReadExt;
+
+    let expected_pages = expected.length.div_ceil(PAGE_SIZE as u64);
+    if u64::try_from(expected.data_hashs.len()).ok() != Some(expected_pages) {
+        return Ok(false);
+    }
+    let mut file = tokio::io::BufReader::with_capacity(1024 * 1024, File::from_std(file));
+    let mut page = [0_u8; PAGE_SIZE];
+    for hash in &expected.data_hashs {
+        match file.read_exact(&mut page).await {
+            Ok(_) => {}
+            Err(error) if error.kind() == ErrorKind::UnexpectedEof => return Ok(false),
+            Err(error) => return Err(error),
+        }
+        if Sha256::digest(page)[..20] != hash[..] {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+async fn changed_jobs(
     output_root: &Path,
     remote_files: &HashMap<String, SegmentFile>,
     local_files: &HashMap<String, SegmentFile>,
@@ -1346,7 +1369,15 @@ fn changed_jobs(
         let expected_length = installed_file_length(remote)?;
         let installed_matches = if matches_metadata {
             match open_package_input(output_root, name) {
-                Ok(file) => file.metadata()?.len() == expected_length,
+                Ok(file) => {
+                    if file.metadata()?.len() != expected_length {
+                        false
+                    } else if remote.keep_encrypted {
+                        protected_file_matches(file, remote).await?
+                    } else {
+                        true
+                    }
+                }
                 Err(error) if error.kind() == ErrorKind::NotFound => false,
                 Err(error) => return Err(error),
             }
@@ -1948,7 +1979,7 @@ where
         }
     };
 
-    let jobs = match changed_jobs(out, &rfiles, &lfiles) {
+    let jobs = match changed_jobs(out, &rfiles, &lfiles).await {
         Ok(jobs) => jobs,
         Err(err) => {
             eprintln!("failed to validate installed package files: {err}");
@@ -2452,8 +2483,8 @@ mod tests {
         assert!(!temporary.path().join("data.bin").exists());
     }
 
-    #[test]
-    fn changed_jobs_preserve_remote_page_hashes_for_integrity_validation() {
+    #[tokio::test]
+    async fn changed_jobs_preserve_remote_page_hashes_for_integrity_validation() {
         let mut remote = HashMap::new();
         remote.insert(
             "content/game.bin".to_owned(),
@@ -2466,25 +2497,32 @@ mod tests {
         );
 
         let temporary = tempfile::tempdir().unwrap();
-        let jobs = changed_jobs(temporary.path(), &remote, &HashMap::new()).unwrap();
+        let jobs = changed_jobs(temporary.path(), &remote, &HashMap::new())
+            .await
+            .unwrap();
 
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].content.data_hashs, vec![[0x11; 20]]);
     }
 
-    #[test]
-    fn changed_jobs_restore_missing_and_wrong_sized_files() {
+    #[tokio::test]
+    async fn changed_jobs_restore_missing_and_wrong_sized_files() {
+        use sha2::{Digest, Sha256};
+
         let temporary = tempfile::tempdir().unwrap();
+        let mut page_hash = [0_u8; 20];
+        page_hash.copy_from_slice(&Sha256::digest([0_u8; super::PAGE_SIZE])[..20]);
         let segment = || SegmentFile {
             offset: 0,
             length: 5,
-            data_hashs: vec![[0x11; 20]],
+            data_hashs: vec![page_hash],
             keep_encrypted: true,
         };
         let remote = HashMap::from([("game.bin".to_owned(), segment())]);
         let local = HashMap::from([("game.bin".to_owned(), segment())]);
         assert_eq!(
             changed_jobs(temporary.path(), &remote, &local)
+                .await
                 .unwrap()
                 .len(),
             1
@@ -2492,6 +2530,7 @@ mod tests {
         std::fs::write(temporary.path().join("game.bin"), b"short").unwrap();
         assert_eq!(
             changed_jobs(temporary.path(), &remote, &local)
+                .await
                 .unwrap()
                 .len(),
             1
@@ -2499,13 +2538,40 @@ mod tests {
         std::fs::write(temporary.path().join("game.bin"), vec![0; super::PAGE_SIZE]).unwrap();
         assert!(
             changed_jobs(temporary.path(), &remote, &local)
+                .await
                 .unwrap()
                 .is_empty()
         );
+        std::fs::write(temporary.path().join("game.bin"), vec![1; super::PAGE_SIZE]).unwrap();
+        assert_eq!(
+            changed_jobs(temporary.path(), &remote, &local)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
-    #[test]
-    fn changed_jobs_reject_unsafe_paths_before_selection() {
+    #[tokio::test]
+    async fn protected_file_rejects_missing_or_inconsistent_page_hashes() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("game.bin");
+        std::fs::write(&path, vec![0; super::PAGE_SIZE]).unwrap();
+        let segment = SegmentFile {
+            offset: 0,
+            length: 5,
+            data_hashs: Vec::new(),
+            keep_encrypted: true,
+        };
+        assert!(
+            !super::protected_file_matches(std::fs::File::open(path).unwrap(), &segment)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn changed_jobs_reject_unsafe_paths_before_selection() {
         let temporary = tempfile::tempdir().unwrap();
         let remote = HashMap::from([(
             "../escape".to_owned(),
@@ -2516,7 +2582,11 @@ mod tests {
                 keep_encrypted: false,
             },
         )]);
-        assert!(changed_jobs(temporary.path(), &remote, &HashMap::new()).is_err());
+        assert!(
+            changed_jobs(temporary.path(), &remote, &HashMap::new())
+                .await
+                .is_err()
+        );
     }
 
     #[test]
@@ -2538,8 +2608,8 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn changed_jobs_refuse_symlinked_installed_files() {
+    #[tokio::test]
+    async fn changed_jobs_refuse_symlinked_installed_files() {
         let temporary = tempfile::tempdir().unwrap();
         let segment = || SegmentFile {
             offset: 0,
@@ -2550,7 +2620,11 @@ mod tests {
         let remote = HashMap::from([("game.bin".to_owned(), segment())]);
         let local = HashMap::from([("game.bin".to_owned(), segment())]);
         std::os::unix::fs::symlink("elsewhere", temporary.path().join("game.bin")).unwrap();
-        assert!(changed_jobs(temporary.path(), &remote, &local).is_err());
+        assert!(
+            changed_jobs(temporary.path(), &remote, &local)
+                .await
+                .is_err()
+        );
     }
 
     #[cfg(target_os = "linux")]
