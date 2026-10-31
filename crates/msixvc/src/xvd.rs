@@ -1035,14 +1035,26 @@ enum PageHashFailure {
     Mismatch,
 }
 
-async fn write_all_with_retry<Writer>(out: &mut Writer, data: &[u8]) -> io::Result<()>
+async fn write_all_with_retry<Writer>(out: &mut Writer, mut data: &[u8]) -> io::Result<()>
 where
     Writer: AsyncWrite + Unpin,
 {
     let mut retries = OUTPUT_WRITE_RETRY_LIMIT;
-    loop {
-        match out.write_all(data).await {
-            Ok(()) => return Ok(()),
+    while !data.is_empty() {
+        match out.write(data).await {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    ErrorKind::WriteZero,
+                    "output write returned zero",
+                ));
+            }
+            Ok(written) if written <= data.len() => data = &data[written..],
+            Ok(_) => {
+                return Err(io::Error::new(
+                    ErrorKind::InvalidData,
+                    "output write exceeded input length",
+                ));
+            }
             Err(error) if is_retryable_output_error(&error) && retries > 0 => {
                 retries -= 1;
                 sleep(OUTPUT_WRITE_RETRY_DELAY).await;
@@ -1050,6 +1062,7 @@ where
             Err(error) => return Err(error),
         }
     }
+    Ok(())
 }
 
 fn is_retryable_output_error(error: &io::Error) -> bool {
@@ -3427,6 +3440,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn output_write_retries_only_the_unwritten_suffix() {
+        let mut writer = PartialThenFailWriter {
+            attempts: 0,
+            data: Vec::new(),
+        };
+        write_all_with_retry(&mut writer, b"abcdef")
+            .await
+            .expect("a partial write followed by a transient failure must resume");
+        assert_eq!(writer.data, b"abcdef");
+        assert_eq!(writer.attempts, 3);
+    }
+
+    #[tokio::test]
+    async fn output_write_rejects_invalid_writer_progress() {
+        let zero = write_all_with_retry(&mut InvalidProgressWriter(false), b"data")
+            .await
+            .expect_err("zero progress must fail");
+        assert_eq!(zero.kind(), ErrorKind::WriteZero);
+        let overreported = write_all_with_retry(&mut InvalidProgressWriter(true), b"data")
+            .await
+            .expect_err("overreported progress must fail");
+        assert_eq!(overreported.kind(), ErrorKind::InvalidData);
+    }
+
+    #[tokio::test]
     async fn extract_file_verifies_page_hash_and_retries_output() {
         let xvd = XvdFile::parse(SyntheticXvdReader::synthetic_xvd_with_region_count(0))
             .await
@@ -3669,6 +3707,13 @@ mod tests {
 
     struct RecordingAsyncWriter(Vec<u8>);
 
+    struct InvalidProgressWriter(bool);
+
+    struct PartialThenFailWriter {
+        attempts: usize,
+        data: Vec<u8>,
+    }
+
     struct DriftingIo(Cursor<Vec<u8>>);
 
     impl Read for OverReportingIo {
@@ -3740,6 +3785,54 @@ mod tests {
         ) -> Poll<std::io::Result<usize>> {
             self.0.extend_from_slice(buf);
             Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl AsyncWrite for PartialThenFailWriter {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            self.attempts += 1;
+            match self.attempts {
+                1 => {
+                    let written = buf.len().min(2);
+                    self.data.extend_from_slice(&buf[..written]);
+                    Poll::Ready(Ok(written))
+                }
+                2 => Poll::Ready(Err(Error::other("synthetic transient failure"))),
+                _ => {
+                    self.data.extend_from_slice(buf);
+                    Poll::Ready(Ok(buf.len()))
+                }
+            }
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl AsyncWrite for InvalidProgressWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            Poll::Ready(Ok(if self.0 { buf.len() + 1 } else { 0 }))
         }
 
         fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
