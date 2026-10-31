@@ -406,6 +406,7 @@ const MAX_XVC_REGION_HEADERS: u32 = 4_096;
 const MAX_USER_PACKAGE_FILES: u32 = 1_048_576;
 const MAX_SUPPORTED_XVC_INFO_VERSION: u32 = 2;
 const SEGMENT_METADATA_READER_CAPACITY: usize = PAGE_SIZE;
+const MAX_SEGMENT_METADATA_ENTRIES: u32 = 1_048_576;
 const DOWNLOAD_HTTP_RETRY_LIMIT: usize = 3;
 const OUTPUT_WRITE_RETRY_LIMIT: usize = 3;
 const OUTPUT_WRITE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
@@ -601,6 +602,8 @@ pub enum SegmentMetadataParseError {
         metadata_offset: u64,
         segment_table_end: u64,
     },
+    #[error("segment metadata count {segment_count} exceeds the supported limit {limit}")]
+    SegmentCountExceedsLimit { segment_count: u32, limit: u32 },
     #[error("segment metadata count {segment_count} cannot fit in memory")]
     SegmentCountTooLarge { segment_count: u32 },
     #[error("unable to reserve {segment_count} segment metadata entries")]
@@ -1401,14 +1404,25 @@ fn validate_segment_metadata_table_extent(
 fn reserve_segment_metadata_entries(
     segment_count: u32,
 ) -> Result<Vec<XvdSegmentMetadataSegment>, SegmentMetadataParseError> {
-    let segment_capacity = usize::try_from(segment_count)
-        .map_err(|_| SegmentMetadataParseError::SegmentCountTooLarge { segment_count })?;
+    let segment_capacity = validate_segment_metadata_count(segment_count)?;
     let mut segments = Vec::new();
     segments
         .try_reserve_exact(segment_capacity)
         .map_err(|_| SegmentMetadataParseError::SegmentAllocationFailed { segment_count })?;
 
     Ok(segments)
+}
+
+fn validate_segment_metadata_count(segment_count: u32) -> Result<usize, SegmentMetadataParseError> {
+    if segment_count > MAX_SEGMENT_METADATA_ENTRIES {
+        return Err(SegmentMetadataParseError::SegmentCountExceedsLimit {
+            segment_count,
+            limit: MAX_SEGMENT_METADATA_ENTRIES,
+        });
+    }
+    let segment_capacity = usize::try_from(segment_count)
+        .map_err(|_| SegmentMetadataParseError::SegmentCountTooLarge { segment_count })?;
+    Ok(segment_capacity)
 }
 
 fn segment_table_absolute_offset(
@@ -4720,6 +4734,55 @@ mod tests {
             super::segment_table_absolute_offset(u64::MAX - 116, 100, 116).unwrap(),
             u64::MAX - 16
         );
+    }
+
+    #[tokio::test]
+    async fn parse_segment_metadata_rejects_excessive_entries_before_table_reads() {
+        let xvd = XvdFile::parse(SyntheticXvdReader::synthetic_xvd_with_region_count(0))
+            .await
+            .expect("synthetic XVD must parse");
+        let header_length = SEGMENT_METADATA_HEADER_SIZE as u32;
+        let count = 1_048_577_u32;
+        let (reader, read_bytes) =
+            SyntheticXvdReader::synthetic_segment_metadata_header(header_length, count);
+        let declared_length = u64::from(header_length) + u64::from(count) * 16;
+        let result = xvd
+            .parse_segment_metadata(
+                reader,
+                &UserPackageFile {
+                    offset: 0,
+                    length: declared_length,
+                },
+            )
+            .await;
+        let error = match result {
+            Ok(_) => panic!("excessive segment count must be rejected"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            SegmentMetadataParseError::SegmentCountExceedsLimit {
+                segment_count: 1_048_577,
+                limit: 1_048_576,
+            }
+        ));
+        assert_eq!(
+            read_bytes.load(Ordering::Relaxed),
+            SEGMENT_METADATA_HEADER_SIZE
+        );
+    }
+
+    #[test]
+    fn segment_metadata_count_accepts_the_limit() {
+        assert_eq!(
+            super::validate_segment_metadata_count(1_048_576).unwrap(),
+            1_048_576
+        );
+        assert_eq!(super::validate_segment_metadata_count(0).unwrap(), 0);
+        assert!(matches!(
+            super::validate_segment_metadata_count(u32::MAX),
+            Err(SegmentMetadataParseError::SegmentCountExceedsLimit { .. })
+        ));
     }
 
     #[tokio::test]
