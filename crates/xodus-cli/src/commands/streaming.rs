@@ -1497,6 +1497,12 @@ async fn open_regular_stream_source(path: &Path) -> io::Result<File> {
     Ok(file)
 }
 
+#[cfg(target_os = "linux")]
+fn pinned_local_source(file: &File) -> String {
+    use std::os::fd::AsRawFd;
+    format!("file:///proc/self/fd/{}", file.as_raw_fd())
+}
+
 pub async fn run(
     client: &reqwest::Client,
     tokens: &TokenManager,
@@ -1527,7 +1533,19 @@ pub async fn run(
                 return ExitCode::FAILURE;
             }
         };
-        return run_with_cancellation(
+        #[cfg(target_os = "linux")]
+        let pinned_source = match f.try_clone().await {
+            Ok(file) => file,
+            Err(err) => {
+                eprintln!("could not retain the open package source: {err}");
+                return ExitCode::FAILURE;
+            }
+        };
+        #[cfg(target_os = "linux")]
+        let worker_source = pinned_local_source(&pinned_source);
+        #[cfg(not(target_os = "linux"))]
+        let worker_source = source.clone();
+        let result = run_with_cancellation(
             run_cli_reader(
                 StreamingRun {
                     client,
@@ -1536,7 +1554,7 @@ pub async fn run(
                     try_skip_ntfs,
                     parallel,
                     market,
-                    url: &source,
+                    url: &worker_source,
                     tx: &tx,
                 },
                 f,
@@ -1546,6 +1564,9 @@ pub async fn run(
             tokio::signal::ctrl_c(),
         )
         .await;
+        #[cfg(target_os = "linux")]
+        drop(pinned_source);
+        result
     } else {
         let (urls, expected_length) =
             if source.starts_with("http://") || source.starts_with("https://") {
@@ -2226,6 +2247,32 @@ mod tests {
         let mut contents = Vec::new();
         source.read_to_end(&mut contents).await.unwrap();
         assert_eq!(contents, b"original");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn pinned_stream_worker_reopens_original_file_with_independent_offset() {
+        use tokio::io::AsyncReadExt;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("source");
+        std::fs::write(&path, b"original").unwrap();
+        let mut source = open_regular_stream_source(&path).await.unwrap();
+        let pin = source.try_clone().await.unwrap();
+        let worker_url = super::pinned_local_source(&pin);
+        let worker_path = worker_url.strip_prefix("file://").unwrap();
+        source.read_exact(&mut [0; 2]).await.unwrap();
+        std::fs::rename(&path, temporary.path().join("old-source")).unwrap();
+        std::fs::write(&path, b"replacement").unwrap();
+        let mut worker = open_regular_stream_source(std::path::Path::new(worker_path))
+            .await
+            .unwrap();
+        let mut contents = Vec::new();
+        worker.read_to_end(&mut contents).await.unwrap();
+        assert_eq!(contents, b"original");
+        let mut remaining = Vec::new();
+        source.read_to_end(&mut remaining).await.unwrap();
+        assert_eq!(remaining, b"iginal");
     }
 
     #[tokio::test]
