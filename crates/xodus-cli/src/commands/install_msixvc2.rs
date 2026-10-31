@@ -1,17 +1,21 @@
 use std::collections::HashSet;
 use std::fs::File;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::Path;
 use std::process::ExitCode;
 
 use msixvc::msixvc2::{inspect, visit_entries};
 
 use crate::commands::streaming::{
-    acquire_transaction_lock, ensure_package_root, new_transaction, open_package_output,
-    promote_owned_transaction, promotion_entries_with_removals, recover_transactions,
+    acquire_transaction_lock, ensure_package_root, new_transaction, open_msixvc2_ownership,
+    open_package_input, open_package_output, package_path_components, promote_owned_transaction,
+    promotion_entries_with_ownership, recover_transactions,
 };
 
 const MAX_INSTALL_UNCOMPRESSED_BYTES: u64 = 1_u64 << 40;
+const MAX_OWNERSHIP_BYTES: usize = 64 * 1024 * 1024;
+const MAX_OWNERSHIP_ENTRIES: usize = 1_048_576;
+const OWNERSHIP_HEADER: &str = "xodus-msixvc2-members-v1";
 
 fn validate_available_space(required: u64, available: u64) -> io::Result<()> {
     let required_with_reserve = required
@@ -46,78 +50,157 @@ pub(crate) fn open_archive(path: &Path) -> io::Result<File> {
     File::open(path)
 }
 
-fn package_top_level(path: &str) -> Option<String> {
-    path.split('/').next().map(str::to_owned)
+pub(crate) fn read_ownership(root: &Path) -> io::Result<Option<HashSet<String>>> {
+    let mut file = match open_msixvc2_ownership(root, false) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "ownership record is not a file",
+        ));
+    }
+    let mut data = Vec::new();
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        if data
+            .len()
+            .checked_add(read)
+            .is_none_or(|len| len > MAX_OWNERSHIP_BYTES)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "ownership record is too large",
+            ));
+        }
+        data.try_reserve(read)
+            .map_err(|_| io::Error::other("ownership allocation failed"))?;
+        data.extend_from_slice(&buffer[..read]);
+    }
+    let text = std::str::from_utf8(&data)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "ownership record is not UTF-8"))?;
+    let mut lines = text.lines();
+    if lines.next() != Some(OWNERSHIP_HEADER) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "ownership record is invalid",
+        ));
+    }
+    let mut owned = HashSet::new();
+    for line in lines {
+        if owned.len() >= MAX_OWNERSHIP_ENTRIES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "ownership record has too many paths",
+            ));
+        }
+        let components = package_path_components(line)?;
+        owned
+            .try_reserve(1)
+            .map_err(|_| io::Error::other("ownership allocation failed"))?;
+        if components.join("/") != line || !owned.insert(line.to_owned()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "ownership path is invalid",
+            ));
+        }
+    }
+    if owned.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "ownership record is empty",
+        ));
+    }
+    Ok(Some(owned))
+}
+
+fn ownership_record(specs: &[(String, String)]) -> io::Result<Vec<u8>> {
+    if specs.len() > MAX_OWNERSHIP_ENTRIES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "ownership record has too many paths",
+        ));
+    }
+    let mut names = Vec::new();
+    names
+        .try_reserve(specs.len())
+        .map_err(|_| io::Error::other("ownership allocation failed"))?;
+    let mut length = OWNERSHIP_HEADER.len() + 1;
+    for (_, path) in specs {
+        let components = package_path_components(path)?;
+        let normalized = components.join("/");
+        length = length
+            .checked_add(normalized.len() + 1)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "ownership size overflow"))?;
+        if length > MAX_OWNERSHIP_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "ownership record is too large",
+            ));
+        }
+        names.push(normalized);
+    }
+    names.sort_unstable();
+    if names.is_empty() || names.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "ownership paths are invalid",
+        ));
+    }
+    let mut record = Vec::new();
+    record
+        .try_reserve_exact(length)
+        .map_err(|_| io::Error::other("ownership allocation failed"))?;
+    writeln!(record, "{OWNERSHIP_HEADER}")?;
+    for name in names {
+        writeln!(record, "{name}")?;
+    }
+    Ok(record)
 }
 
 fn collect_stale_package_files(root: &Path, specs: &[(String, String)]) -> io::Result<Vec<String>> {
+    let owned = read_ownership(root)?.unwrap_or_default();
     let mut current = HashSet::new();
     current
         .try_reserve(specs.len())
-        .map_err(|_| io::Error::other("current package path index allocation failed"))?;
-    for (_, path) in specs {
-        current.insert(normalized_package_path(path));
-    }
-    let mut owned_top_levels = HashSet::new();
-    owned_top_levels
-        .try_reserve(current.len())
-        .map_err(|_| io::Error::other("package root index allocation failed"))?;
+        .map_err(|_| io::Error::other("package path allocation failed"))?;
+    current.extend(specs.iter().map(|(_, path)| normalized_package_path(path)));
     for path in &current {
-        if let Some(top_level) = package_top_level(path) {
-            owned_top_levels.insert(top_level);
+        package_path_components(path)?;
+        if !owned.contains(path) {
+            match open_package_input(root, path) {
+                Ok(_) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        "package would overwrite a file not owned by Xodus",
+                    ));
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
         }
     }
     let mut stale = Vec::new();
-    collect_stale_package_files_in(root, Path::new(""), &current, &owned_top_levels, &mut stale)?;
-    stale.sort();
+    stale
+        .try_reserve(owned.len())
+        .map_err(|_| io::Error::other("stale path allocation failed"))?;
+    stale.extend(owned.difference(&current).cloned());
+    stale.sort_unstable();
     Ok(stale)
 }
 
-fn collect_stale_package_files_in(
-    directory: &Path,
-    relative_directory: &Path,
-    current: &HashSet<String>,
-    owned_top_levels: &HashSet<String>,
-    stale: &mut Vec<String>,
-) -> io::Result<()> {
-    for entry in std::fs::read_dir(directory)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let Some(name_text) = name.to_str() else {
-            continue;
-        };
-        let relative = relative_directory.join(&name);
-        let relative_text = relative.to_string_lossy().replace('\\', "/");
-        if relative_directory.as_os_str().is_empty() && !owned_top_levels.contains(name_text) {
-            continue;
-        }
-        let file_type = entry.file_type()?;
-        if file_type.is_dir() {
-            collect_stale_package_files_in(
-                &entry.path(),
-                &relative,
-                current,
-                owned_top_levels,
-                stale,
-            )?;
-        } else if (file_type.is_file() || file_type.is_symlink())
-            && !current.contains(&relative_text)
-        {
-            stale
-                .try_reserve(1)
-                .map_err(|_| io::Error::other("stale package path allocation failed"))?;
-            stale.push(relative_text);
-        }
-    }
-    Ok(())
-}
-
 pub fn run(path: String, destination: String) -> ExitCode {
-    run_with_hook_and_label(path, destination, || false, "installed")
+    run_with_hook_and_label(path, destination, || false, "staged")
 }
 
 pub fn repair(path: String, destination: String) -> ExitCode {
-    run_with_hook_and_label(path, destination, || false, "repaired")
+    run_with_hook_and_label(path, destination, || false, "restored")
 }
 
 #[cfg(test)]
@@ -125,7 +208,7 @@ fn run_with_hook<F>(path: String, destination: String, mut should_interrupt: F) 
 where
     F: FnMut() -> bool,
 {
-    run_with_hook_and_label(path, destination, &mut should_interrupt, "installed")
+    run_with_hook_and_label(path, destination, &mut should_interrupt, "staged")
 }
 
 fn run_with_hook_and_label<F>(
@@ -198,6 +281,13 @@ where
         eprintln!("MSIXVC2 install rejected insufficient destination space: {error}");
         return ExitCode::FAILURE;
     }
+    let record = match ownership_record(&specs) {
+        Ok(record) => record,
+        Err(error) => {
+            eprintln!("MSIXVC2 install rejected ownership paths: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
     let removals = match collect_stale_package_files(output_root, &specs) {
         Ok(removals) => removals,
         Err(error) => {
@@ -205,7 +295,7 @@ where
             return ExitCode::FAILURE;
         }
     };
-    let mut entries = match promotion_entries_with_removals(&specs, &removals) {
+    let mut entries = match promotion_entries_with_ownership(&specs, &removals, false) {
         Ok(entries) => entries,
         Err(error) => {
             eprintln!("MSIXVC2 install rejected archive paths: {error}");
@@ -249,13 +339,23 @@ where
         return ExitCode::FAILURE;
     }
 
+    let write_record = || -> io::Result<()> {
+        let mut file = open_msixvc2_ownership(&payload_root, true)?;
+        file.write_all(&record)?;
+        file.sync_all()
+    };
+    if let Err(error) = write_record() {
+        eprintln!("MSIXVC2 install could not stage ownership: {error}");
+        return ExitCode::FAILURE;
+    }
+
     if let Err(error) = promote_owned_transaction(transaction, output_root, &mut entries) {
         eprintln!("MSIXVC2 install promotion failed: {error}");
         return ExitCode::FAILURE;
     }
 
     println!(
-        "{operation} {} MSIXVC2 files into {}",
+        "{operation} {} MSIXVC2 archive members into {}; playable game installation is not implemented",
         archive.entries.len(),
         output_root.display()
     );
@@ -266,7 +366,7 @@ where
 mod tests {
     use std::path::PathBuf;
 
-    use crate::commands::streaming::recover_transactions;
+    use crate::commands::streaming::{MSIXVC2_OWNERSHIP_FILE, recover_transactions};
 
     use super::{open_archive, repair, run, run_with_hook, validate_available_space};
 
@@ -331,6 +431,7 @@ mod tests {
         let base_box = destination.join("Boxes/7a342636-4ffe-4966-91d1-207da876ba09.box");
         let update_box = destination.join("Boxes/204a0f88-704c-4bcb-8a1a-3823119302ce.box");
         let unrelated_file = destination.join("keep.txt");
+        let nested_user_file = destination.join("Boxes/notes.txt");
 
         assert_eq!(
             run(
@@ -343,6 +444,7 @@ mod tests {
         );
         assert!(base_box.is_file(), "base package must be promoted");
         std::fs::write(&unrelated_file, b"preserve").expect("unrelated state must be writable");
+        std::fs::write(&nested_user_file, b"nested user data").unwrap();
 
         assert_eq!(
             run(
@@ -359,6 +461,10 @@ mod tests {
         assert_eq!(
             std::fs::read(unrelated_file).expect("unrelated state must remain"),
             b"preserve"
+        );
+        assert_eq!(
+            std::fs::read(nested_user_file).unwrap(),
+            b"nested user data"
         );
 
         assert_eq!(
@@ -391,6 +497,75 @@ mod tests {
                 }),
             "failed replacement must not leave a staging transaction"
         );
+    }
+
+    #[test]
+    fn rejects_overwriting_unowned_archive_members() {
+        let temporary = tempfile::tempdir().unwrap();
+        let destination = temporary.path().join("install");
+        std::fs::create_dir_all(destination.join("Boxes")).unwrap();
+        let existing = destination.join("Boxes/7a342636-4ffe-4966-91d1-207da876ba09.box");
+        std::fs::write(&existing, b"user data").unwrap();
+        assert_eq!(
+            run(
+                fixture("xodus-fixture-base.msixvc")
+                    .to_string_lossy()
+                    .into_owned(),
+                destination.to_string_lossy().into_owned(),
+            ),
+            std::process::ExitCode::FAILURE
+        );
+        assert_eq!(std::fs::read(existing).unwrap(), b"user data");
+        assert!(!destination.join(MSIXVC2_OWNERSHIP_FILE).exists());
+    }
+
+    #[test]
+    fn update_rejects_new_member_colliding_with_unowned_file() {
+        let temporary = tempfile::tempdir().unwrap();
+        let destination = temporary.path().join("install");
+        assert_eq!(
+            run(
+                fixture("xodus-fixture-base.msixvc")
+                    .to_string_lossy()
+                    .into_owned(),
+                destination.to_string_lossy().into_owned(),
+            ),
+            std::process::ExitCode::SUCCESS
+        );
+        let existing = destination.join("Boxes/204a0f88-704c-4bcb-8a1a-3823119302ce.box");
+        let original = destination.join("Boxes/7a342636-4ffe-4966-91d1-207da876ba09.box");
+        std::fs::write(&existing, b"user data").unwrap();
+        assert_eq!(
+            run(
+                fixture("xodus-fixture-update.msixvc")
+                    .to_string_lossy()
+                    .into_owned(),
+                destination.to_string_lossy().into_owned(),
+            ),
+            std::process::ExitCode::FAILURE
+        );
+        assert_eq!(std::fs::read(existing).unwrap(), b"user data");
+        assert!(original.is_file());
+    }
+
+    #[test]
+    fn preserves_unrecognized_ownership_file() {
+        let temporary = tempfile::tempdir().unwrap();
+        let destination = temporary.path().join("install");
+        std::fs::create_dir(&destination).unwrap();
+        let record = destination.join(MSIXVC2_OWNERSHIP_FILE);
+        std::fs::write(&record, b"user data").unwrap();
+        assert_eq!(
+            run(
+                fixture("xodus-fixture-base.msixvc")
+                    .to_string_lossy()
+                    .into_owned(),
+                destination.to_string_lossy().into_owned(),
+            ),
+            std::process::ExitCode::FAILURE
+        );
+        assert_eq!(std::fs::read(record).unwrap(), b"user data");
+        assert!(!destination.join("XboxPackage.cbor").exists());
     }
 
     #[test]

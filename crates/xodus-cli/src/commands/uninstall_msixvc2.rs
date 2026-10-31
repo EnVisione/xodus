@@ -3,10 +3,10 @@ use std::process::ExitCode;
 
 use msixvc::msixvc2::inspect;
 
-use crate::commands::install_msixvc2::open_archive;
+use crate::commands::install_msixvc2::{open_archive, read_ownership};
 use crate::commands::streaming::{
     acquire_transaction_lock, ensure_package_root, new_transaction, promote_owned_transaction,
-    promotion_entries_with_removals, recover_transactions,
+    promotion_entries_with_ownership, recover_transactions,
 };
 
 pub fn run(path: String, destination: String) -> ExitCode {
@@ -68,7 +68,28 @@ pub fn run(path: String, destination: String) -> ExitCode {
         eprintln!("MSIXVC2 uninstall could not recover a prior transaction: {error}");
         return ExitCode::FAILURE;
     }
-    let mut entries = match promotion_entries_with_removals(&[], &removals) {
+    let owned = match read_ownership(output_root) {
+        Ok(Some(owned)) => owned,
+        Ok(None) => {
+            eprintln!("MSIXVC2 uninstall cannot verify ownership of legacy files");
+            return ExitCode::FAILURE;
+        }
+        Err(error) => {
+            eprintln!("MSIXVC2 uninstall could not read ownership: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut requested = std::collections::HashSet::new();
+    if requested.try_reserve(removals.len()).is_err() {
+        eprintln!("MSIXVC2 uninstall could not allocate ownership paths");
+        return ExitCode::FAILURE;
+    }
+    requested.extend(removals.iter().map(|name| name.replace('\\', "/")));
+    if requested.len() != removals.len() || requested != owned {
+        eprintln!("MSIXVC2 uninstall archive does not match the installed ownership record");
+        return ExitCode::FAILURE;
+    }
+    let mut entries = match promotion_entries_with_ownership(&[], &removals, true) {
         Ok(entries) => entries,
         Err(error) => {
             eprintln!("MSIXVC2 uninstall rejected archive paths: {error}");
@@ -88,7 +109,7 @@ pub fn run(path: String, destination: String) -> ExitCode {
     }
 
     println!(
-        "uninstalled {} MSIXVC2 files from {}",
+        "removed {} staged MSIXVC2 archive members from {}",
         removals.len(),
         output_root.display()
     );
@@ -123,6 +144,7 @@ mod tests {
         );
         std::fs::write(destination.join("keep.txt"), b"preserve")
             .expect("unrelated state must be writable");
+        std::fs::write(destination.join("Boxes/notes.txt"), b"nested user data").unwrap();
 
         assert_eq!(
             run(
@@ -135,6 +157,10 @@ mod tests {
             std::fs::read(destination.join("keep.txt")).expect("unrelated state must remain"),
             b"preserve"
         );
+        assert_eq!(
+            std::fs::read(destination.join("Boxes/notes.txt")).unwrap(),
+            b"nested user data"
+        );
         assert!(!destination.join("UserData/AppxManifest.xml").exists());
         assert!(
             destination
@@ -146,6 +172,51 @@ mod tests {
                     .to_string_lossy()
                     .starts_with(".xodus-streaming-txn-"))
         );
+    }
+
+    #[test]
+    fn refuses_legacy_uninstall_without_ownership_record() {
+        let temporary = tempfile::tempdir().unwrap();
+        let destination = temporary.path().join("install");
+        std::fs::create_dir_all(destination.join("UserData")).unwrap();
+        let existing = destination.join("UserData/AppxManifest.xml");
+        std::fs::write(&existing, b"user data").unwrap();
+        assert_eq!(
+            run(
+                fixture("xodus-fixture-base.msixvc")
+                    .to_string_lossy()
+                    .into_owned(),
+                destination.to_string_lossy().into_owned(),
+            ),
+            ExitCode::FAILURE
+        );
+        assert_eq!(std::fs::read(existing).unwrap(), b"user data");
+    }
+
+    #[test]
+    fn refuses_uninstall_with_a_different_archive() {
+        let temporary = tempfile::tempdir().unwrap();
+        let destination = temporary.path().join("install");
+        assert_eq!(
+            install_msixvc2::run(
+                fixture("xodus-fixture-base.msixvc")
+                    .to_string_lossy()
+                    .into_owned(),
+                destination.to_string_lossy().into_owned(),
+            ),
+            ExitCode::SUCCESS
+        );
+        let installed = destination.join("Boxes/7a342636-4ffe-4966-91d1-207da876ba09.box");
+        assert_eq!(
+            run(
+                fixture("xodus-fixture-update.msixvc")
+                    .to_string_lossy()
+                    .into_owned(),
+                destination.to_string_lossy().into_owned(),
+            ),
+            ExitCode::FAILURE
+        );
+        assert!(installed.is_file());
     }
 
     #[test]

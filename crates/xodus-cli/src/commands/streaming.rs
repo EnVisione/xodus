@@ -54,6 +54,7 @@ const TRANSACTION_JOURNAL_TEMP: &str = ".xodus-streaming-journal.tmp";
 const TRANSACTION_MARKER: &str = ".xodus-streaming-owner";
 const TRANSACTION_MARKER_CONTENT: &[u8] = b"xodus-transaction-v1\n";
 const TRANSACTION_LOCK_FILE: &str = ".xodus-streaming.lock";
+pub(crate) const MSIXVC2_OWNERSHIP_FILE: &str = ".xodus-msixvc2-members";
 const MAX_TRANSACTION_JOURNAL_BYTES: usize = 64 * 1024 * 1024;
 const MAX_PACKAGE_PATH_BYTES: usize = 4096;
 
@@ -236,6 +237,7 @@ pub(crate) fn package_path_components(path: &str) -> io::Result<Vec<&str>> {
             ));
         }
         if component.eq_ignore_ascii_case(TRANSACTION_LOCK_FILE)
+            || component.eq_ignore_ascii_case(MSIXVC2_OWNERSHIP_FILE)
             || component
                 .get(..TRANSACTION_DIRECTORY_PREFIX.len())
                 .is_some_and(|prefix| prefix.eq_ignore_ascii_case(TRANSACTION_DIRECTORY_PREFIX))
@@ -504,6 +506,27 @@ pub(crate) fn promotion_entries_with_removals(
     Ok(entries)
 }
 
+pub(crate) fn promotion_entries_with_ownership(
+    specs: &[(String, String)],
+    removals: &[String],
+    remove_ownership: bool,
+) -> io::Result<Vec<PromotionEntry>> {
+    let mut entries = promotion_entries_with_removals(specs, removals)?;
+    let relative = PathBuf::from(MSIXVC2_OWNERSHIP_FILE);
+    entries
+        .try_reserve(1)
+        .map_err(|_| invalid_package_path("transaction ownership entry allocation failed"))?;
+    entries.push(PromotionEntry {
+        staged_relative: relative.clone(),
+        backup_relative: PathBuf::from(TRANSACTION_BACKUP_DIRECTORY).join(&relative),
+        final_relative: relative,
+        had_previous: false,
+        remove_final: remove_ownership,
+        state: PromotionState::Pending,
+    });
+    Ok(entries)
+}
+
 fn journal_path(root: &Path) -> PathBuf {
     root.join(TRANSACTION_JOURNAL)
 }
@@ -597,9 +620,23 @@ fn read_transaction_journal(root: &Path) -> io::Result<Option<Vec<PromotionEntry
                 "transaction restore state requires a previous file",
             ));
         }
-        let staged_relative = package_relative_path(staged_text)?;
-        let final_relative = package_relative_path(final_text)?;
-        let backup_relative = package_relative_path(backup_text)?;
+        let staged_relative = journal_member_path(staged_text)?;
+        let final_relative = journal_member_path(final_text)?;
+        let ownership_backup = format!("{TRANSACTION_BACKUP_DIRECTORY}/{MSIXVC2_OWNERSHIP_FILE}");
+        let backup_relative = if final_relative == Path::new(MSIXVC2_OWNERSHIP_FILE)
+            && backup_text == ownership_backup
+        {
+            PathBuf::from(backup_text)
+        } else {
+            package_relative_path(backup_text)?
+        };
+        if (final_relative == Path::new(MSIXVC2_OWNERSHIP_FILE))
+            != (staged_relative == Path::new(MSIXVC2_OWNERSHIP_FILE))
+        {
+            return Err(invalid_package_path(
+                "transaction ownership path is invalid",
+            ));
+        }
         if backup_relative != PathBuf::from(TRANSACTION_BACKUP_DIRECTORY).join(&final_relative) {
             return Err(invalid_package_path(
                 "transaction journal backup path does not match its final path",
@@ -625,12 +662,24 @@ fn read_transaction_journal(root: &Path) -> io::Result<Option<Vec<PromotionEntry
     Ok(Some(entries))
 }
 
+fn journal_member_path(path: &str) -> io::Result<PathBuf> {
+    if path == MSIXVC2_OWNERSHIP_FILE {
+        Ok(PathBuf::from(path))
+    } else {
+        package_relative_path(path)
+    }
+}
+
+pub(crate) fn open_msixvc2_ownership(root: &Path, writable: bool) -> io::Result<std::fs::File> {
+    open_transaction_file(root, MSIXVC2_OWNERSHIP_FILE, writable)
+}
+
 fn open_transaction_file(root: &Path, name: &str, writable: bool) -> io::Result<std::fs::File> {
     let directory = open_package_root(root, "transaction journal root is not a directory")?;
     let flags = if writable {
-        OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC | OFlags::CLOEXEC
+        OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC | OFlags::NONBLOCK | OFlags::CLOEXEC
     } else {
-        OFlags::RDONLY | OFlags::CLOEXEC
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC
     };
     let mode = if writable {
         Mode::RUSR.union(Mode::WUSR)
@@ -1170,32 +1219,40 @@ fn promote_transaction_with_interruption(
     )
 }
 
+fn validate_transaction_marker(transaction_root: &Path) -> io::Result<()> {
+    let marker = open_transaction_file(transaction_root, TRANSACTION_MARKER, false)
+        .map_err(|_| invalid_package_path("transaction directory has no valid owner marker"))?;
+    if !marker.metadata()?.is_file() {
+        return Err(invalid_package_path(
+            "transaction owner marker is not a regular file",
+        ));
+    }
+    let mut bytes = Vec::new();
+    marker.take(64).read_to_end(&mut bytes)?;
+    if bytes != TRANSACTION_MARKER_CONTENT {
+        return Err(invalid_package_path("transaction owner marker is invalid"));
+    }
+    Ok(())
+}
+
 fn recover_transaction_dir(transaction_root: &Path, output_root: &Path) -> io::Result<()> {
     let journal = journal_path(transaction_root);
     if !journal.exists() {
-        let marker =
-            open_transaction_file(transaction_root, TRANSACTION_MARKER, false).map_err(|_| {
-                invalid_package_path(
-                    "unrecognized transaction directory has no journal or valid owner marker",
-                )
-            })?;
-        if !marker.metadata()?.is_file() {
-            return Err(invalid_package_path(
-                "transaction owner marker is not a regular file",
-            ));
-        }
-        let mut bytes = Vec::new();
-        marker.take(64).read_to_end(&mut bytes)?;
-        if bytes != TRANSACTION_MARKER_CONTENT {
-            return Err(invalid_package_path("transaction owner marker is invalid"));
-        }
+        validate_transaction_marker(transaction_root)?;
         return std::fs::remove_dir_all(transaction_root)
             .and_then(|()| sync_parent_directory(transaction_root));
     }
     let Some(mut entries) = read_transaction_journal(transaction_root)? else {
+        validate_transaction_marker(transaction_root)?;
         return std::fs::remove_dir_all(transaction_root)
             .and_then(|()| sync_parent_directory(transaction_root));
     };
+    if entries
+        .iter()
+        .any(|entry| entry.final_relative == Path::new(MSIXVC2_OWNERSHIP_FILE))
+    {
+        validate_transaction_marker(transaction_root)?;
+    }
     rollback_transaction(transaction_root, output_root, &mut entries)?;
     std::fs::remove_dir_all(transaction_root).and_then(|()| sync_parent_directory(transaction_root))
 }
@@ -2239,6 +2296,8 @@ mod tests {
             ".XODUS-STREAMING.LOCK",
             ".xodus-streaming-txn-fake/.xodus-streaming-journal",
             "nested/.XODUS-STREAMING-TXN-fake/entry",
+            ".xodus-msixvc2-members",
+            "nested/.XODUS-MSIXVC2-MEMBERS",
         ] {
             assert!(package_path_components(path).is_err(), "{path}");
         }
@@ -2247,7 +2306,11 @@ mod tests {
     #[test]
     fn reserved_transaction_names_create_no_package_files() {
         let temporary = tempfile::tempdir().unwrap();
-        for path in [".xodus-streaming.lock", ".xodus-streaming-txn-fake/file"] {
+        for path in [
+            ".xodus-streaming.lock",
+            ".xodus-streaming-txn-fake/file",
+            ".xodus-msixvc2-members",
+        ] {
             assert!(open_package_output(temporary.path(), path).is_err());
         }
         assert_eq!(std::fs::read_dir(temporary.path()).unwrap().count(), 0);
@@ -2789,6 +2852,55 @@ mod tests {
     }
 
     #[test]
+    fn recovery_keeps_ownership_record_consistent_at_each_checkpoint() {
+        for checkpoint in 0..=11 {
+            let temporary = tempfile::tempdir().unwrap();
+            let output = temporary.path().join("output");
+            std::fs::create_dir(&output).unwrap();
+            std::fs::write(output.join("game.bin"), b"verified").unwrap();
+            std::fs::write(output.join(super::MSIXVC2_OWNERSHIP_FILE), b"old ownership").unwrap();
+            let (transaction, payload) = new_transaction(&output).unwrap();
+            std::fs::write(payload.join("game.bin"), b"replacement").unwrap();
+            std::fs::write(
+                payload.join(super::MSIXVC2_OWNERSHIP_FILE),
+                b"new ownership",
+            )
+            .unwrap();
+            let transaction_root = transaction.keep();
+            let mut entries = super::promotion_entries_with_ownership(
+                &[("game.bin".to_owned(), "game.bin".to_owned())],
+                &[],
+                false,
+            )
+            .unwrap();
+            assert!(
+                promote_transaction_with_interruption(
+                    &transaction_root,
+                    &output,
+                    &mut entries,
+                    checkpoint,
+                )
+                .is_err()
+            );
+            recover_transactions(&output).unwrap();
+            let (expected_file, expected_ownership) = if checkpoint == 11 {
+                (b"replacement".as_slice(), b"new ownership".as_slice())
+            } else {
+                (b"verified".as_slice(), b"old ownership".as_slice())
+            };
+            assert_eq!(
+                std::fs::read(output.join("game.bin")).unwrap(),
+                expected_file
+            );
+            assert_eq!(
+                std::fs::read(output.join(super::MSIXVC2_OWNERSHIP_FILE)).unwrap(),
+                expected_ownership
+            );
+            assert!(!transaction_root.exists());
+        }
+    }
+
+    #[test]
     fn recovery_preserves_unrecognized_unjournaled_directory() {
         let temporary = tempfile::tempdir().unwrap();
         let unrelated = temporary.path().join(".xodus-streaming-txn-user-data");
@@ -2800,6 +2912,34 @@ mod tests {
             std::fs::read(unrelated.join("keep.txt")).unwrap(),
             b"user data"
         );
+    }
+
+    #[test]
+    fn recovery_preserves_unmarked_completed_directory() {
+        let temporary = tempfile::tempdir().unwrap();
+        let unrelated = temporary.path().join(".xodus-streaming-txn-user-data");
+        std::fs::create_dir(&unrelated).unwrap();
+        std::fs::write(unrelated.join(super::TRANSACTION_JOURNAL), b"complete\n").unwrap();
+        std::fs::write(unrelated.join("keep.txt"), b"user data").unwrap();
+        assert!(recover_transactions(temporary.path()).is_err());
+        assert_eq!(
+            std::fs::read(unrelated.join("keep.txt")).unwrap(),
+            b"user data"
+        );
+    }
+
+    #[test]
+    fn recovery_requires_owner_marker_for_ownership_record() {
+        let temporary = tempfile::tempdir().unwrap();
+        let output = temporary.path().join("output");
+        std::fs::create_dir(&output).unwrap();
+        let (transaction, _) = new_transaction(&output).unwrap();
+        std::fs::remove_file(transaction.path().join(super::TRANSACTION_MARKER)).unwrap();
+        let entries = super::promotion_entries_with_ownership(&[], &[], true).unwrap();
+        write_transaction_journal(transaction.path(), &entries, false).unwrap();
+        let transaction_root = transaction.keep();
+        assert!(recover_transactions(&output).is_err());
+        assert!(transaction_root.exists());
     }
 
     #[test]

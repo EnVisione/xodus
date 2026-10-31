@@ -58,17 +58,17 @@ enum SubCommand {
     Inspect {
         path: String,
     },
-    #[command(about = "Install a validated local MSIXVC2 archive transactionally")]
+    #[command(about = "Stage MSIXVC2 archive members without installing a playable game")]
     InstallMsixvc2 {
         path: String,
         destination: String,
     },
-    #[command(about = "Repair a local MSIXVC2 archive transactionally")]
+    #[command(about = "Restore staged MSIXVC2 archive members")]
     RepairMsixvc2 {
         path: String,
         destination: String,
     },
-    #[command(about = "Uninstall files represented by a local MSIXVC2 archive transactionally")]
+    #[command(about = "Remove owned staged MSIXVC2 archive members")]
     UninstallMsixvc2 {
         path: String,
         destination: String,
