@@ -2084,6 +2084,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cached_reader_matches_reference_across_seek_sequences() {
+        let body: Vec<u8> = (0..512).map(|value| (value % 251) as u8).collect();
+        for chunk_size in [1, 7, 31, 128] {
+            let cache = CacheGuard(cache_path("seek-sequences"));
+            let source = ChunkedReader {
+                data: body.clone(),
+                position: 0,
+                chunk_size,
+            };
+            let mut file = PrefixCacheFile::new(source, body.len() as u64, &cache.0)
+                .await
+                .unwrap();
+            let mut seed = 17_u32;
+            for _ in 0..96 {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let start = seed as usize % body.len();
+                let count = (seed as usize % 37 + 1).min(body.len() - start);
+                file.seek(SeekFrom::Start(start as u64)).await.unwrap();
+                let mut actual = vec![0; count];
+                file.read_exact(&mut actual).await.unwrap();
+                assert_eq!(
+                    actual,
+                    body[start..start + count],
+                    "chunk size {chunk_size}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn cached_reader_resumes_http_source() {
         let body = test_body();
         let server = spawn_server(body.clone(), Some(96), 0).await.unwrap();
