@@ -470,7 +470,7 @@ impl<'t> AsyncRead for HttpRead<'t> {
 enum CacheReadState {
     Idle,
     Seeking { offset: u64 },
-    Reading { started_len: usize },
+    Reading,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -478,6 +478,7 @@ enum CacheWriteState {
     Idle,
     Seeking { offset: u64 },
     Writing,
+    Flushing { written: usize },
 }
 
 pub struct PrefixCacheFile<R> {
@@ -492,7 +493,6 @@ pub struct PrefixCacheFile<R> {
     pending_chunk_offset: usize,
     cache_read_state: CacheReadState,
     cache_write_state: CacheWriteState,
-    cache_write_pos: u64,
     upstream_buf: Vec<u8>,
 }
 
@@ -527,7 +527,6 @@ where
             pending_chunk_offset: 0,
             cache_read_state: CacheReadState::Idle,
             cache_write_state: CacheWriteState::Idle,
-            cache_write_pos: 0,
             upstream_buf: vec![0u8; UPSTREAM_READ_CHUNK_SIZE],
         })
     }
@@ -571,9 +570,7 @@ where
                                     "cache seek completed at unexpected position",
                                 )));
                             }
-                            self.cache_read_state = CacheReadState::Reading {
-                                started_len: buf.filled().len(),
-                            };
+                            self.cache_read_state = CacheReadState::Reading;
                         }
                         Poll::Ready(Err(err)) => {
                             self.cache_read_state = CacheReadState::Idle;
@@ -581,7 +578,8 @@ where
                         }
                     }
                 }
-                CacheReadState::Reading { started_len } => {
+                CacheReadState::Reading => {
+                    let started_len = buf.filled().len();
                     match AsyncRead::poll_read(Pin::new(&mut self.cache_reader), cx, buf) {
                         Poll::Pending => return Poll::Pending,
                         Poll::Ready(Ok(())) => {
@@ -632,15 +630,11 @@ where
             match self.cache_write_state {
                 CacheWriteState::Idle => {
                     let cached_len = self.cached_len;
-                    if self.cache_write_pos == cached_len {
-                        self.cache_write_state = CacheWriteState::Writing;
-                    } else {
-                        AsyncSeek::start_seek(
-                            Pin::new(&mut self.cache_writer),
-                            SeekFrom::Start(cached_len),
-                        )?;
-                        self.cache_write_state = CacheWriteState::Seeking { offset: cached_len };
-                    }
+                    AsyncSeek::start_seek(
+                        Pin::new(&mut self.cache_writer),
+                        SeekFrom::Start(cached_len),
+                    )?;
+                    self.cache_write_state = CacheWriteState::Seeking { offset: cached_len };
                 }
                 CacheWriteState::Seeking { offset } => {
                     match AsyncSeek::poll_complete(Pin::new(&mut self.cache_writer), cx) {
@@ -653,7 +647,6 @@ where
                                     "cache write seek completed at unexpected position",
                                 )));
                             }
-                            self.cache_write_pos = actual;
                             self.cache_write_state = CacheWriteState::Writing;
                         }
                         Poll::Ready(Err(err)) => {
@@ -678,6 +671,18 @@ where
                             )));
                         }
                         Poll::Ready(Ok(written)) => {
+                            self.cache_write_state = CacheWriteState::Flushing { written };
+                        }
+                        Poll::Ready(Err(err)) => {
+                            self.cache_write_state = CacheWriteState::Idle;
+                            return Poll::Ready(Err(err));
+                        }
+                    }
+                }
+                CacheWriteState::Flushing { written } => {
+                    match AsyncWrite::poll_flush(Pin::new(&mut self.cache_writer), cx) {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(Ok(())) => {
                             let next_pending_offset = self
                                 .pending_chunk_offset
                                 .checked_add(written)
@@ -696,27 +701,12 @@ where
                             }
                             let next_cached_len =
                                 checked_cache_position(self.cached_len, written, self.len)?;
-                            let next_write_pos = self
-                                .cache_write_pos
-                                .checked_add(u64::try_from(written).map_err(|_| {
-                                    Error::new(
-                                        ErrorKind::InvalidData,
-                                        "cache write length does not fit u64",
-                                    )
-                                })?)
-                                .ok_or_else(|| {
-                                    Error::new(
-                                        ErrorKind::InvalidData,
-                                        "cache write position overflow",
-                                    )
-                                })?;
                             self.pending_chunk_offset = next_pending_offset;
                             self.cached_len = next_cached_len;
-                            self.cache_write_pos = next_write_pos;
+                            self.cache_write_state = CacheWriteState::Idle;
                             if self.pending_chunk_offset >= chunk.len() {
                                 self.pending_chunk = None;
                                 self.pending_chunk_offset = 0;
-                                self.cache_write_state = CacheWriteState::Idle;
                             }
                             return Poll::Ready(Ok(()));
                         }
@@ -773,6 +763,14 @@ where
     ) -> Poll<std::io::Result<()>> {
         if buf.remaining() == 0 || self.pos >= self.len {
             return Poll::Ready(Ok(()));
+        }
+
+        if !matches!(self.cache_write_state, CacheWriteState::Idle) {
+            match self.as_mut().poll_flush_pending_chunk(cx) {
+                Poll::Ready(Ok(())) => {}
+                Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+                Poll::Pending => return Poll::Pending,
+            }
         }
 
         match self.as_mut().poll_copy_from_cache(cx, buf) {
@@ -854,10 +852,17 @@ where
         Ok(())
     }
 
-    fn poll_complete(
-        mut self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
-    ) -> Poll<std::io::Result<u64>> {
+    fn poll_complete(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<u64>> {
+        if self.pending_seek.is_some() && !matches!(self.cache_read_state, CacheReadState::Idle) {
+            match AsyncSeek::poll_complete(Pin::new(&mut self.cache_reader), cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Ok(_)) => self.cache_read_state = CacheReadState::Idle,
+                Poll::Ready(Err(error)) => {
+                    self.cache_read_state = CacheReadState::Idle;
+                    return Poll::Ready(Err(error));
+                }
+            }
+        }
         let next = self.pending_seek.take().unwrap_or(self.pos);
         if next > self.len {
             return Poll::Ready(Err(Error::new(
@@ -1366,6 +1371,34 @@ mod tests {
             buf.put_slice(&remaining[..count]);
             self.position += count;
             std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    struct ChunkedReader {
+        data: Vec<u8>,
+        position: usize,
+        chunk_size: usize,
+    }
+
+    impl AsyncRead for ChunkedReader {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> std::task::Poll<io::Result<()>> {
+            let remaining = &self.data[self.position..];
+            let count = remaining.len().min(buf.remaining()).min(self.chunk_size);
+            buf.put_slice(&remaining[..count]);
+            self.position += count;
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    struct CacheGuard(PathBuf);
+
+    impl Drop for CacheGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
         }
     }
 
@@ -1998,6 +2031,56 @@ mod tests {
         assert_eq!(&second[..], &body[32..96]);
         assert_eq!(server.request_ranges(), vec![None]);
         let _ = std::fs::remove_file(cache);
+    }
+
+    #[tokio::test]
+    async fn cached_reader_can_append_after_reading_an_earlier_prefix() {
+        let body: Vec<u8> = (0..64).collect();
+        let cache = CacheGuard(cache_path("append-after-read"));
+        let source = ChunkedReader {
+            data: body.clone(),
+            position: 0,
+            chunk_size: 16,
+        };
+        let mut file = PrefixCacheFile::new(source, body.len() as u64, &cache.0)
+            .await
+            .unwrap();
+        let mut first = [0; 8];
+        file.read_exact(&mut first).await.unwrap();
+        file.seek(SeekFrom::Start(0)).await.unwrap();
+        let mut earlier = [0; 4];
+        file.read_exact(&mut earlier).await.unwrap();
+        file.seek(SeekFrom::Start(16)).await.unwrap();
+        let mut next = [0; 16];
+        file.read_exact(&mut next).await.unwrap();
+        assert_eq!(&first, &body[..8]);
+        assert_eq!(&earlier, &body[..4]);
+        assert_eq!(&next, &body[16..32]);
+    }
+
+    #[tokio::test]
+    async fn seek_after_cancelled_cache_read_uses_new_position() {
+        let body: Vec<u8> = (0..64).collect();
+        let cache = CacheGuard(cache_path("cancelled-cache-seek"));
+        let source = ChunkedReader {
+            data: body.clone(),
+            position: 0,
+            chunk_size: 16,
+        };
+        let mut file = PrefixCacheFile::new(source, body.len() as u64, &cache.0)
+            .await
+            .unwrap();
+        file.read_exact(&mut [0; 4]).await.unwrap();
+        tokio::io::AsyncSeek::start_seek(
+            std::pin::Pin::new(&mut file.cache_reader),
+            SeekFrom::Start(0),
+        )
+        .unwrap();
+        file.cache_read_state = super::CacheReadState::Seeking { offset: 0 };
+        file.seek(SeekFrom::Start(8)).await.unwrap();
+        let mut next = [0; 4];
+        file.read_exact(&mut next).await.unwrap();
+        assert_eq!(&next, &body[8..12]);
     }
 
     #[tokio::test]

@@ -406,6 +406,7 @@ enum PromotionState {
     BackupPending,
     BackedUp,
     Promoted,
+    RestorePending,
 }
 
 impl PromotionState {
@@ -415,6 +416,7 @@ impl PromotionState {
             Self::BackupPending => "backup_pending",
             Self::BackedUp => "backed_up",
             Self::Promoted => "promoted",
+            Self::RestorePending => "restore_pending",
         }
     }
 
@@ -424,6 +426,7 @@ impl PromotionState {
             "backup_pending" => Ok(Self::BackupPending),
             "backed_up" => Ok(Self::BackedUp),
             "promoted" => Ok(Self::Promoted),
+            "restore_pending" => Ok(Self::RestorePending),
             _ => Err(invalid_package_path(
                 "transaction journal has an invalid state",
             )),
@@ -587,6 +590,11 @@ fn read_transaction_journal(root: &Path) -> io::Result<Option<Vec<PromotionEntry
         if fields.next().is_some() {
             return Err(invalid_package_path(
                 "transaction journal has too many fields",
+            ));
+        }
+        if state == PromotionState::RestorePending && !had_previous {
+            return Err(invalid_package_path(
+                "transaction restore state requires a previous file",
             ));
         }
         let staged_relative = package_relative_path(staged_text)?;
@@ -754,7 +762,6 @@ fn recover_backup_pending(
     final_relative: &Path,
 ) -> io::Result<()> {
     let backup_path = transaction_root.join(backup_relative);
-    let final_path = output_root.join(final_relative);
     match std::fs::symlink_metadata(backup_path) {
         Ok(_) => restore_previous_file(
             transaction_root,
@@ -763,7 +770,7 @@ fn recover_backup_pending(
             final_relative,
         ),
         Err(error) if error.kind() == ErrorKind::NotFound => {
-            if std::fs::symlink_metadata(final_path).is_ok() {
+            if package_entry_is_regular(output_root, final_relative)? {
                 Ok(())
             } else {
                 Err(error)
@@ -788,24 +795,50 @@ fn rollback_transaction(
     output_root: &Path,
     entries: &mut [PromotionEntry],
 ) -> io::Result<()> {
+    rollback_transaction_inner(transaction_root, output_root, entries, &mut || false)
+}
+
+fn rollback_transaction_inner<F>(
+    transaction_root: &Path,
+    output_root: &Path,
+    entries: &mut [PromotionEntry],
+    should_interrupt: &mut F,
+) -> io::Result<()>
+where
+    F: FnMut() -> bool,
+{
     let mut rollback_error = None;
-    for entry in entries.iter_mut().rev() {
-        let result = if entry.had_previous {
-            if entry.state == PromotionState::BackupPending {
-                recover_backup_pending(
-                    transaction_root,
-                    &entry.backup_relative,
-                    output_root,
-                    &entry.final_relative,
-                )
-            } else {
-                restore_previous_file(
-                    transaction_root,
-                    &entry.backup_relative,
-                    output_root,
-                    &entry.final_relative,
-                )
+    for index in (0..entries.len()).rev() {
+        if entries[index].had_previous && entries[index].state != PromotionState::RestorePending {
+            if entries[index].state != PromotionState::BackupPending
+                && !package_entry_is_regular(transaction_root, &entries[index].backup_relative)?
+            {
+                return Err(io::Error::new(
+                    ErrorKind::NotFound,
+                    "transaction backup is missing before rollback",
+                ));
             }
+            entries[index].state = PromotionState::RestorePending;
+            write_transaction_journal(transaction_root, entries, false)?;
+        }
+        let entry = &mut entries[index];
+        let result = if entry.had_previous {
+            recover_backup_pending(
+                transaction_root,
+                &entry.backup_relative,
+                output_root,
+                &entry.final_relative,
+            )
+            .and_then(|()| {
+                if should_interrupt() {
+                    Err(io::Error::new(
+                        ErrorKind::Interrupted,
+                        "rollback interrupted after restoring a file",
+                    ))
+                } else {
+                    Ok(())
+                }
+            })
             .and_then(|()| sync_package_parent(transaction_root, &entry.backup_relative))
             .and_then(|()| sync_package_parent(output_root, &entry.final_relative))
         } else if matches!(
@@ -2786,6 +2819,75 @@ mod tests {
     }
 
     #[test]
+    fn recovery_resumes_interrupted_restore_before_and_after_rename() {
+        for already_restored in [false, true] {
+            let temporary = tempfile::tempdir().unwrap();
+            let output = temporary.path().join("output");
+            std::fs::create_dir(&output).unwrap();
+            let final_path = output.join("game.bin");
+            std::fs::write(&final_path, b"replacement").unwrap();
+            let (transaction, _) = new_transaction(&output).unwrap();
+            let mut entries =
+                promotion_entries(&[("game.bin".to_owned(), "game.bin".to_owned())]).unwrap();
+            entries[0].had_previous = true;
+            entries[0].state = PromotionState::RestorePending;
+            let backup = transaction.path().join(&entries[0].backup_relative);
+            std::fs::create_dir_all(backup.parent().unwrap()).unwrap();
+            std::fs::write(&backup, b"verified").unwrap();
+            write_transaction_journal(transaction.path(), &entries, false).unwrap();
+            if already_restored {
+                std::fs::rename(&backup, &final_path).unwrap();
+            }
+            let transaction_root = transaction.keep();
+            recover_transactions(&output).unwrap();
+            assert_eq!(std::fs::read(final_path).unwrap(), b"verified");
+            assert!(!transaction_root.exists());
+        }
+    }
+
+    #[test]
+    fn recovery_does_not_accept_missing_backup_without_restore_intent() {
+        let temporary = tempfile::tempdir().unwrap();
+        let output = temporary.path().join("output");
+        std::fs::create_dir(&output).unwrap();
+        let final_path = output.join("game.bin");
+        std::fs::write(&final_path, b"replacement").unwrap();
+        let (transaction, _) = new_transaction(&output).unwrap();
+        let mut entries =
+            promotion_entries(&[("game.bin".to_owned(), "game.bin".to_owned())]).unwrap();
+        entries[0].had_previous = true;
+        entries[0].state = PromotionState::Promoted;
+        write_transaction_journal(transaction.path(), &entries, false).unwrap();
+        let transaction_root = transaction.keep();
+        assert!(recover_transactions(&output).is_err());
+        assert_eq!(std::fs::read(final_path).unwrap(), b"replacement");
+        assert!(transaction_root.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recovery_does_not_accept_symlink_as_restored_file() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let output = temporary.path().join("output");
+        std::fs::create_dir(&output).unwrap();
+        let outside = temporary.path().join("outside");
+        std::fs::write(&outside, b"untouched").unwrap();
+        symlink(&outside, output.join("game.bin")).unwrap();
+        let (transaction, _) = new_transaction(&output).unwrap();
+        let mut entries =
+            promotion_entries(&[("game.bin".to_owned(), "game.bin".to_owned())]).unwrap();
+        entries[0].had_previous = true;
+        entries[0].state = PromotionState::RestorePending;
+        write_transaction_journal(transaction.path(), &entries, false).unwrap();
+        let transaction_root = transaction.keep();
+        assert!(recover_transactions(&output).is_err());
+        assert_eq!(std::fs::read(outside).unwrap(), b"untouched");
+        assert!(transaction_root.exists());
+    }
+
+    #[test]
     fn recovery_preserves_directory_with_invalid_owner_marker() {
         let temporary = tempfile::tempdir().unwrap();
         let (transaction, _) = new_transaction(temporary.path()).unwrap();
@@ -2824,6 +2926,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn transaction_recovery_restores_after_process_crash_injection() {
+        use std::os::unix::process::ExitStatusExt;
+
         for checkpoint in 0..=6 {
             let temporary = tempfile::tempdir().unwrap();
             let output = temporary.path().join("output");
@@ -2843,9 +2947,10 @@ mod tests {
                 .status()
                 .unwrap();
 
-            assert!(
-                !status.success(),
-                "crash helper must terminate at checkpoint {checkpoint}"
+            assert_eq!(
+                status.signal(),
+                Some(nix::libc::SIGKILL),
+                "crash helper must reach checkpoint {checkpoint}"
             );
             recover_transactions(&output).unwrap();
             let expected = if checkpoint == 6 {
@@ -2860,6 +2965,63 @@ mod tests {
                 "only the transaction lock-free output root should remain"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recovery_resumes_after_process_dies_during_rollback() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let output = temporary.path().join("output");
+        std::fs::create_dir(&output).unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "commands::streaming::tests::transaction_rollback_crash_helper",
+                "--nocapture",
+            ])
+            .env("XODUS_ROLLBACK_CRASH_OUTPUT", &output)
+            .current_dir(temporary.path())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert_eq!(status.signal(), Some(nix::libc::SIGKILL));
+        recover_transactions(&output).unwrap();
+        assert_eq!(std::fs::read(output.join("game.bin")).unwrap(), b"verified");
+        assert_eq!(std::fs::read_dir(&output).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transaction_rollback_crash_helper() {
+        let Some(output) = std::env::var_os("XODUS_ROLLBACK_CRASH_OUTPUT") else {
+            return;
+        };
+        let output = std::path::PathBuf::from(output);
+        std::fs::write(output.join("game.bin"), b"replacement").unwrap();
+        let (transaction, _) = new_transaction(&output).unwrap();
+        let mut entries =
+            promotion_entries(&[("game.bin".to_owned(), "game.bin".to_owned())]).unwrap();
+        entries[0].had_previous = true;
+        entries[0].state = PromotionState::Promoted;
+        let backup = transaction.path().join(&entries[0].backup_relative);
+        std::fs::create_dir_all(backup.parent().unwrap()).unwrap();
+        std::fs::write(&backup, b"verified").unwrap();
+        write_transaction_journal(transaction.path(), &entries, false).unwrap();
+        let transaction_root = transaction.keep();
+        let _ = super::rollback_transaction_inner(
+            &transaction_root,
+            &output,
+            &mut entries,
+            &mut || {
+                nix::sys::signal::kill(nix::unistd::getpid(), nix::sys::signal::Signal::SIGKILL)
+                    .unwrap();
+                false
+            },
+        );
+        panic!("rollback crash helper did not reach its checkpoint");
     }
 
     #[cfg(unix)]
