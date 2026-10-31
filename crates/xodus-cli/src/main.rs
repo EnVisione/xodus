@@ -62,6 +62,8 @@ enum SubCommand {
     InstallMsixvc2 {
         path: String,
         destination: String,
+        #[arg(long, help = "Claim existing members only after matching the archive")]
+        adopt_existing: bool,
     },
     #[command(about = "Restore staged MSIXVC2 archive members")]
     RepairMsixvc2 {
@@ -304,8 +306,16 @@ async fn run_inner(args: CliArgs) -> ExitCode {
             .await
         }
         SubCommand::Inspect { path } => commands::inspect::run(path),
-        SubCommand::InstallMsixvc2 { path, destination } => {
-            commands::install_msixvc2::run(path, destination)
+        SubCommand::InstallMsixvc2 {
+            path,
+            destination,
+            adopt_existing,
+        } => {
+            if adopt_existing {
+                commands::install_msixvc2::run_adopting(path, destination)
+            } else {
+                commands::install_msixvc2::run(path, destination)
+            }
         }
         SubCommand::RepairMsixvc2 { path, destination } => {
             commands::install_msixvc2::repair(path, destination)

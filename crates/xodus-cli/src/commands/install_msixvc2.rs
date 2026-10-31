@@ -40,14 +40,21 @@ fn normalized_package_path(path: &str) -> String {
 }
 
 pub(crate) fn open_archive(path: &Path) -> io::Result<File> {
-    let metadata = std::fs::metadata(path)?;
-    if !metadata.is_file() {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(nix::libc::O_NONBLOCK);
+    }
+    let file = options.open(path)?;
+    if !file.metadata()?.is_file() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "MSIXVC2 archive is not a regular file",
         ));
     }
-    File::open(path)
+    Ok(file)
 }
 
 pub(crate) fn read_ownership(root: &Path) -> io::Result<Option<HashSet<String>>> {
@@ -164,8 +171,11 @@ fn ownership_record(specs: &[(String, String)]) -> io::Result<Vec<u8>> {
     Ok(record)
 }
 
-fn collect_stale_package_files(root: &Path, specs: &[(String, String)]) -> io::Result<Vec<String>> {
-    let owned = read_ownership(root)?.unwrap_or_default();
+fn collect_stale_package_files(
+    root: &Path,
+    specs: &[(String, String)],
+    owned: &HashSet<String>,
+) -> io::Result<Vec<String>> {
     let mut current = HashSet::new();
     current
         .try_reserve(specs.len())
@@ -195,12 +205,67 @@ fn collect_stale_package_files(root: &Path, specs: &[(String, String)]) -> io::R
     Ok(stale)
 }
 
+fn verify_legacy_ownership(
+    archive: &mut File,
+    root: &Path,
+    entry_count: usize,
+) -> io::Result<HashSet<String>> {
+    let mut owned = HashSet::new();
+    owned
+        .try_reserve(entry_count)
+        .map_err(|_| io::Error::other("ownership allocation failed"))?;
+    visit_entries(archive, MAX_INSTALL_UNCOMPRESSED_BYTES, |entry, input| {
+        package_path_components(&entry.name)?;
+        let mut existing = match open_package_input(root, &entry.name) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        if existing.metadata()?.len() != entry.uncompressed_size {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "existing file does not match the adoption archive",
+            ));
+        }
+        let mut remaining = entry.uncompressed_size;
+        let mut expected = [0_u8; 8192];
+        let mut actual = [0_u8; 8192];
+        while remaining != 0 {
+            let count = usize::try_from(remaining.min(expected.len() as u64))
+                .map_err(|_| io::Error::other("adoption read size is invalid"))?;
+            input.read_exact(&mut expected[..count])?;
+            existing.read_exact(&mut actual[..count])?;
+            if expected[..count] != actual[..count] {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "existing file does not match the adoption archive",
+                ));
+            }
+            remaining -= count as u64;
+        }
+        if existing.read(&mut actual[..1])? != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "existing file changed during adoption",
+            ));
+        }
+        owned.insert(normalized_package_path(&entry.name));
+        Ok(())
+    })
+    .map_err(io::Error::other)?;
+    Ok(owned)
+}
+
 pub fn run(path: String, destination: String) -> ExitCode {
-    run_with_hook_and_label(path, destination, || false, "staged")
+    run_with_hook_and_label(path, destination, || false, "staged", false)
+}
+
+pub fn run_adopting(path: String, destination: String) -> ExitCode {
+    run_with_hook_and_label(path, destination, || false, "staged", true)
 }
 
 pub fn repair(path: String, destination: String) -> ExitCode {
-    run_with_hook_and_label(path, destination, || false, "restored")
+    run_with_hook_and_label(path, destination, || false, "restored", false)
 }
 
 #[cfg(test)]
@@ -208,7 +273,7 @@ fn run_with_hook<F>(path: String, destination: String, mut should_interrupt: F) 
 where
     F: FnMut() -> bool,
 {
-    run_with_hook_and_label(path, destination, &mut should_interrupt, "staged")
+    run_with_hook_and_label(path, destination, &mut should_interrupt, "staged", false)
 }
 
 fn run_with_hook_and_label<F>(
@@ -216,19 +281,20 @@ fn run_with_hook_and_label<F>(
     destination: String,
     mut should_interrupt: F,
     operation: &str,
+    adopt_existing: bool,
 ) -> ExitCode
 where
     F: FnMut() -> bool,
 {
     let archive_path = Path::new(&path);
-    let mut metadata_file = match open_archive(archive_path) {
+    let mut package_file = match open_archive(archive_path) {
         Ok(file) => file,
         Err(error) => {
             eprintln!("MSIXVC2 install could not open archive: {error}");
             return ExitCode::FAILURE;
         }
     };
-    let archive = match inspect(&mut metadata_file) {
+    let archive = match inspect(&mut package_file) {
         Ok(archive) => archive,
         Err(error) => {
             eprintln!("MSIXVC2 install rejected archive: {error}");
@@ -288,7 +354,24 @@ where
             return ExitCode::FAILURE;
         }
     };
-    let removals = match collect_stale_package_files(output_root, &specs) {
+    let owned = match read_ownership(output_root) {
+        Ok(Some(owned)) => owned,
+        Ok(None) if adopt_existing => {
+            match verify_legacy_ownership(&mut package_file, output_root, archive.entries.len()) {
+                Ok(owned) => owned,
+                Err(error) => {
+                    eprintln!("MSIXVC2 adoption could not verify existing files: {error}");
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+        Ok(None) => HashSet::new(),
+        Err(error) => {
+            eprintln!("MSIXVC2 install could not inspect ownership: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let removals = match collect_stale_package_files(output_root, &specs, &owned) {
         Ok(removals) => removals,
         Err(error) => {
             eprintln!("MSIXVC2 install could not inspect prior package state: {error}");
@@ -310,13 +393,6 @@ where
         }
     };
 
-    let mut package_file = match open_archive(archive_path) {
-        Ok(file) => file,
-        Err(error) => {
-            eprintln!("MSIXVC2 install could not reopen archive: {error}");
-            return ExitCode::FAILURE;
-        }
-    };
     let extract_result = visit_entries(
         &mut package_file,
         MAX_INSTALL_UNCOMPRESSED_BYTES,
@@ -368,7 +444,7 @@ mod tests {
 
     use crate::commands::streaming::{MSIXVC2_OWNERSHIP_FILE, recover_transactions};
 
-    use super::{open_archive, repair, run, run_with_hook, validate_available_space};
+    use super::{open_archive, repair, run, run_adopting, run_with_hook, validate_available_space};
 
     fn fixture(name: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -566,6 +642,65 @@ mod tests {
         );
         assert_eq!(std::fs::read(record).unwrap(), b"user data");
         assert!(!destination.join("XboxPackage.cbor").exists());
+    }
+
+    #[test]
+    fn adopts_matching_legacy_members_only_when_requested() {
+        let temporary = tempfile::tempdir().unwrap();
+        let destination = temporary.path().join("install");
+        let archive = fixture("xodus-fixture-base.msixvc");
+        assert_eq!(
+            run(
+                archive.to_string_lossy().into_owned(),
+                destination.to_string_lossy().into_owned()
+            ),
+            std::process::ExitCode::SUCCESS
+        );
+        std::fs::remove_file(destination.join(MSIXVC2_OWNERSHIP_FILE)).unwrap();
+        let unrelated = destination.join("Boxes/notes.txt");
+        std::fs::write(&unrelated, b"keep").unwrap();
+        assert_eq!(
+            run(
+                archive.to_string_lossy().into_owned(),
+                destination.to_string_lossy().into_owned()
+            ),
+            std::process::ExitCode::FAILURE
+        );
+        assert_eq!(
+            run_adopting(
+                archive.to_string_lossy().into_owned(),
+                destination.to_string_lossy().into_owned()
+            ),
+            std::process::ExitCode::SUCCESS
+        );
+        assert!(destination.join(MSIXVC2_OWNERSHIP_FILE).is_file());
+        assert_eq!(std::fs::read(unrelated).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn adoption_rejects_a_modified_legacy_member_without_overwriting_it() {
+        let temporary = tempfile::tempdir().unwrap();
+        let destination = temporary.path().join("install");
+        let archive = fixture("xodus-fixture-base.msixvc");
+        assert_eq!(
+            run(
+                archive.to_string_lossy().into_owned(),
+                destination.to_string_lossy().into_owned()
+            ),
+            std::process::ExitCode::SUCCESS
+        );
+        std::fs::remove_file(destination.join(MSIXVC2_OWNERSHIP_FILE)).unwrap();
+        let existing = destination.join("UserData/AppxManifest.xml");
+        std::fs::write(&existing, b"modified user data").unwrap();
+        assert_eq!(
+            run_adopting(
+                archive.to_string_lossy().into_owned(),
+                destination.to_string_lossy().into_owned()
+            ),
+            std::process::ExitCode::FAILURE
+        );
+        assert_eq!(std::fs::read(existing).unwrap(), b"modified user data");
+        assert!(!destination.join(MSIXVC2_OWNERSHIP_FILE).exists());
     }
 
     #[test]
