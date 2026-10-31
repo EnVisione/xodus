@@ -1,9 +1,54 @@
 use crate::models::xbox::{
     UserAuthProperties, UserAuthRequest, XstsPropertyBag, XstsRequest, XstsResponse,
 };
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Serialize, de::DeserializeOwned};
 
 const MAX_XBOX_JSON_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_JWE_HEADER_BYTES: usize = 4096;
+
+fn xbox_rps_ticket(mut ticket: String) -> String {
+    if ticket.strip_prefix("d=").is_some_and(is_compact_jwe) {
+        ticket.replace_range(..1, "t");
+    }
+    ticket
+}
+
+fn is_compact_jwe(ticket: &str) -> bool {
+    let mut parts = ticket.split('.');
+    let Some(header) = parts.next() else {
+        return false;
+    };
+    if header.is_empty() || header.len() > MAX_JWE_HEADER_BYTES {
+        return false;
+    }
+    let mut other_parts = 0;
+    for part in parts {
+        other_parts += 1;
+        if other_parts > 4
+            || !part
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            return false;
+        }
+    }
+    if other_parts != 4 {
+        return false;
+    }
+    let Ok(header) = URL_SAFE_NO_PAD.decode(header) else {
+        return false;
+    };
+    let Ok(header) = serde_json::from_slice::<serde_json::Value>(&header) else {
+        return false;
+    };
+    ["alg", "enc"].into_iter().all(|key| {
+        header
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| !value.is_empty())
+    })
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum XboxApiError {
@@ -102,7 +147,7 @@ pub async fn authenticate_xbox_user(
         properties: UserAuthProperties {
             auth_method: "RPS".to_string(),
             site_name: "user.auth.xboxlive.com".to_string(),
-            rps_ticket,
+            rps_ticket: xbox_rps_ticket(rps_ticket),
         },
     };
 
@@ -156,9 +201,31 @@ mod tests {
 
     use super::{
         XboxApiError, append_json_response_chunk, get_xsts_auth_header, post_json,
-        validate_json_response_length,
+        validate_json_response_length, xbox_rps_ticket,
     };
     use crate::models::xbox::XstsResponse;
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+
+    #[test]
+    fn xbox_user_auth_formats_only_compact_jwe_delegation_tickets() {
+        let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"dir","enc":"A256GCM"}"#);
+        let jwe = format!("{header}..a.b.c");
+        assert_eq!(xbox_rps_ticket(format!("d={jwe}")), format!("t={jwe}"));
+        assert_eq!(xbox_rps_ticket(format!("t={jwe}")), format!("t={jwe}"));
+        assert_eq!(xbox_rps_ticket(jwe.clone()), jwe);
+
+        for original in [
+            "d=opaque",
+            "d=one.two.three",
+            "d=one.two.three.four.five",
+            "d=eyJhbGciOiJkaXIifQ.a.b.c.d",
+            "d=eyJhbGciOiJkaXIiLCJlbmMiOiJBMjU2R0NNIn0.a.b.c.*",
+        ] {
+            assert_eq!(xbox_rps_ticket(original.to_owned()), original);
+        }
+        let oversized = format!("d={}.a.b.c.d", "a".repeat(super::MAX_JWE_HEADER_BYTES + 1));
+        assert_eq!(xbox_rps_ticket(oversized.clone()), oversized);
+    }
 
     async fn response_server(status: &str, body: &str) -> (String, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind(("127.0.0.1", 0))
