@@ -1,4 +1,6 @@
 pub mod crypt;
+pub mod hash_tree;
+pub mod layout;
 pub mod math;
 pub mod models;
 pub mod msixvc2;

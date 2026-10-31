@@ -4,7 +4,7 @@ use std::str::FromStr;
 use base64ct::Encoding;
 
 use oauth2::{RedirectUrl, Scope};
-use p256::elliptic_curve::sec1::ToEncodedPoint;
+use p256::elliptic_curve::sec1::ToSec1Point;
 use p256::SecretKey;
 
 use serde::{Deserialize, Serialize};
@@ -32,21 +32,22 @@ impl ProofKey {
     /// use xal::ProofKey;
     /// use p256::SecretKey;
     ///
-    /// let secret_key = SecretKey::random(&mut rand::thread_rng());
+    /// use p256::elliptic_curve::Generate;
+    /// let secret_key = SecretKey::generate_from_rng(&mut rand10::rng());
     /// let proof_key = ProofKey::new(&secret_key);
     ///
     /// let serialized = serde_json::to_string(&proof_key).unwrap();
     /// println!("{serialized}");
     /// ```
     pub fn new(key: &SecretKey) -> Self {
-        let point = key.public_key().to_encoded_point(false);
+        let point = key.public_key().to_sec1_point(false);
         Self {
             crv: "P-256".into(),
             alg: "ES256".into(),
             u: "sig".into(),
             kty: "EC".into(),
-            x: base64ct::Base64UrlUnpadded::encode_string(point.x().unwrap().as_slice()),
-            y: base64ct::Base64UrlUnpadded::encode_string(point.y().unwrap().as_slice()),
+            x: base64ct::Base64UrlUnpadded::encode_string(point.x().unwrap().as_ref()),
+            y: base64ct::Base64UrlUnpadded::encode_string(point.y().unwrap().as_ref()),
         }
     }
 }

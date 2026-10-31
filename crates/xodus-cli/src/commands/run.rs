@@ -4,7 +4,7 @@ use std::os::fd::{AsFd, AsRawFd};
 use std::path::Path;
 use std::process::{ExitCode, ExitStatus};
 
-use msixvc::models::xvd::PAGE_SIZE;
+use msixvc::layout::PAGE_SIZE;
 use msixvc::xvd::{SegmentFile, XvdFile};
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;

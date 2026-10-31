@@ -345,7 +345,9 @@ impl RequestSigner {
     /// Creates a new instance of [`RequestSigner`]
     pub fn new() -> Self {
         Self {
-            keypair: SecretKey::random(&mut rand::thread_rng()),
+            keypair: <SecretKey as p256::elliptic_curve::Generate>::generate_from_rng(
+                &mut rand10::rng(),
+            ),
             signature_policy_cache: SignaturePolicyCache::default(),
         }
     }

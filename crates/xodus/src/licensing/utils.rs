@@ -110,13 +110,13 @@ pub fn parse_bcrypt_rsa_private(
 
     let d_nb = match magic {
         RSAFULLPRIVATE_MAGIC => {
-            log::trace!("Got RSA Full Private");
+            tracing::trace!("Got RSA Full Private");
             // read d after p and q
             let (d_nb, _d_bytes) = take(cb_mod)?;
             Ok(d_nb)
         }
         RSAPRIVATE_MAGIC => {
-            log::trace!("Got RSA Private");
+            tracing::trace!("Got RSA Private");
             // No d in the blob — recompute it.
             let one = NbBigUint::from(1u32);
             let p1 = &p_nb - &one;

@@ -1,6 +1,9 @@
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
+use tracing_subscriber::Layer;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 use xodus::tokens::TokenManager;
 
 mod commands;
@@ -183,7 +186,22 @@ async fn run(args: CliArgs) -> ExitCode {
 }
 
 async fn run_inner(args: CliArgs) -> ExitCode {
-    env_logger::init_from_env("XODUS_LOG");
+    let filter = tracing_subscriber::EnvFilter::from_env("XODUS_LOG");
+    let registry =
+        tracing_subscriber::registry().with(tracing_subscriber::fmt::layer().with_filter(filter));
+    #[cfg(feature = "tokio_console")]
+    {
+        use tracing::level_filters::LevelFilter;
+        use tracing_subscriber::filter::Targets;
+        let console_filter = Targets::new()
+            .with_target("tokio", LevelFilter::TRACE)
+            .with_target("runtime", LevelFilter::TRACE);
+        registry
+            .with(console_subscriber::spawn().with_filter(console_filter))
+            .init();
+    }
+    #[cfg(not(feature = "tokio_console"))]
+    registry.init();
     let client = reqwest::ClientBuilder::new()
         .user_agent(format!("xodus-cli/{}", env!("CARGO_PKG_VERSION")))
         .build();

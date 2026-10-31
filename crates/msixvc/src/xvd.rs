@@ -6320,6 +6320,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn upstream_layout_matches_checked_offsets_and_rejects_invalid_headers() {
+        let xvd = XvdFile::parse(SyntheticXvdReader::synthetic_xvd_with_region_count(0))
+            .await
+            .expect("synthetic XVD must parse");
+        let layout = xvd.header.layout().expect("valid layout");
+        assert_eq!(
+            u64::from(layout.drive_data.start.0) * PAGE_SIZE as u64,
+            xvd.drive_data_offset
+        );
+        let mut header = xvd.header.clone();
+        header.drive_size = u64::MAX;
+        assert_eq!(header.layout().unwrap_err().kind(), ErrorKind::InvalidData);
+        header = xvd.header.clone();
+        header
+            .volume_flags
+            .insert(crate::models::xvd::XvdVolumeFlags::RESILIENCY_ENABLED);
+        assert_eq!(header.layout().unwrap_err().kind(), ErrorKind::InvalidData);
+        header
+            .volume_flags
+            .remove(crate::models::xvd::XvdVolumeFlags::RESILIENCY_ENABLED);
+        header
+            .volume_flags
+            .insert(crate::models::xvd::XvdVolumeFlags::DATA_INTEGRITY_DISABLED);
+        assert_eq!(header.layout().unwrap_err().kind(), ErrorKind::InvalidData);
+    }
+
+    #[tokio::test]
     async fn parse_rejects_xvc_region_past_declared_drive_extent_before_page_processing() {
         let region_end = SYNTHETIC_DRIVE_DATA_END + SYNTHETIC_DRIVE_SIZE;
         let result = XvdFile::parse(

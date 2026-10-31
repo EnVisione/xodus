@@ -6,6 +6,9 @@ use std::sync::Arc;
 use tokio::net::UnixListener;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
+use tracing_subscriber::Layer;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 use xodus::tokens::TokenManager;
 
 mod connection;
@@ -86,6 +89,22 @@ async fn main() -> Result<(), ServiceError> {
 }
 
 async fn run_service() -> Result<(), ServiceError> {
+    let filter = tracing_subscriber::EnvFilter::from_env("XODUS_LOG");
+    let registry =
+        tracing_subscriber::registry().with(tracing_subscriber::fmt::layer().with_filter(filter));
+    #[cfg(feature = "tokio_console")]
+    {
+        use tracing::level_filters::LevelFilter;
+        use tracing_subscriber::filter::Targets;
+        let console_filter = Targets::new()
+            .with_target("tokio", LevelFilter::TRACE)
+            .with_target("runtime", LevelFilter::TRACE);
+        registry
+            .with(console_subscriber::spawn().with_filter(console_filter))
+            .init();
+    }
+    #[cfg(not(feature = "tokio_console"))]
+    registry.init();
     xodus::secrets::init_secrets().map_err(|error| ServiceError::Secrets(error.to_string()))?;
     let tokens = Arc::new(TokenManager::with_keychain_and_memory());
     xodus::tokens::device::ensure_device_credentials(&reqwest::Client::new(), &tokens)
@@ -98,7 +117,6 @@ async fn run_service() -> Result<(), ServiceError> {
         return Err(ServiceError::UnsupportedDeviceToken);
     };
 
-    env_logger::init_from_env("XODUS_LOG");
     let runtime_dir = std::path::PathBuf::from(utils::get_runtime_dir()?);
     let runtime_metadata = validate_runtime_dir(&runtime_dir)?;
     let runtime_uid = runtime_metadata.uid();

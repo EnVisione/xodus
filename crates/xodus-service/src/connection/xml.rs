@@ -50,7 +50,7 @@ pub async fn handle(
         ));
     }
     let mut buffer = vec![0; message_size as usize];
-    log::debug!("Reading buffer {message_size}");
+    tracing::debug!("Reading buffer {message_size}");
     socket.read_exact(&mut buffer).await?;
     log::debug!("Read buffer");
     let message_type = match XodusMessageType::try_from(raw_message_type as i32) {
