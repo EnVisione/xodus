@@ -1,3 +1,4 @@
+pub mod authenticated_reader;
 pub mod authenticated_xvd;
 pub mod crypt;
 pub mod hash_tree;
