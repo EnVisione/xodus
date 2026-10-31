@@ -8,7 +8,7 @@ use msixvc::msixvc2::{inspect, visit_entries};
 
 use crate::commands::streaming::{
     acquire_transaction_lock, ensure_package_root, new_transaction, open_package_output,
-    promote_transaction, promotion_entries_with_removals, recover_transactions,
+    promote_owned_transaction, promotion_entries_with_removals, recover_transactions,
 };
 
 const MAX_INSTALL_UNCOMPRESSED_BYTES: u64 = 1_u64 << 40;
@@ -249,7 +249,7 @@ where
         return ExitCode::FAILURE;
     }
 
-    if let Err(error) = promote_transaction(transaction.path(), output_root, &mut entries) {
+    if let Err(error) = promote_owned_transaction(transaction, output_root, &mut entries) {
         eprintln!("MSIXVC2 install promotion failed: {error}");
         return ExitCode::FAILURE;
     }

@@ -13,6 +13,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll, ready};
 
 type HashEntry = [u8; HASH_ENTRY_LENGTH];
+type PageHash = [u8; 20];
 type Page = [u8; PAGE_SIZE];
 
 #[derive(Debug, Error)]
@@ -23,8 +24,8 @@ type Page = [u8; PAGE_SIZE];
 )]
 pub struct HashMismatch {
     page_index: usize,
-    expected: HashEntry,
-    got: HashEntry,
+    expected: PageHash,
+    got: PageHash,
 }
 
 #[derive(Debug, Error)]
@@ -37,6 +38,12 @@ pub enum HashTreeStreamError {
 
     #[error("hash tree page count does not match the supplied hashes")]
     InvalidHashCount,
+
+    #[error("hash tree page index {page_index} exceeds the available hash count {hash_count}")]
+    HashIndexOutOfBounds {
+        page_index: usize,
+        hash_count: usize,
+    },
 }
 
 /// The `PageVerifier` struct is used to verify the integrity of pages from a
@@ -57,16 +64,18 @@ impl PageVerifier {
 
     /// Verifies that the provided `page` is intact.
     ///
-    /// # Panics
-    ///
-    /// If provided `page` and `page_index` is not in-bounds.
-    pub fn verify_page(&self, page: &Page, page_index: usize) -> Result<(), HashMismatch> {
-        assert!(page_index < self.hashes.len());
-
-        let expected_hash = self.hashes[page_index];
-        let hash: HashEntry = *Sha256::digest(page)
-            .first_chunk::<HASH_ENTRY_LENGTH>()
-            .expect("obtaining the first 24 bytes from a 32-byte array is infallible");
+    pub fn verify_page(&self, page: &Page, page_index: usize) -> Result<(), HashTreeStreamError> {
+        let entry =
+            self.hashes
+                .get(page_index)
+                .ok_or(HashTreeStreamError::HashIndexOutOfBounds {
+                    page_index,
+                    hash_count: self.hashes.len(),
+                })?;
+        let mut expected_hash = [0_u8; 20];
+        expected_hash.copy_from_slice(&entry[..20]);
+        let mut hash = [0_u8; 20];
+        hash.copy_from_slice(&Sha256::digest(page)[..20]);
 
         if expected_hash != hash {
             hint::cold_path();
@@ -74,7 +83,8 @@ impl PageVerifier {
                 page_index,
                 expected: expected_hash,
                 got: hash,
-            });
+            }
+            .into());
         }
 
         Ok(())
@@ -256,7 +266,7 @@ where
 
         if let Err(error) = this.page_verifier.verify_page(buf, *this.current_page) {
             *this.remaining_hashes = 0;
-            return Poll::Ready(Some(Err(error.into())));
+            return Poll::Ready(Some(Err(error)));
         }
         *this.current_page += 1;
 
@@ -266,9 +276,7 @@ where
         *this.remaining_hashes -= 1;
         *this.next_entry_in_page = 1;
 
-        Poll::Ready(Some(Ok(*buf.first_chunk::<HASH_ENTRY_LENGTH>().expect(
-            "obtaining the first 24 bytes from a 4096-byte page is infallible",
-        ))))
+        Poll::Ready(Some(Ok(buf.as_chunks::<HASH_ENTRY_LENGTH>().0[0])))
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -383,9 +391,13 @@ mod tests {
             page[0] = !page[0];
 
             // Check that the page verification fails.
-            let err = page_verifier.verify_page(page, i).unwrap_err();
+            let HashTreeStreamError::HashMismatch(err) =
+                page_verifier.verify_page(page, i).unwrap_err()
+            else {
+                panic!("page mutation must return a hash mismatch");
+            };
             assert_eq!(err.page_index, i);
-            assert_eq!(err.expected, hashes[i]);
+            assert_eq!(err.expected, hashes[i][..20]);
 
             // Restore the page to its original state.
             page[0] = !page[0];
@@ -396,15 +408,36 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
     fn test_page_verifier_oob() {
         let page = [0u8; PAGE_SIZE];
         let hashes = [[0u8; 24]; 0];
 
         let page_verifier = PageVerifier::new(Box::new(hashes));
 
-        // When running out of hashes, the `PageVerifier` should panic.
-        let _ = page_verifier.verify_page(&page, 0);
+        assert!(matches!(
+            page_verifier.verify_page(&page, 0),
+            Err(HashTreeStreamError::HashIndexOutOfBounds {
+                page_index: 0,
+                hash_count: 0
+            })
+        ));
+    }
+
+    #[test]
+    fn hash_entry_unit_is_not_part_of_page_digest() {
+        let page = [7_u8; PAGE_SIZE];
+        let digest = Sha256::digest(page);
+        let mut entry = [0_u8; HASH_ENTRY_LENGTH];
+        entry[..20].copy_from_slice(&digest[..20]);
+        entry[20..].copy_from_slice(&1234_u32.to_le_bytes());
+        let verifier = PageVerifier::new(Box::new([entry]));
+        assert!(verifier.verify_page(&page, 0).is_ok());
+        let mut altered = page;
+        altered[0] ^= 1;
+        assert!(matches!(
+            verifier.verify_page(&altered, 0),
+            Err(HashTreeStreamError::HashMismatch(_))
+        ));
     }
 
     #[test]

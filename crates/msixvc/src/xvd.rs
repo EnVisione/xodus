@@ -33,6 +33,7 @@ use crate::models::xvd::{
     XvdSegmentMetadataSegment, XvdSegmentMetadataSegmentFlags, XvdUserDataHeader,
     XvdUserDataPackageFileEntry, XvdUserDataPackageFilesHeader,
 };
+use crate::signature::{PinnedXvdKey, XvdSignatureError};
 use crate::streaming_ntfs::{NtfsStreamLayoutReport, collect_ntfs_stream_layouts};
 
 pub struct SyncSubstream<R> {
@@ -411,6 +412,8 @@ const OUTPUT_WRITE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_
 
 #[derive(thiserror::Error, Debug)]
 pub enum XvdFileParseError {
+    #[error(transparent)]
+    Signature(#[from] XvdSignatureError),
     #[error(transparent)]
     Header(#[from] XvdHeaderParseError),
     #[error(transparent)]
@@ -2430,15 +2433,38 @@ impl XvdFile {
         Self::parse(&mut file).await
     }
 
-    pub async fn parse<Reader>(mut file: Reader) -> Result<Self, XvdFileParseError>
+    pub async fn parse<Reader>(file: Reader) -> Result<Self, XvdFileParseError>
     where
         Reader: AsyncRead + AsyncSeek + Unpin,
     {
-        let xvd_header = {
-            let mut buf = XvdHeader::buffer();
-            file.read_exact(&mut buf).await?;
-            XvdHeader::try_from_array(&buf)?
-        };
+        Self::parse_inner(file, None).await
+    }
+
+    /// Verify the header before parsing it. Other metadata and payload pages
+    /// require separate authentication against the signed hash-tree root.
+    pub async fn parse_with_verified_header<Reader>(
+        file: Reader,
+        key: &PinnedXvdKey,
+    ) -> Result<Self, XvdFileParseError>
+    where
+        Reader: AsyncRead + AsyncSeek + Unpin,
+    {
+        Self::parse_inner(file, Some(key)).await
+    }
+
+    async fn parse_inner<Reader>(
+        mut file: Reader,
+        key: Option<&PinnedXvdKey>,
+    ) -> Result<Self, XvdFileParseError>
+    where
+        Reader: AsyncRead + AsyncSeek + Unpin,
+    {
+        let mut buf = XvdHeader::buffer();
+        file.read_exact(&mut buf).await?;
+        if let Some(key) = key {
+            key.verify_header(&buf)?;
+        }
+        let xvd_header = XvdHeader::try_from_array(&buf)?;
 
         let layout = xvd_header.checked_layout()?;
         let xvc_info_offset = layout.xvc_info_offset;
@@ -4120,6 +4146,66 @@ mod tests {
         ) -> Poll<std::io::Result<u64>> {
             Poll::Ready(Ok(self.inner.position()))
         }
+    }
+
+    #[tokio::test]
+    async fn verified_header_is_checked_before_metadata_access() {
+        use crate::signature::{PinnedXvdKey, XvdSignatureError};
+        use aws_lc_rs::rand::SystemRandom;
+        use aws_lc_rs::rsa::{KeyPair as RsaKeyPair, KeySize};
+        use aws_lc_rs::signature::{KeyPair, RSA_PSS_SHA256};
+
+        let pair = RsaKeyPair::generate(KeySize::Rsa4096).expect("synthetic key generation");
+        let public = pair.public_key();
+        let modulus = public.modulus().big_endian_without_leading_zero();
+        let exponent = public.exponent().big_endian_without_leading_zero();
+        let mut blob = Vec::new();
+        for field in [
+            0x3141_5352_u32,
+            4096,
+            exponent.len() as u32,
+            modulus.len() as u32,
+            0,
+            0,
+        ] {
+            blob.extend_from_slice(&field.to_le_bytes());
+        }
+        blob.extend_from_slice(exponent);
+        blob.extend_from_slice(modulus);
+        let pin = Sha256::digest(&blob).into();
+        let key = PinnedXvdKey::from_bcrypt_blob(&blob, &pin).expect("valid synthetic key");
+        let mut reader = SyntheticXvdReader::synthetic_xvd_with_region_count(0);
+        let (signature, signed) = reader.inner.get_mut()[..XVD_HEADER_SIZE].split_at_mut(512);
+        pair.sign(&RSA_PSS_SHA256, &SystemRandom::new(), signed, signature)
+            .expect("synthetic signature");
+
+        let signed_bytes = reader.inner.get_ref().clone();
+        assert!(
+            XvdFile::parse_with_verified_header(reader, &key)
+                .await
+                .is_ok()
+        );
+
+        let mut tampered = SyntheticXvdReader::synthetic_xvd_with_region_count(0);
+        *tampered.inner.get_mut() = signed_bytes;
+        tampered.inner.get_mut()[0x300] ^= 1;
+        let bytes_read = Arc::clone(&tampered.read_bytes);
+        assert!(matches!(
+            XvdFile::parse_with_verified_header(tampered, &key).await,
+            Err(XvdFileParseError::Signature(
+                XvdSignatureError::InvalidSignature
+            ))
+        ));
+        assert_eq!(bytes_read.load(Ordering::Relaxed), XVD_HEADER_SIZE);
+
+        let mut unsigned = SyntheticXvdReader::synthetic_xvd_with_region_count(0);
+        unsigned.fail_seeks = true;
+        assert!(matches!(
+            XvdFile::parse_with_verified_header(unsigned, &key).await,
+            Err(XvdFileParseError::Signature(
+                XvdSignatureError::UnsignedHeader
+            ))
+        ));
     }
 
     #[tokio::test]

@@ -2,13 +2,15 @@ use std::io::{self, Read};
 use std::path::Path;
 use std::process::ExitCode;
 
+use msixvc::authenticated_xvd::{AuthenticatedXvd, ExpectedXvdIdentity};
+use msixvc::signature::PinnedXvdKey;
 use msixvc::xsp::{XspBaseState, XspFile, XspUpdateInput};
 use msixvc::xvd::XvdFile;
 use tokio::fs::File;
 
 use crate::commands::streaming::{
-    acquire_transaction_lock, ensure_package_root, new_transaction, open_package_output,
-    promote_transaction, promotion_entries, recover_transactions,
+    acquire_transaction_lock, ensure_package_root, new_transaction, open_package_input,
+    open_package_output, promote_owned_transaction, promotion_entries, recover_transactions,
 };
 
 const MAX_HASH_MANIFEST_BYTES: usize = 64 * 1024 * 1024;
@@ -189,11 +191,105 @@ pub struct ApplyXspRequest {
     pub rollback: bool,
 }
 
+pub struct XspVerification {
+    pub retail_key_path: Option<String>,
+    pub source_package_id: String,
+    pub target_package_id: String,
+}
+
+struct VerifiedUpdate {
+    key: PinnedXvdKey,
+    source_package_id: uuid::Uuid,
+    target_package_id: uuid::Uuid,
+}
+
+fn load_update_verification(input: XspVerification) -> io::Result<VerifiedUpdate> {
+    let key = if let Some(path) = input.retail_key_path {
+        let file = std::fs::File::open(path)?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file() || metadata.len() != 539 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "retail public key must be a 539-byte regular file",
+            ));
+        }
+        let mut bytes = Vec::with_capacity(540);
+        file.take(540).read_to_end(&mut bytes)?;
+        if bytes.len() != 539 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "retail public key length changed",
+            ));
+        }
+        PinnedXvdKey::from_microsoft_retail_blob(&bytes)
+    } else {
+        PinnedXvdKey::microsoft_retail()
+    }
+    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let parse_id = |value: &str| {
+        uuid::Uuid::parse_str(value).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "package identity is not a UUID",
+            )
+        })
+    };
+    Ok(VerifiedUpdate {
+        key,
+        source_package_id: parse_id(&input.source_package_id)?,
+        target_package_id: parse_id(&input.target_package_id)?,
+    })
+}
+
+async fn authenticate_update_image(
+    file: File,
+    key: &PinnedXvdKey,
+    identity: ExpectedXvdIdentity,
+) -> io::Result<()> {
+    let mut xvd = AuthenticatedXvd::open(file, key, identity)
+        .await
+        .map_err(io::Error::other)?;
+    if xvd.layout().embedded_xvd.len.0 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "embedded XVD verification is not supported",
+        ));
+    }
+    xvd.verify_all().await.map_err(io::Error::other)?;
+    Ok(())
+}
+
 pub async fn run(request: ApplyXspRequest) -> ExitCode {
+    if std::fs::metadata(&request.base).is_ok_and(|metadata| metadata.len() >= XVD_HEADER_BYTES) {
+        eprintln!("XSP update requires source and target package identities");
+        return ExitCode::FAILURE;
+    }
     run_with_hook(request, || false).await
 }
 
-async fn run_with_hook<F>(request: ApplyXspRequest, mut should_interrupt: F) -> ExitCode
+pub async fn run_verified(request: ApplyXspRequest, verification: XspVerification) -> ExitCode {
+    let verification = match load_update_verification(verification) {
+        Ok(verification) => verification,
+        Err(error) => {
+            eprintln!("XSP update rejected verification configuration: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    run_inner(request, Some(verification), || false).await
+}
+
+async fn run_with_hook<F>(request: ApplyXspRequest, should_interrupt: F) -> ExitCode
+where
+    F: FnMut() -> bool,
+{
+    run_inner(request, None, should_interrupt).await
+}
+
+async fn run_inner<F>(
+    request: ApplyXspRequest,
+    verification: Option<VerifiedUpdate>,
+    mut should_interrupt: F,
+) -> ExitCode
 where
     F: FnMut() -> bool,
 {
@@ -227,6 +323,24 @@ where
         eprintln!("XSP update rejected base identity: {error}");
         return ExitCode::FAILURE;
     }
+    if let Some(verification) = &verification {
+        let file = match open_regular_input(Path::new(&base)).await {
+            Ok(file) => file,
+            Err(error) => {
+                eprintln!("XSP update could not open source for authentication: {error}");
+                return ExitCode::FAILURE;
+            }
+        };
+        let identity = ExpectedXvdIdentity {
+            content_id: xsp.header.content_id,
+            package_id: verification.source_package_id,
+            version: xsp.header.upgrade_from_version,
+        };
+        if let Err(error) = authenticate_update_image(file, &verification.key, identity).await {
+            eprintln!("XSP update rejected source authentication: {error}");
+            return ExitCode::FAILURE;
+        }
+    }
     let source_hashes = match read_hashes(Path::new(&source_hashes_path)) {
         Ok(hashes) => hashes,
         Err(error) => {
@@ -241,6 +355,21 @@ where
             return ExitCode::FAILURE;
         }
     };
+    if verification.is_none() {
+        match calculate_update_space_required(0, target_hashes.len(), block_size) {
+            Ok(length) if length < XVD_HEADER_BYTES => {}
+            Ok(_) => {
+                eprintln!(
+                    "XSP output large enough to be a package requires signed target verification"
+                );
+                return ExitCode::FAILURE;
+            }
+            Err(error) => {
+                eprintln!("XSP update rejected target size: {error}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
 
     let output_root = Path::new(&destination);
     let mut entries = match promotion_entries(&[(output.clone(), output.clone())]) {
@@ -361,7 +490,26 @@ where
     }
     drop(staged_file);
 
-    if let Err(error) = promote_transaction(transaction.path(), output_root, &mut entries) {
+    if let Some(verification) = &verification {
+        let file = match open_package_input(&payload_root, &output) {
+            Ok(file) => File::from_std(file),
+            Err(error) => {
+                eprintln!("XSP update could not open staged target for authentication: {error}");
+                return ExitCode::FAILURE;
+            }
+        };
+        let identity = ExpectedXvdIdentity {
+            content_id: xsp.header.content_id,
+            package_id: verification.target_package_id,
+            version: xsp.header.upgrade_to_version,
+        };
+        if let Err(error) = authenticate_update_image(file, &verification.key, identity).await {
+            eprintln!("XSP update rejected staged target authentication: {error}");
+            return ExitCode::FAILURE;
+        }
+    }
+
+    if let Err(error) = promote_owned_transaction(transaction, output_root, &mut entries) {
         eprintln!("XSP update promotion failed: {error}");
         return ExitCode::FAILURE;
     }
@@ -385,7 +533,10 @@ mod tests {
     use crate::commands::install_msixvc2::run as install_msixvc2;
     use crate::commands::streaming::recover_transactions;
 
-    use super::{ApplyXspRequest, open_regular_input, read_bounded_text, run, run_with_hook};
+    use super::{
+        ApplyXspRequest, XspVerification, load_update_verification, open_regular_input,
+        read_bounded_text, run, run_with_hook,
+    };
 
     fn fixture(name: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -400,6 +551,77 @@ mod tests {
             write!(&mut line, "{byte:02x}").expect("hash formatting must succeed");
         }
         line
+    }
+
+    #[test]
+    fn verification_uses_bundled_key_and_rejects_untrusted_overrides() {
+        let identity = "00000000-0000-0000-0000-000000000001".to_owned();
+        let input = |retail_key_path| XspVerification {
+            retail_key_path,
+            source_package_id: identity.clone(),
+            target_package_id: identity.clone(),
+        };
+        assert!(load_update_verification(input(None)).is_ok());
+        let temporary = tempfile::tempdir().unwrap();
+        let key_path = temporary.path().join("wrong-key");
+        std::fs::write(&key_path, [0_u8; 539]).unwrap();
+        assert!(
+            load_update_verification(input(Some(key_path.to_string_lossy().into_owned()))).is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn package_sized_base_requires_signature_verification_before_mutation() {
+        let temporary = tempfile::tempdir().unwrap();
+        let base = temporary.path().join("base.xvd");
+        let destination = temporary.path().join("destination");
+        std::fs::write(&base, vec![0_u8; 4096]).unwrap();
+        let request = ApplyXspRequest {
+            descriptor: fixture("xodus-fixture-valid.xsp")
+                .to_string_lossy()
+                .into_owned(),
+            base: base.to_string_lossy().into_owned(),
+            new_data: "missing".to_owned(),
+            source_hashes: "missing".to_owned(),
+            target_hashes: "missing".to_owned(),
+            destination: destination.to_string_lossy().into_owned(),
+            output: "game.xvd".to_owned(),
+            block_size: 4,
+            rollback: false,
+        };
+        assert_eq!(run(request).await, std::process::ExitCode::FAILURE);
+        assert!(!destination.exists());
+    }
+
+    #[tokio::test]
+    async fn short_source_cannot_bypass_signed_package_output_requirement() {
+        let temporary = tempfile::tempdir().unwrap();
+        let base = temporary.path().join("base");
+        let source_hashes = temporary.path().join("source.hashes");
+        let target_hashes = temporary.path().join("target.hashes");
+        let destination = temporary.path().join("destination");
+        std::fs::write(&base, b"base").unwrap();
+        std::fs::write(&source_hashes, format!("{}\n", hash_line(b"base"))).unwrap();
+        std::fs::write(
+            &target_hashes,
+            "0000000000000000000000000000000000000000\n".repeat(1024),
+        )
+        .unwrap();
+        let request = ApplyXspRequest {
+            descriptor: fixture("xodus-fixture-valid.xsp")
+                .to_string_lossy()
+                .into_owned(),
+            base: base.to_string_lossy().into_owned(),
+            new_data: "missing".to_owned(),
+            source_hashes: source_hashes.to_string_lossy().into_owned(),
+            target_hashes: target_hashes.to_string_lossy().into_owned(),
+            destination: destination.to_string_lossy().into_owned(),
+            output: "game.xvd".to_owned(),
+            block_size: 4,
+            rollback: false,
+        };
+        assert_eq!(run(request).await, std::process::ExitCode::FAILURE);
+        assert!(!destination.exists());
     }
 
     #[test]

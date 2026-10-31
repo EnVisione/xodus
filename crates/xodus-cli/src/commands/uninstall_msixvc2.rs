@@ -5,7 +5,7 @@ use msixvc::msixvc2::inspect;
 
 use crate::commands::install_msixvc2::open_archive;
 use crate::commands::streaming::{
-    acquire_transaction_lock, ensure_package_root, new_transaction, promote_transaction,
+    acquire_transaction_lock, ensure_package_root, new_transaction, promote_owned_transaction,
     promotion_entries_with_removals, recover_transactions,
 };
 
@@ -82,7 +82,7 @@ pub fn run(path: String, destination: String) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    if let Err(error) = promote_transaction(transaction.path(), output_root, &mut entries) {
+    if let Err(error) = promote_owned_transaction(transaction, output_root, &mut entries) {
         eprintln!("MSIXVC2 uninstall promotion failed: {error}");
         return ExitCode::FAILURE;
     }

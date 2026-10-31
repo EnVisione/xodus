@@ -304,6 +304,7 @@ impl XspFile {
             });
         }
         base.seek(std::io::SeekFrom::Start(0)).await?;
+        let mut next_source_offset = Some(0_u64);
         for (index, expected_hash) in base_state.block_hashes.iter().enumerate() {
             let block_index =
                 u64::try_from(index).map_err(|_| XspStreamApplyError::OffsetOverflow)?;
@@ -365,9 +366,16 @@ impl XspFile {
                         let source_offset = source_block
                             .checked_mul(validated.block_size)
                             .ok_or(XspStreamApplyError::OffsetOverflow)?;
-                        base.seek(std::io::SeekFrom::Start(source_offset)).await?;
+                        if next_source_offset.take() != Some(source_offset) {
+                            base.seek(std::io::SeekFrom::Start(source_offset)).await?;
+                        }
                         read_stream_block(base, &mut block, XspHashPhase::Source, source_block)
                             .await?;
+                        next_source_offset = Some(
+                            source_offset
+                                .checked_add(validated.block_size)
+                                .ok_or(XspStreamApplyError::OffsetOverflow)?,
+                        );
                     } else {
                         read_stream_block(
                             new_data,
@@ -886,6 +894,35 @@ mod tests {
         }
     }
 
+    struct CountingReader {
+        inner: TestReader,
+        seeks: usize,
+    }
+
+    impl AsyncRead for CountingReader {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.inner).poll_read(cx, buf)
+        }
+    }
+
+    impl AsyncSeek for CountingReader {
+        fn start_seek(mut self: Pin<&mut Self>, position: SeekFrom) -> std::io::Result<()> {
+            self.seeks += 1;
+            Pin::new(&mut self.inner).start_seek(position)
+        }
+
+        fn poll_complete(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+        ) -> Poll<std::io::Result<u64>> {
+            Pin::new(&mut self.inner).poll_complete(cx)
+        }
+    }
+
     struct TestWriter(Vec<u8>);
 
     impl AsyncWrite for TestWriter {
@@ -1186,6 +1223,85 @@ mod tests {
         .expect("valid stream update should apply");
 
         assert_eq!(output.0, b"new!base");
+    }
+
+    #[tokio::test]
+    async fn stream_update_avoids_reseeking_contiguous_source_blocks() {
+        let mut xsp = parse(VALID_XSP).await.unwrap();
+        xsp.entries = vec![XspPatchRecord::CopyData {
+            old_block_number: 0,
+            new_block_number: 0,
+            block_count: 3,
+        }];
+        let hashes = [hash20(b"abcd"), hash20(b"efgh"), hash20(b"ijkl")];
+        let base = XspBaseState {
+            content_id: xsp.header.content_id,
+            version: xsp.header.upgrade_from_version,
+            block_hashes: &hashes,
+        };
+        let input = XspUpdateInput {
+            expected_source_hashes: &hashes,
+            target_hashes: &hashes,
+            available_space: u64::MAX,
+            block_size: 4,
+        };
+        let mut reader = CountingReader {
+            inner: TestReader::new(b"abcdefghijkl"),
+            seeks: 0,
+        };
+        let mut new_data = TestReader::new(b"");
+        let mut output = TestWriter(Vec::new());
+        xsp.apply_update_stream(&mut reader, &mut new_data, &mut output, base, input)
+            .await
+            .unwrap();
+        assert_eq!(output.0, b"abcdefghijkl");
+        assert_eq!(reader.seeks, 3);
+    }
+
+    #[tokio::test]
+    async fn stream_update_still_seeks_for_reordered_source_blocks() {
+        let mut xsp = parse(VALID_XSP).await.unwrap();
+        xsp.entries = vec![
+            XspPatchRecord::CopyData {
+                old_block_number: 1,
+                new_block_number: 0,
+                block_count: 1,
+            },
+            XspPatchRecord::CopyData {
+                old_block_number: 0,
+                new_block_number: 1,
+                block_count: 1,
+            },
+            XspPatchRecord::CopyData {
+                old_block_number: 2,
+                new_block_number: 2,
+                block_count: 1,
+            },
+        ];
+        let hashes = [hash20(b"abcd"), hash20(b"efgh"), hash20(b"ijkl")];
+        let target = [hashes[1], hashes[0], hashes[2]];
+        let base = XspBaseState {
+            content_id: xsp.header.content_id,
+            version: xsp.header.upgrade_from_version,
+            block_hashes: &hashes,
+        };
+        let input = XspUpdateInput {
+            expected_source_hashes: &hashes,
+            target_hashes: &target,
+            available_space: u64::MAX,
+            block_size: 4,
+        };
+        let mut reader = CountingReader {
+            inner: TestReader::new(b"abcdefghijkl"),
+            seeks: 0,
+        };
+        let mut new_data = TestReader::new(b"");
+        let mut output = TestWriter(Vec::new());
+        xsp.apply_update_stream(&mut reader, &mut new_data, &mut output, base, input)
+            .await
+            .unwrap();
+        assert_eq!(output.0, b"efghabcdijkl");
+        assert_eq!(reader.seeks, 6);
     }
 
     #[tokio::test]

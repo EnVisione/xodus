@@ -1,7 +1,9 @@
+pub mod authenticated_xvd;
 pub mod crypt;
 pub mod hash_tree;
 pub mod layout;
 pub mod math;
+mod microsoft_retail_key;
 pub mod models;
 pub mod msixvc2;
 pub mod signature;

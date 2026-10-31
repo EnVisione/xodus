@@ -17,9 +17,11 @@ pub struct TweakGenerator {
 
 impl TweakGenerator {
     pub fn new(region_id: XvcRegionId, vduid: Uuid) -> Self {
+        let mut prefix = [0_u8; 8];
+        prefix.copy_from_slice(&vduid.to_bytes_le()[..8]);
         Self {
             region_id: region_id.to_le_bytes(),
-            vduid: vduid.to_bytes_le()[..8].try_into().unwrap(),
+            vduid: prefix,
         }
     }
 

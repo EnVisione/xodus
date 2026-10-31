@@ -84,6 +84,12 @@ enum SubCommand {
         source_hashes: String,
         #[arg(long)]
         target_hashes: String,
+        #[arg(long)]
+        retail_signing_key: Option<String>,
+        #[arg(long)]
+        source_package_id: Option<String>,
+        #[arg(long)]
+        target_package_id: Option<String>,
         #[arg(long, default_value_t = 4)]
         block_size: u64,
         #[arg(long, default_value_t = false)]
@@ -314,10 +320,13 @@ async fn run_inner(args: CliArgs) -> ExitCode {
             output,
             source_hashes,
             target_hashes,
+            retail_signing_key,
+            source_package_id,
+            target_package_id,
             block_size,
             rollback,
         } => {
-            commands::apply_xsp::run(commands::apply_xsp::ApplyXspRequest {
+            let request = commands::apply_xsp::ApplyXspRequest {
                 descriptor,
                 base,
                 new_data,
@@ -327,8 +336,27 @@ async fn run_inner(args: CliArgs) -> ExitCode {
                 output,
                 block_size,
                 rollback,
-            })
-            .await
+            };
+            match (retail_signing_key, source_package_id, target_package_id) {
+                (None, None, None) => commands::apply_xsp::run(request).await,
+                (retail_key_path, Some(source_package_id), Some(target_package_id)) => {
+                    commands::apply_xsp::run_verified(
+                        request,
+                        commands::apply_xsp::XspVerification {
+                            retail_key_path,
+                            source_package_id,
+                            target_package_id,
+                        },
+                    )
+                    .await
+                }
+                _ => {
+                    eprintln!(
+                        "XSP verification requires both source and target package identities"
+                    );
+                    ExitCode::FAILURE
+                }
+            }
         }
         SubCommand::Streaming {
             source,

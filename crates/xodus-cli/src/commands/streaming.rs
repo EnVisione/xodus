@@ -51,6 +51,8 @@ const TRANSACTION_PAYLOAD_DIRECTORY: &str = ".xodus-streaming-payload";
 const TRANSACTION_BACKUP_DIRECTORY: &str = ".xodus-streaming-backup";
 const TRANSACTION_JOURNAL: &str = ".xodus-streaming-journal";
 const TRANSACTION_JOURNAL_TEMP: &str = ".xodus-streaming-journal.tmp";
+const TRANSACTION_MARKER: &str = ".xodus-streaming-owner";
+const TRANSACTION_MARKER_CONTENT: &[u8] = b"xodus-transaction-v1\n";
 const TRANSACTION_LOCK_FILE: &str = ".xodus-streaming.lock";
 const MAX_TRANSACTION_JOURNAL_BYTES: usize = 64 * 1024 * 1024;
 const MAX_PACKAGE_PATH_BYTES: usize = 4096;
@@ -231,6 +233,15 @@ pub(crate) fn package_path_components(path: &str) -> io::Result<Vec<&str>> {
         {
             return Err(invalid_package_path(
                 "package path contains an invalid filename",
+            ));
+        }
+        if component.eq_ignore_ascii_case(TRANSACTION_LOCK_FILE)
+            || component
+                .get(..TRANSACTION_DIRECTORY_PREFIX.len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(TRANSACTION_DIRECTORY_PREFIX))
+        {
+            return Err(invalid_package_path(
+                "package path uses a reserved transaction name",
             ));
         }
     }
@@ -685,15 +696,7 @@ fn rename_package_entry(
     let target_parent = open_package_parent(target_root, target_relative, true)?;
     let source_name = package_entry_name(source_relative)?;
     let target_name = package_entry_name(target_relative)?;
-    match renameat(&source_parent, source_name, &target_parent, target_name) {
-        Ok(()) => Ok(()),
-        Err(Errno::EXIST) => {
-            unlinkat(&target_parent, target_name, AtFlags::empty()).map_err(io::Error::from)?;
-            renameat(&source_parent, source_name, &target_parent, target_name)
-                .map_err(io::Error::from)
-        }
-        Err(error) => Err(error.into()),
-    }
+    renameat(&source_parent, source_name, &target_parent, target_name).map_err(io::Error::from)
 }
 
 fn remove_package_entry(root: &Path, relative: &Path) -> io::Result<()> {
@@ -832,6 +835,21 @@ fn rollback_transaction(
     }
 }
 
+fn rollback_after_failure(
+    transaction_root: &Path,
+    output_root: &Path,
+    entries: &mut [PromotionEntry],
+    error: io::Error,
+) -> io::Error {
+    match rollback_transaction(transaction_root, output_root, entries) {
+        Ok(()) => error,
+        Err(rollback_error) => io::Error::new(
+            error.kind(),
+            format!("{error}; rollback incomplete: {rollback_error}"),
+        ),
+    }
+}
+
 fn promote_transaction_inner<F>(
     transaction_root: &Path,
     output_root: &Path,
@@ -864,8 +882,12 @@ where
             && !match package_entry_is_regular(&payload_root, &entries[index].staged_relative) {
                 Ok(is_regular) => is_regular,
                 Err(error) => {
-                    let _ = rollback_transaction(transaction_root, output_root, entries);
-                    return Err(error);
+                    return Err(rollback_after_failure(
+                        transaction_root,
+                        output_root,
+                        entries,
+                        error,
+                    ));
                 }
             }
         {
@@ -873,14 +895,22 @@ where
                 ErrorKind::NotFound,
                 format!("staged package file is missing: {}", staged_path.display()),
             );
-            let _ = rollback_transaction(transaction_root, output_root, entries);
-            return Err(error);
+            return Err(rollback_after_failure(
+                transaction_root,
+                output_root,
+                entries,
+                error,
+            ));
         }
         if !entries[index].remove_final
             && let Err(error) = ensure_package_parent(output_root, &entries[index].final_relative)
         {
-            let _ = rollback_transaction(transaction_root, output_root, entries);
-            return Err(error);
+            return Err(rollback_after_failure(
+                transaction_root,
+                output_root,
+                entries,
+                error,
+            ));
         }
         let final_exists = match std::fs::symlink_metadata(&final_path) {
             Ok(metadata) => {
@@ -889,23 +919,35 @@ where
                         "existing package path is not a regular file: {}",
                         final_path.display()
                     ));
-                    let _ = rollback_transaction(transaction_root, output_root, entries);
-                    return Err(error);
+                    return Err(rollback_after_failure(
+                        transaction_root,
+                        output_root,
+                        entries,
+                        error,
+                    ));
                 }
                 true
             }
             Err(error) if error.kind() == ErrorKind::NotFound => false,
             Err(error) => {
-                let _ = rollback_transaction(transaction_root, output_root, entries);
-                return Err(error);
+                return Err(rollback_after_failure(
+                    transaction_root,
+                    output_root,
+                    entries,
+                    error,
+                ));
             }
         };
         if final_exists {
             entries[index].had_previous = true;
             entries[index].state = PromotionState::BackupPending;
             if let Err(error) = write_transaction_journal(transaction_root, entries, false) {
-                let _ = rollback_transaction(transaction_root, output_root, entries);
-                return Err(error);
+                return Err(rollback_after_failure(
+                    transaction_root,
+                    output_root,
+                    entries,
+                    error,
+                ));
             }
             if should_interrupt() {
                 return Err(io::Error::new(
@@ -919,16 +961,24 @@ where
                 transaction_root,
                 &entries[index].backup_relative,
             ) {
-                let _ = rollback_transaction(transaction_root, output_root, entries);
-                return Err(error);
+                return Err(rollback_after_failure(
+                    transaction_root,
+                    output_root,
+                    entries,
+                    error,
+                ));
             }
             if let Err(error) = sync_package_parent(output_root, &entries[index].final_relative)
                 .and_then(|()| {
                     sync_package_parent(transaction_root, &entries[index].backup_relative)
                 })
             {
-                let _ = rollback_transaction(transaction_root, output_root, entries);
-                return Err(error);
+                return Err(rollback_after_failure(
+                    transaction_root,
+                    output_root,
+                    entries,
+                    error,
+                ));
             }
             if should_interrupt() {
                 return Err(io::Error::new(
@@ -939,8 +989,12 @@ where
         }
         entries[index].state = PromotionState::BackedUp;
         if let Err(error) = write_transaction_journal(transaction_root, entries, false) {
-            let _ = rollback_transaction(transaction_root, output_root, entries);
-            return Err(error);
+            return Err(rollback_after_failure(
+                transaction_root,
+                output_root,
+                entries,
+                error,
+            ));
         }
         if should_interrupt() {
             return Err(io::Error::new(
@@ -957,8 +1011,12 @@ where
                 &entries[index].final_relative,
             )
         {
-            let _ = rollback_transaction(transaction_root, output_root, entries);
-            return Err(error);
+            return Err(rollback_after_failure(
+                transaction_root,
+                output_root,
+                entries,
+                error,
+            ));
         }
         if should_interrupt() {
             return Err(io::Error::new(
@@ -970,13 +1028,21 @@ where
             && let Err(error) = sync_package_parent(&payload_root, &entries[index].staged_relative)
                 .and_then(|()| sync_package_parent(output_root, &entries[index].final_relative))
         {
-            let _ = rollback_transaction(transaction_root, output_root, entries);
-            return Err(error);
+            return Err(rollback_after_failure(
+                transaction_root,
+                output_root,
+                entries,
+                error,
+            ));
         }
         entries[index].state = PromotionState::Promoted;
         if let Err(error) = write_transaction_journal(transaction_root, entries, false) {
-            let _ = rollback_transaction(transaction_root, output_root, entries);
-            return Err(error);
+            return Err(rollback_after_failure(
+                transaction_root,
+                output_root,
+                entries,
+                error,
+            ));
         }
         if should_interrupt() {
             return Err(io::Error::new(
@@ -989,13 +1055,55 @@ where
     write_transaction_journal(transaction_root, entries, true)
 }
 
-pub(crate) fn promote_transaction(
+#[cfg(test)]
+fn promote_transaction(
     transaction_root: &Path,
     output_root: &Path,
     entries: &mut [PromotionEntry],
 ) -> io::Result<()> {
     let mut never_interrupt = || false;
     promote_transaction_inner(transaction_root, output_root, entries, &mut never_interrupt)
+}
+
+fn promote_owned_transaction_inner<F>(
+    transaction: TempDir,
+    output_root: &Path,
+    entries: &mut [PromotionEntry],
+    should_interrupt: &mut F,
+) -> io::Result<()>
+where
+    F: FnMut() -> bool,
+{
+    let transaction_root = transaction.path().to_path_buf();
+    if let Err(error) =
+        promote_transaction_inner(&transaction_root, output_root, entries, should_interrupt)
+    {
+        let retained = transaction.keep();
+        return Err(io::Error::new(
+            error.kind(),
+            format!(
+                "promotion reported an error; its commit status may be uncertain; recovery data retained at {}: {error}",
+                retained.display()
+            ),
+        ));
+    }
+    transaction.close().map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!(
+                "promotion committed, but transaction cleanup failed at {}: {error}",
+                transaction_root.display()
+            ),
+        )
+    })
+}
+
+pub(crate) fn promote_owned_transaction(
+    transaction: TempDir,
+    output_root: &Path,
+    entries: &mut [PromotionEntry],
+) -> io::Result<()> {
+    promote_owned_transaction_inner(transaction, output_root, entries, &mut || false)
 }
 
 #[cfg(test)]
@@ -1025,6 +1133,22 @@ fn promote_transaction_with_interruption(
 fn recover_transaction_dir(transaction_root: &Path, output_root: &Path) -> io::Result<()> {
     let journal = journal_path(transaction_root);
     if !journal.exists() {
+        let marker =
+            open_transaction_file(transaction_root, TRANSACTION_MARKER, false).map_err(|_| {
+                invalid_package_path(
+                    "unrecognized transaction directory has no journal or valid owner marker",
+                )
+            })?;
+        if !marker.metadata()?.is_file() {
+            return Err(invalid_package_path(
+                "transaction owner marker is not a regular file",
+            ));
+        }
+        let mut bytes = Vec::new();
+        marker.take(64).read_to_end(&mut bytes)?;
+        if bytes != TRANSACTION_MARKER_CONTENT {
+            return Err(invalid_package_path("transaction owner marker is invalid"));
+        }
         return std::fs::remove_dir_all(transaction_root)
             .and_then(|()| sync_parent_directory(transaction_root));
     }
@@ -1044,13 +1168,27 @@ pub(crate) fn recover_transactions(output_root: &Path) -> io::Result<()> {
             continue;
         };
         if name.starts_with(TRANSACTION_DIRECTORY_PREFIX) && entry.file_type()?.is_dir() {
-            recover_transaction_dir(&path, output_root)?;
+            recover_transaction_dir(&path, output_root).map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!("could not recover {}: {error}", path.display()),
+                )
+            })?;
         }
     }
     Ok(())
 }
 
-pub(crate) fn acquire_transaction_lock(output_root: &Path) -> io::Result<std::fs::File> {
+#[derive(Debug)]
+pub(crate) struct TransactionLock(std::fs::File);
+
+impl Drop for TransactionLock {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.0);
+    }
+}
+
+pub(crate) fn acquire_transaction_lock(output_root: &Path) -> io::Result<TransactionLock> {
     let root = open_package_root(output_root, "transaction root is not a directory")?;
     let lock = std::fs::File::from(
         open_resolved(
@@ -1063,7 +1201,7 @@ pub(crate) fn acquire_transaction_lock(output_root: &Path) -> io::Result<std::fs
         .map_err(io::Error::from)?,
     );
     lock.try_lock_exclusive()?;
-    Ok(lock)
+    Ok(TransactionLock(lock))
 }
 
 pub(crate) fn new_transaction(output_root: &Path) -> io::Result<(TempDir, PathBuf)> {
@@ -1072,6 +1210,11 @@ pub(crate) fn new_transaction(output_root: &Path) -> io::Result<(TempDir, PathBu
         .tempdir_in(output_root)?;
     let payload_root = transaction.path().join(TRANSACTION_PAYLOAD_DIRECTORY);
     std::fs::create_dir(&payload_root)?;
+    let mut marker = open_transaction_file(transaction.path(), TRANSACTION_MARKER, true)?;
+    marker.write_all(TRANSACTION_MARKER_CONTENT)?;
+    marker.sync_all()?;
+    std::fs::File::open(transaction.path())?.sync_all()?;
+    std::fs::File::open(output_root)?.sync_all()?;
     Ok((transaction, payload_root))
 }
 
@@ -1520,7 +1663,6 @@ where
             return false;
         }
     };
-    let transaction_root = transaction.path().to_path_buf();
     let cache_path = transaction_payload.join(".xodus-streaming-tmp.msixvc");
     let mut remote_file = match streaming::PrefixCacheFile::new(reader, l, cache_path.clone()).await
     {
@@ -1849,12 +1991,8 @@ where
             return false;
         }
     };
-    if let Err(err) = promote_transaction(&transaction_root, out, &mut entries) {
+    if let Err(err) = promote_owned_transaction(transaction, out, &mut entries) {
         eprintln!("failed to promote package cache: {err}");
-        return false;
-    }
-    if let Err(err) = transaction.close() {
-        eprintln!("failed to remove completed package transaction staging: {err}");
         return false;
     }
     true
@@ -2057,9 +2195,22 @@ mod tests {
             "content/invalid?.bin",
             "content/NUL.bin",
             "content/trailing. ",
+            ".xodus-streaming.lock",
+            ".XODUS-STREAMING.LOCK",
+            ".xodus-streaming-txn-fake/.xodus-streaming-journal",
+            "nested/.XODUS-STREAMING-TXN-fake/entry",
         ] {
             assert!(package_path_components(path).is_err(), "{path}");
         }
+    }
+
+    #[test]
+    fn reserved_transaction_names_create_no_package_files() {
+        let temporary = tempfile::tempdir().unwrap();
+        for path in [".xodus-streaming.lock", ".xodus-streaming-txn-fake/file"] {
+            assert!(open_package_output(temporary.path(), path).is_err());
+        }
+        assert_eq!(std::fs::read_dir(temporary.path()).unwrap().count(), 0);
     }
 
     #[test]
@@ -2530,6 +2681,109 @@ mod tests {
         }
     }
 
+    #[test]
+    fn owned_promotion_preserves_recovery_data_at_each_interruption() {
+        for checkpoint in 0..6 {
+            let temporary = tempfile::tempdir().unwrap();
+            let output = temporary.path().join("output");
+            std::fs::create_dir(&output).unwrap();
+            let final_path = output.join("game.bin");
+            std::fs::write(&final_path, b"verified").unwrap();
+            let (transaction, payload) = new_transaction(&output).unwrap();
+            std::fs::write(payload.join("game.bin"), b"replacement").unwrap();
+            let transaction_root = transaction.path().to_path_buf();
+            let mut entries =
+                promotion_entries(&[("game.bin".to_owned(), "game.bin".to_owned())]).unwrap();
+            let mut remaining = checkpoint;
+            let error = super::promote_owned_transaction_inner(
+                transaction,
+                &output,
+                &mut entries,
+                &mut || {
+                    if remaining == 0 {
+                        true
+                    } else {
+                        remaining -= 1;
+                        false
+                    }
+                },
+            )
+            .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+            assert!(error.to_string().contains("recovery data retained"));
+            assert!(transaction_root.exists());
+            recover_transactions(&output).unwrap();
+            assert_eq!(std::fs::read(final_path).unwrap(), b"verified");
+            assert!(!transaction_root.exists());
+        }
+    }
+
+    #[test]
+    fn recovery_preserves_unrecognized_unjournaled_directory() {
+        let temporary = tempfile::tempdir().unwrap();
+        let unrelated = temporary.path().join(".xodus-streaming-txn-user-data");
+        std::fs::create_dir(&unrelated).unwrap();
+        std::fs::write(unrelated.join("keep.txt"), b"user data").unwrap();
+        let error = recover_transactions(temporary.path()).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            std::fs::read(unrelated.join("keep.txt")).unwrap(),
+            b"user data"
+        );
+    }
+
+    #[test]
+    fn recovery_accepts_journaled_legacy_transaction_without_marker() {
+        let temporary = tempfile::tempdir().unwrap();
+        let output = temporary.path().join("output");
+        std::fs::create_dir(&output).unwrap();
+        std::fs::write(output.join("game.bin"), b"verified").unwrap();
+        let (transaction, _) = new_transaction(&output).unwrap();
+        std::fs::remove_file(transaction.path().join(super::TRANSACTION_MARKER)).unwrap();
+        let entries = promotion_entries(&[("game.bin".to_owned(), "game.bin".to_owned())]).unwrap();
+        write_transaction_journal(transaction.path(), &entries, false).unwrap();
+        let transaction_root = transaction.keep();
+        recover_transactions(&output).unwrap();
+        assert_eq!(std::fs::read(output.join("game.bin")).unwrap(), b"verified");
+        assert!(!transaction_root.exists());
+    }
+
+    #[test]
+    fn recovery_preserves_directory_with_invalid_owner_marker() {
+        let temporary = tempfile::tempdir().unwrap();
+        let (transaction, _) = new_transaction(temporary.path()).unwrap();
+        std::fs::write(
+            transaction.path().join(super::TRANSACTION_MARKER),
+            b"invalid",
+        )
+        .unwrap();
+        let transaction_root = transaction.keep();
+        let error = recover_transactions(temporary.path()).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(transaction_root.exists());
+    }
+
+    #[test]
+    fn rollback_failure_is_reported_with_the_original_error() {
+        let temporary = tempfile::tempdir().unwrap();
+        let output = temporary.path().join("output");
+        std::fs::create_dir(&output).unwrap();
+        let (transaction, _) = new_transaction(&output).unwrap();
+        let mut entries =
+            promotion_entries(&[("game.bin".to_owned(), "game.bin".to_owned())]).unwrap();
+        entries[0].state = PromotionState::Promoted;
+        entries[0].had_previous = true;
+        let error = super::rollback_after_failure(
+            transaction.path(),
+            &output,
+            &mut entries,
+            io::Error::new(io::ErrorKind::PermissionDenied, "promotion refused"),
+        );
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(error.to_string().contains("promotion refused"));
+        assert!(error.to_string().contains("rollback incomplete"));
+    }
+
     #[cfg(unix)]
     #[test]
     fn transaction_recovery_restores_after_process_crash_injection() {
@@ -2650,6 +2904,16 @@ mod tests {
         assert!(acquire_transaction_lock(temporary.path()).is_err());
         drop(first);
         assert!(acquire_transaction_lock(temporary.path()).is_ok());
+    }
+
+    #[test]
+    fn transaction_lock_releases_even_if_descriptor_was_inherited() {
+        let temporary = tempfile::tempdir().unwrap();
+        let first = acquire_transaction_lock(temporary.path()).unwrap();
+        let inherited = first.0.try_clone().unwrap();
+        drop(first);
+        assert!(acquire_transaction_lock(temporary.path()).is_ok());
+        drop(inherited);
     }
 
     #[cfg(unix)]

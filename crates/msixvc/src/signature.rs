@@ -6,6 +6,12 @@ const RSA_MODULUS_LEN: usize = 512;
 const SIGNATURE_LEN: usize = 512;
 const SIGNED_PAGE_LEN: usize = 4096;
 
+/// SHA-256 of the retail gaming XVD signing key's BCrypt public-key blob.
+pub const MICROSOFT_RETAIL_XVD_KEY_SHA256: [u8; 32] = [
+    0x18, 0x3f, 0x0a, 0xe0, 0x54, 0x31, 0xe4, 0xad, 0x91, 0x55, 0x4e, 0x88, 0x94, 0x69, 0x67, 0xc8,
+    0x72, 0x99, 0x72, 0x27, 0xdb, 0xe6, 0xc8, 0x51, 0x16, 0xf5, 0xfd, 0x2f, 0xd2, 0xd1, 0x22, 0x9e,
+];
+
 /// A public key whose exact serialized bytes match a caller-supplied fingerprint.
 /// The caller must obtain the fingerprint from an independent trusted source.
 pub struct PinnedXvdKey {
@@ -28,6 +34,16 @@ pub enum XvdSignatureError {
 }
 
 impl PinnedXvdKey {
+    /// Load the bundled Microsoft retail key, checking its pinned fingerprint.
+    pub fn microsoft_retail() -> Result<Self, XvdSignatureError> {
+        Self::from_microsoft_retail_blob(&crate::microsoft_retail_key::RETAIL_KEY)
+    }
+
+    /// Parse a BCrypt blob only if it matches the Microsoft retail gaming key.
+    pub fn from_microsoft_retail_blob(blob: &[u8]) -> Result<Self, XvdSignatureError> {
+        Self::from_bcrypt_blob(blob, &MICROSOFT_RETAIL_XVD_KEY_SHA256)
+    }
+
     /// Parse an exact `BCRYPT_RSAPUBLIC_BLOB`, after matching its pinned SHA-256.
     /// A pin supplied by the same untrusted source as the key provides no trust.
     pub fn from_bcrypt_blob(
@@ -111,6 +127,7 @@ mod tests {
 
     #[test]
     fn signed_header_requires_pinned_key_and_unmodified_signed_page() {
+        assert!(PinnedXvdKey::microsoft_retail().is_ok());
         let pair = RsaKeyPair::generate(KeySize::Rsa4096).expect("synthetic key generation");
         let public = pair.public_key();
         let modulus = public.modulus();
@@ -131,6 +148,10 @@ mod tests {
         blob.extend_from_slice(exponent);
         blob.extend_from_slice(modulus);
         let trusted = pin(&blob);
+        assert!(matches!(
+            PinnedXvdKey::from_microsoft_retail_blob(&blob),
+            Err(XvdSignatureError::FingerprintMismatch)
+        ));
         let key = PinnedXvdKey::from_bcrypt_blob(&blob, &trusted).expect("valid synthetic key");
         assert!(matches!(
             PinnedXvdKey::from_bcrypt_blob(&blob, &[0; 32]),

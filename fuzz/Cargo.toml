@@ -12,6 +12,9 @@ libfuzzer-sys = "0.4.13"
 msixvc = { path = "../crates/msixvc" }
 tokio = { version = "1.53.1", features = ["rt"] }
 
+[patch.crates-io]
+ntfs = { git = "https://github.com/xodus-gaming/ntfs.git", rev = "5edc794c3ec73a2722dad24abefd05f270d3e066" }
+
 [[bin]]
 name = "parse_inputs"
 path = "fuzz_targets/parse_inputs.rs"

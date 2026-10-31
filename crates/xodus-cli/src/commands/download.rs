@@ -14,8 +14,8 @@ use xodus::models::packagespc::PackageFile;
 use xodus::tokens::TokenManager;
 
 use crate::commands::streaming::{
-    acquire_transaction_lock, new_transaction, open_package_output, promote_transaction,
-    promotion_entries,
+    TransactionLock, acquire_transaction_lock, new_transaction, open_package_output,
+    promote_owned_transaction, promotion_entries, recover_transactions,
 };
 use crate::package::{
     decode_file_hash, get_content_id, get_packages, get_specific_packages, package_download_urls,
@@ -252,6 +252,12 @@ struct DownloadAttemptRequest<'a> {
     progress_bar: &'a ProgressBar,
 }
 
+fn lock_and_recover_download_root(output_root: &Path) -> io::Result<TransactionLock> {
+    let lock = acquire_transaction_lock(output_root)?;
+    recover_transactions(output_root)?;
+    Ok(lock)
+}
+
 async fn download_file_attempt(
     client: &reqwest::Client,
     url: &str,
@@ -351,7 +357,7 @@ where
     validate_file_hash(expected_hash, hasher.finalize().into()).map_err(fatal_download_error)?;
     output.sync_all().await.map_err(fatal_download_error)?;
     drop(output);
-    promote_transaction(transaction.path(), output_root, &mut promotion)
+    promote_owned_transaction(transaction, output_root, &mut promotion)
         .map_err(fatal_download_error)?;
     Ok(())
 }
@@ -413,10 +419,10 @@ pub async fn run(
     let _transaction_lock = if dry_run {
         None
     } else {
-        match acquire_transaction_lock(Path::new(".")) {
+        match lock_and_recover_download_root(Path::new(".")) {
             Ok(lock) => Some(lock),
             Err(error) => {
-                eprintln!("could not acquire download transaction lock: {error}");
+                eprintln!("could not lock or recover download transactions: {error}");
                 return ExitCode::FAILURE;
             }
         }
@@ -545,7 +551,6 @@ mod tests {
         validate_download_response_encoding, validate_download_response_scheme,
         validate_download_space, validate_file_hash,
     };
-    use crate::commands::streaming::recover_transactions;
     use crate::package::{MAX_FILE_HASH_BASE64_CHARS, package_download_urls};
 
     #[test]
@@ -1024,7 +1029,8 @@ mod tests {
             !status.success(),
             "download crash helper must terminate before promotion"
         );
-        recover_transactions(&output).expect("staged download must be recoverable");
+        let _lock = super::lock_and_recover_download_root(&output)
+            .expect("staged download must be recoverable under the transaction lock");
         assert_eq!(
             std::fs::read(output.join("package.bin")).expect("verified package must remain"),
             b"verified"
@@ -1033,11 +1039,13 @@ mod tests {
             std::fs::read_dir(&output)
                 .expect("output directory must remain readable")
                 .all(|entry| {
-                    entry
-                        .expect("output entry must be readable")
-                        .file_name()
-                        .to_string_lossy()
-                        == "package.bin"
+                    matches!(
+                        entry
+                            .expect("output entry must be readable")
+                            .file_name()
+                            .to_str(),
+                        Some("package.bin" | ".xodus-streaming.lock")
+                    )
                 }),
             "recovery must remove the crashed download transaction"
         );
