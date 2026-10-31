@@ -7,6 +7,7 @@ use tokio::io::{AsyncRead, AsyncSeek, ReadBuf};
 
 use crate::authenticated_xvd::{AuthenticatedXvd, AuthenticatedXvdError};
 use crate::layout::PAGE_SIZE;
+use crate::models::xvd::layout::XvdLayout;
 
 type PageBytes = Result<([u8; PAGE_SIZE], usize), AuthenticatedXvdError>;
 type PageResult<R> = (Box<AuthenticatedXvd<R>>, PageBytes);
@@ -19,6 +20,7 @@ pub struct AuthenticatedReader<R> {
     cached: Option<(u64, [u8; PAGE_SIZE], usize)>,
     position: u64,
     length: u64,
+    layout: XvdLayout,
     seek_target: Option<u64>,
 }
 
@@ -37,8 +39,28 @@ impl<R: AsyncRead + AsyncSeek + Unpin + Send + 'static> AuthenticatedReader<R> {
             cached: None,
             position: 0,
             length,
+            layout,
             seek_target: None,
         })
+    }
+
+    pub fn layout(&self) -> XvdLayout {
+        self.layout
+    }
+
+    /// Obtain an authenticated hash for a data-page index without reading payload bytes.
+    pub async fn page_hash(&mut self, page: u32) -> io::Result<[u8; 20]> {
+        if self.pending.is_some() || self.seek_target.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "authenticated reader operation is pending",
+            ));
+        }
+        let xvd = self
+            .xvd
+            .as_mut()
+            .ok_or_else(|| io::Error::other("authenticated reader has no source"))?;
+        xvd.page_hash(page).await.map_err(io::Error::other)
     }
 
     fn poll_pending(&mut self, cx: &mut Context<'_>) -> Poll<Option<PageBytes>> {

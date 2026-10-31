@@ -185,6 +185,29 @@ impl<R: AsyncRead + AsyncSeek + Unpin> AuthenticatedXvd<R> {
         &mut self,
         page: u32,
     ) -> Result<AuthenticatedPage, AuthenticatedXvdError> {
+        let (expected_hash, unit) = self.authenticated_entry(page).await?;
+        let offset = self.layout.user_data.start.to_bytes().0 + u64::from(page) * PAGE_SIZE as u64;
+        if self.next_data_page.take() != Some(page) {
+            self.reader.seek(SeekFrom::Start(offset)).await?;
+        }
+        let mut bytes = [0_u8; PAGE_SIZE];
+        self.reader.read_exact(&mut bytes).await?;
+        if Sha256::digest(bytes)[..20] != expected_hash {
+            return Err(AuthenticatedXvdError::DataMismatch { page });
+        }
+        self.next_data_page = page.checked_add(1);
+        Ok(AuthenticatedPage { bytes, unit })
+    }
+
+    /// Return the signed-tree hash for a data page without reading its payload.
+    pub async fn page_hash(&mut self, page: u32) -> Result<[u8; 20], AuthenticatedXvdError> {
+        self.authenticated_entry(page).await.map(|entry| entry.0)
+    }
+
+    async fn authenticated_entry(
+        &mut self,
+        page: u32,
+    ) -> Result<([u8; 20], u32), AuthenticatedXvdError> {
         let entry_indices = self.ensure_tree_for_page(page).await?;
         let leaf = self.tree_pages[0]
             .as_ref()
@@ -198,17 +221,7 @@ impl<R: AsyncRead + AsyncSeek + Unpin> AuthenticatedXvd<R> {
                 .try_into()
                 .map_err(|_| AuthenticatedXvdError::InvalidTreeLayout)?,
         );
-        let offset = self.layout.user_data.start.to_bytes().0 + u64::from(page) * PAGE_SIZE as u64;
-        if self.next_data_page.take() != Some(page) {
-            self.reader.seek(SeekFrom::Start(offset)).await?;
-        }
-        let mut bytes = [0_u8; PAGE_SIZE];
-        self.reader.read_exact(&mut bytes).await?;
-        if Sha256::digest(bytes)[..20] != expected_hash {
-            return Err(AuthenticatedXvdError::DataMismatch { page });
-        }
-        self.next_data_page = page.checked_add(1);
-        Ok(AuthenticatedPage { bytes, unit })
+        Ok((expected_hash, unit))
     }
 
     async fn ensure_tree_for_page(&mut self, page: u32) -> Result<[u32; 4], AuthenticatedXvdError> {
@@ -639,6 +652,9 @@ mod tests {
             .await
             .unwrap();
         let mut reader = AuthenticatedReader::new(xvd).unwrap();
+        let hash = reader.page_hash(0).await.unwrap();
+        assert_eq!(hash.as_slice(), &Sha256::digest([0_u8; PAGE_SIZE])[..20]);
+        assert!(reader.page_hash(2).await.is_err());
         reader.seek(SeekFrom::Start(offset)).await.unwrap();
         let mut output = [0x55_u8; 16];
         assert!(reader.read(&mut output).await.is_err());
