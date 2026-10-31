@@ -610,6 +610,10 @@ pub enum SegmentMetadataParseError {
     SegmentAllocationFailed { segment_count: u32 },
     #[error("unable to reserve a segment metadata path of {path_length} UTF-16 units")]
     PathAllocationFailed { path_length: u16 },
+    #[error("segment path length {path_length} UTF-16 units exceeds limit {limit}")]
+    SegmentPathUnitsTooLong { path_length: u16, limit: usize },
+    #[error("segment path length {length} UTF-8 bytes exceeds limit {limit}")]
+    SegmentPathUtf8TooLong { length: usize, limit: usize },
     #[error("unable to reserve a segment metadata file entry")]
     FileMapAllocationFailed,
     #[error("unable to reserve {hash_count} segment hashes")]
@@ -1346,7 +1350,14 @@ fn package_file_payload(
 }
 
 fn segment_file_name(fullname: &[u16]) -> Result<String, SegmentMetadataParseError> {
-    String::from_utf16(fullname).map_err(SegmentMetadataParseError::InvalidFileName)
+    let name = String::from_utf16(fullname).map_err(SegmentMetadataParseError::InvalidFileName)?;
+    if name.len() > crate::package_path::MAX_PACKAGE_PATH_BYTES {
+        return Err(SegmentMetadataParseError::SegmentPathUtf8TooLong {
+            length: name.len(),
+            limit: crate::package_path::MAX_PACKAGE_PATH_BYTES,
+        });
+    }
+    Ok(name)
 }
 
 fn reserve_segment_path(path_length: u16) -> Result<Vec<u16>, SegmentMetadataParseError> {
@@ -2813,6 +2824,12 @@ impl XvdFile {
             for segment_no in section.first_segment_index..segment_header.segment_count {
                 let segment = &segments[segment_no as usize];
                 let s = segment.path_length;
+                if usize::from(s) > crate::package_path::MAX_PACKAGE_PATH_BYTES {
+                    return Err(SegmentMetadataParseError::SegmentPathUnitsTooLong {
+                        path_length: s,
+                        limit: crate::package_path::MAX_PACKAGE_PATH_BYTES,
+                    });
+                }
                 let path_offset = segment_path_offset(
                     segment_metadata.offset,
                     segment_metadata.length,
@@ -4783,6 +4800,63 @@ mod tests {
             super::validate_segment_metadata_count(u32::MAX),
             Err(SegmentMetadataParseError::SegmentCountExceedsLimit { .. })
         ));
+    }
+
+    #[test]
+    fn segment_file_name_rejects_decoded_paths_above_package_limit() {
+        let valid: Vec<u16> = "a".repeat(4096).encode_utf16().collect();
+        assert_eq!(super::segment_file_name(&valid).unwrap().len(), 4096);
+        let too_long: Vec<u16> = "€".repeat(1366).encode_utf16().collect();
+        assert!(matches!(
+            super::segment_file_name(&too_long),
+            Err(SegmentMetadataParseError::SegmentPathUtf8TooLong {
+                length: 4098,
+                limit: 4096
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn parse_segment_metadata_rejects_oversized_path_before_reading_it() {
+        let mut xvd = XvdFile::parse(SyntheticXvdReader::synthetic_xvd_with_region_count(0))
+            .await
+            .expect("synthetic XVD must parse");
+        xvd.encrypted_section_infos.push(EncryptedSectionInfo {
+            section_offset: 0,
+            section_length: PAGE_SIZE as u64,
+            header_id: XvcRegionId::Unknown,
+            vduid: [0; 8],
+            data_units: None,
+            first_segment_index: 0,
+            data_hashs: vec![[0; 20]],
+        });
+        let (reader, read_bytes) =
+            SyntheticXvdReader::synthetic_segment_metadata_with_single_segment(4097, 0, 0, false);
+        let metadata_length = (SEGMENT_METADATA_HEADER_SIZE + 16 + 4097 * 2) as u64;
+        let result = xvd
+            .parse_segment_metadata(
+                reader,
+                &UserPackageFile {
+                    offset: 0,
+                    length: metadata_length,
+                },
+            )
+            .await;
+        let error = match result {
+            Ok(_) => panic!("oversized path must fail"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            SegmentMetadataParseError::SegmentPathUnitsTooLong {
+                path_length: 4097,
+                limit: 4096
+            }
+        ));
+        assert_eq!(
+            read_bytes.load(Ordering::Relaxed),
+            SEGMENT_METADATA_HEADER_SIZE + 16
+        );
     }
 
     #[tokio::test]
