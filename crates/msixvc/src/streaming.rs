@@ -62,14 +62,7 @@ fn checked_http_position(current: u64, copied: usize, total: u64) -> io::Result<
 }
 
 fn checked_active_http_offset(current: u64, received: usize, total: u64) -> io::Result<u64> {
-    let next = checked_http_position(current, received, total)?;
-    if next > total {
-        return Err(Error::new(
-            ErrorKind::InvalidData,
-            "received extent beyond declared total",
-        ));
-    }
-    Ok(next)
+    checked_http_position(current, received, total)
 }
 
 fn checked_cache_position(current: u64, advanced: usize, limit: u64) -> io::Result<u64> {
@@ -1602,6 +1595,14 @@ mod tests {
     fn http_read_rejects_active_offset_overflow() {
         let error = super::checked_active_http_offset(u64::MAX, 1, u64::MAX)
             .expect_err("active offset overflow must fail");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn http_read_rejects_received_extent_beyond_total() {
+        let error = super::checked_active_http_offset(9, 2, 10)
+            .expect_err("received extent beyond the declared total must fail");
 
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
