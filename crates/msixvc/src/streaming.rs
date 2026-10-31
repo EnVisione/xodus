@@ -972,7 +972,7 @@ fn http_err(err: reqwest::Error) -> std::io::Error {
         Some(_) => ErrorKind::InvalidData,
         None => ErrorKind::Other,
     };
-    Error::new(kind, err)
+    Error::new(kind, crate::http_error::sanitized_http_error(&err))
 }
 
 fn validate_http_response_scheme(
@@ -1083,6 +1083,54 @@ mod tests {
     use tokio::net::{TcpListener, TcpStream};
 
     use super::{HttpRead, PrefixCacheFile, checked_prefix_target_end, is_retryable_http_status};
+
+    #[tokio::test]
+    async fn http_errors_hide_package_urls_and_preserve_retry_classification() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for status in ["403 Forbidden", "503 Service Unavailable"] {
+                let (mut connection, _) = listener.accept().await.unwrap();
+                let mut request = [0; 2048];
+                assert!(connection.read(&mut request).await.unwrap() > 0);
+                connection
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+        let client = reqwest::Client::new();
+        for (status, kind) in [
+            (403, io::ErrorKind::InvalidData),
+            (503, io::ErrorKind::Other),
+        ] {
+            let error = client
+                .get(format!("http://{address}/private-path?token=private-query"))
+                .send()
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap_err();
+            let error = super::http_err(error);
+            assert_eq!(error.kind(), kind);
+            assert!(error.to_string().contains(&status.to_string()));
+            assert!(!format!("{error:?} {error}").contains("private-"));
+        }
+        server.await.unwrap();
+        let error = client
+            .get("http://127.0.0.1:0/private-path?token=private-query")
+            .send()
+            .await
+            .unwrap_err();
+        let error = super::http_err(error);
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert!(!format!("{error:?} {error}").contains("private-"));
+    }
 
     #[derive(Clone, Debug)]
     struct RequestRecord {

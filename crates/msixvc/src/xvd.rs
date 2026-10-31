@@ -2187,7 +2187,11 @@ async fn open_download_response(
             "download HTTP request timed out",
         ))
     })?
-    .map_err(|error| DownloadFileHttpError::Io(Error::other(error)))?;
+    .map_err(|error| {
+        DownloadFileHttpError::Io(Error::other(crate::http_error::sanitized_http_error(
+            &error,
+        )))
+    })?;
 
     validate_download_response_scheme(&request_url, response.url())?;
     let content_range = response
@@ -3034,7 +3038,9 @@ impl XvdFile {
                 Ok(Some(Err(error))) => {
                     consume_download_retry_budget(
                         &mut retry_budget,
-                        DownloadFileHttpError::Io(Error::other(error)),
+                        DownloadFileHttpError::Io(Error::other(
+                            crate::http_error::sanitized_http_error(&error),
+                        )),
                     )?;
                     None
                 }

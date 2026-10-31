@@ -61,7 +61,7 @@ fn request_download_error(error: reqwest::Error) -> DownloadAttemptError {
         .status()
         .is_none_or(is_retryable_package_download_status);
     DownloadAttemptError {
-        error: io::Error::other(error),
+        error: io::Error::other(msixvc::http_error::sanitized_http_error(&error)),
         retryable,
         try_next_url: true,
     }
@@ -552,6 +552,52 @@ mod tests {
         validate_download_space, validate_file_hash,
     };
     use crate::package::{MAX_FILE_HASH_BASE64_CHARS, package_download_urls};
+
+    #[tokio::test]
+    async fn download_errors_hide_package_urls_and_preserve_retry_classification() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for status in ["403 Forbidden", "503 Service Unavailable"] {
+                let (mut connection, _) = listener.accept().await.unwrap();
+                let mut request = [0; 2048];
+                assert!(connection.read(&mut request).await.unwrap() > 0);
+                connection
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+        let client = reqwest::Client::new();
+        for (status, retryable) in [(403, false), (503, true)] {
+            let error = client
+                .get(format!("http://{address}/private-path?token=private-query"))
+                .send()
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap_err();
+            let attempt = super::request_download_error(error);
+            assert_eq!(attempt.retryable, retryable);
+            assert!(attempt.try_next_url);
+            assert!(attempt.error.to_string().contains(&status.to_string()));
+            assert!(!format!("{:?} {}", attempt.error, attempt.error).contains("private-"));
+        }
+        server.await.unwrap();
+        let error = client
+            .get("http://127.0.0.1:0/private-path?token=private-query")
+            .send()
+            .await
+            .unwrap_err();
+        let attempt = super::request_download_error(error);
+        assert!(attempt.retryable && attempt.try_next_url);
+        assert!(!format!("{:?} {}", attempt.error, attempt.error).contains("private-"));
+    }
 
     #[test]
     fn package_download_urls_reject_missing_cdn_root() {

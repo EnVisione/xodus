@@ -2,6 +2,7 @@ pub mod authenticated_reader;
 pub mod authenticated_xvd;
 pub mod crypt;
 pub mod hash_tree;
+pub mod http_error;
 pub mod layout;
 pub mod math;
 mod microsoft_retail_key;
