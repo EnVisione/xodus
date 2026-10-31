@@ -799,14 +799,12 @@ where
                 }
             }
 
-            match self.as_mut().poll_flush_pending_chunk(cx) {
-                Poll::Ready(Ok(())) => {
-                    if self.pending_chunk.is_some() {
-                        continue;
-                    }
+            if self.pending_chunk.is_some() {
+                match self.as_mut().poll_flush_pending_chunk(cx) {
+                    Poll::Ready(Ok(())) => continue,
+                    Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+                    Poll::Pending => return Poll::Pending,
                 }
-                Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
-                Poll::Pending => return Poll::Pending,
             }
 
             match self.as_mut().poll_fill_from_upstream(cx) {
@@ -2111,6 +2109,23 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn cached_reader_accepts_exact_final_chunk() {
+        let body: Vec<u8> = (0..16).collect();
+        let cache = CacheGuard(cache_path("final-chunk"));
+        let source = ChunkedReader {
+            data: body.clone(),
+            position: 0,
+            chunk_size: body.len(),
+        };
+        let mut file = PrefixCacheFile::new(source, body.len() as u64, &cache.0)
+            .await
+            .unwrap();
+        let mut actual = [0; 16];
+        file.read_exact(&mut actual).await.unwrap();
+        assert_eq!(actual.as_slice(), body);
     }
 
     #[tokio::test]
