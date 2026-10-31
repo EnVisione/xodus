@@ -1052,7 +1052,14 @@ where
         }
     }
 
-    write_transaction_journal(transaction_root, entries, true)
+    write_transaction_journal(transaction_root, entries, true)?;
+    if should_interrupt() {
+        return Err(io::Error::new(
+            ErrorKind::Interrupted,
+            "transaction promotion interrupted after commit",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -2719,6 +2726,36 @@ mod tests {
     }
 
     #[test]
+    fn recovery_preserves_committed_promotion_after_interruption() {
+        let temporary = tempfile::tempdir().unwrap();
+        let output = temporary.path().join("output");
+        std::fs::create_dir(&output).unwrap();
+        let final_path = output.join("game.bin");
+        std::fs::write(&final_path, b"verified").unwrap();
+        let (transaction, payload) = new_transaction(&output).unwrap();
+        std::fs::write(payload.join("game.bin"), b"replacement").unwrap();
+        let transaction_root = transaction.path().to_path_buf();
+        let mut entries =
+            promotion_entries(&[("game.bin".to_owned(), "game.bin".to_owned())]).unwrap();
+        let mut remaining = 6;
+        let error =
+            super::promote_owned_transaction_inner(transaction, &output, &mut entries, &mut || {
+                if remaining == 0 {
+                    true
+                } else {
+                    remaining -= 1;
+                    false
+                }
+            })
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+        assert!(transaction_root.exists());
+        recover_transactions(&output).unwrap();
+        assert_eq!(std::fs::read(final_path).unwrap(), b"replacement");
+        assert!(!transaction_root.exists());
+    }
+
+    #[test]
     fn recovery_preserves_unrecognized_unjournaled_directory() {
         let temporary = tempfile::tempdir().unwrap();
         let unrelated = temporary.path().join(".xodus-streaming-txn-user-data");
@@ -2787,7 +2824,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn transaction_recovery_restores_after_process_crash_injection() {
-        for checkpoint in 0..6 {
+        for checkpoint in 0..=6 {
             let temporary = tempfile::tempdir().unwrap();
             let output = temporary.path().join("output");
             std::fs::create_dir(&output).unwrap();
@@ -2808,10 +2845,15 @@ mod tests {
 
             assert!(
                 !status.success(),
-                "crash helper must terminate before promotion completes at checkpoint {checkpoint}"
+                "crash helper must terminate at checkpoint {checkpoint}"
             );
             recover_transactions(&output).unwrap();
-            assert_eq!(std::fs::read(output.join("game.bin")).unwrap(), b"verified");
+            let expected = if checkpoint == 6 {
+                b"replacement".as_slice()
+            } else {
+                b"verified".as_slice()
+            };
+            assert_eq!(std::fs::read(output.join("game.bin")).unwrap(), expected);
             assert_eq!(
                 std::fs::read_dir(&output).unwrap().count(),
                 1,
@@ -2834,7 +2876,7 @@ mod tests {
         let final_path = output.join("game.bin");
         std::fs::write(&final_path, b"verified").unwrap();
         let (transaction, payload) = new_transaction(&output).unwrap();
-        std::fs::write(payload.join("game.bin"), b"unverified").unwrap();
+        std::fs::write(payload.join("game.bin"), b"replacement").unwrap();
         let transaction_root = transaction.path().to_path_buf();
         std::mem::forget(transaction);
         let mut remaining = checkpoint;
