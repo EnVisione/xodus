@@ -1717,20 +1717,59 @@ struct StreamingRun<'a> {
 
 struct StreamingIdentity {
     content_id: Uuid,
+    package_id: Uuid,
     version: String,
+}
+
+fn parse_streaming_identity(content_id: &str, revision: &str) -> io::Result<StreamingIdentity> {
+    let invalid = || {
+        io::Error::new(
+            ErrorKind::InvalidData,
+            "package response revision identity is invalid",
+        )
+    };
+    if revision.len() > 128 {
+        return Err(invalid());
+    }
+    let content_id = Uuid::try_parse(content_id).map_err(|_| invalid())?;
+    let (version, package_id) = revision.rsplit_once('.').ok_or_else(invalid)?;
+    let package_id = Uuid::try_parse(package_id).map_err(|_| invalid())?;
+    let mut parts = version.split('.');
+    let mut next = || {
+        parts
+            .next()
+            .ok_or_else(invalid)?
+            .parse::<u16>()
+            .map_err(|_| invalid())
+    };
+    let major = next()?;
+    let minor = next()?;
+    let patch = next()?;
+    let build = next()?;
+    if parts.next().is_some() {
+        return Err(invalid());
+    }
+    Ok(StreamingIdentity {
+        content_id,
+        package_id,
+        version: format!("{major}.{minor}.{patch}.{build}"),
+    })
 }
 
 fn validate_streaming_identity(
     content_id: Uuid,
+    package_id: Uuid,
     version: &str,
     expected: Option<&StreamingIdentity>,
 ) -> io::Result<()> {
-    if expected
-        .is_some_and(|expected| expected.content_id != content_id || expected.version != version)
-    {
+    if expected.is_some_and(|expected| {
+        expected.content_id != content_id
+            || expected.package_id != package_id
+            || expected.version != version
+    }) {
         return Err(io::Error::new(
             ErrorKind::InvalidData,
-            "signed package identity does not match the selected content and version",
+            "signed package identity does not match the selected content, package and version",
         ));
     }
     Ok(())
@@ -1921,83 +1960,77 @@ pub async fn run(
         drop(pinned_source);
         result
     } else {
-        let (urls, expected_length, expected) =
-            if source.starts_with("http://") || source.starts_with("https://") {
-                if let Err(error) = validate_streaming_source_url(&source) {
-                    eprintln!("could not use remote package source: {error}");
-                    return ExitCode::FAILURE;
-                }
-                (vec![source], None, None)
-            } else {
-                let content_id = if Uuid::try_parse(&source).is_err() {
-                    let content_id_task = get_content_id(client, source, market.clone()).await;
-                    let Ok(content_id) = content_id_task else {
-                        let Err(err) = content_id_task else {
-                            eprintln!("Unknown Error");
-                            return ExitCode::FAILURE;
-                        };
-                        eprintln!("{}", err);
-                        return ExitCode::FAILURE;
-                    };
-                    content_id
-                } else {
-                    source
-                };
-                let package_result = if let Some(version_id) = version_id {
-                    get_specific_packages(client, tokens, content_id.clone(), version_id).await
-                } else {
-                    get_packages(client, tokens, content_id.clone()).await
-                };
-                let Ok(package) = package_result else {
-                    let Err(err) = package_result else {
+        let (urls, expected_length, expected) = if source.starts_with("http://")
+            || source.starts_with("https://")
+        {
+            if let Err(error) = validate_streaming_source_url(&source) {
+                eprintln!("could not use remote package source: {error}");
+                return ExitCode::FAILURE;
+            }
+            (vec![source], None, None)
+        } else {
+            let content_id = if Uuid::try_parse(&source).is_err() {
+                let content_id_task = get_content_id(client, source, market.clone()).await;
+                let Ok(content_id) = content_id_task else {
+                    let Err(err) = content_id_task else {
                         eprintln!("Unknown Error");
                         return ExitCode::FAILURE;
                     };
                     eprintln!("{}", err);
                     return ExitCode::FAILURE;
                 };
-                let Some(file) = package
-                    .package_files
-                    .iter()
-                    .find(|p| p.file_name.ends_with(".msixvc"))
-                else {
-                    eprintln!("No .msixvc file found");
+                content_id
+            } else {
+                source
+            };
+            let package_result = if let Some(version_id) = version_id {
+                get_specific_packages(client, tokens, content_id.clone(), version_id).await
+            } else {
+                get_packages(client, tokens, content_id.clone()).await
+            };
+            let Ok(package) = package_result else {
+                let Err(err) = package_result else {
+                    eprintln!("Unknown Error");
                     return ExitCode::FAILURE;
                 };
-                let expected_length = match u64::try_from(file.file_size) {
-                    Ok(length) => length,
-                    Err(_) => {
-                        eprintln!("Package file size is invalid");
-                        return ExitCode::FAILURE;
-                    }
-                };
-                let urls = match package_download_urls(
-                    &file.cdn_root_paths,
-                    &file.background_cdn_root_paths,
-                    &file.relative_url,
-                ) {
-                    Ok(urls) => urls,
-                    Err(error) => {
-                        eprintln!("could not construct package URL: {error}");
-                        return ExitCode::FAILURE;
-                    }
-                };
-                let content_id = match Uuid::try_parse(&package.content_id) {
-                    Ok(content_id) => content_id,
-                    Err(_) => {
-                        eprintln!("package response content ID is not a UUID");
-                        return ExitCode::FAILURE;
-                    }
-                };
-                (
-                    urls,
-                    Some(expected_length),
-                    Some(StreamingIdentity {
-                        content_id,
-                        version: package.version,
-                    }),
-                )
+                eprintln!("{}", err);
+                return ExitCode::FAILURE;
             };
+            let Some(file) = package
+                .package_files
+                .iter()
+                .find(|p| p.file_name.ends_with(".msixvc"))
+            else {
+                eprintln!("No .msixvc file found");
+                return ExitCode::FAILURE;
+            };
+            let expected_length = match u64::try_from(file.file_size) {
+                Ok(length) => length,
+                Err(_) => {
+                    eprintln!("Package file size is invalid");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let urls = match package_download_urls(
+                &file.cdn_root_paths,
+                &file.background_cdn_root_paths,
+                &file.relative_url,
+            ) {
+                Ok(urls) => urls,
+                Err(error) => {
+                    eprintln!("could not construct package URL: {error}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let identity = match parse_streaming_identity(&package.content_id, &package.version) {
+                Ok(identity) => identity,
+                Err(err) => {
+                    eprintln!("{err}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            (urls, Some(expected_length), Some(identity))
+        };
         let progress_position = Arc::new(AtomicU64::new(0));
         let mut selected_url = None;
         let mut http_file = None;
@@ -2208,6 +2241,7 @@ where
     };
     if let Err(err) = validate_streaming_identity(
         authenticated.header().vduid,
+        authenticated.header().pduid,
         &authenticated.header().package_version.to_string(),
         expected.as_ref(),
     ) {
@@ -2678,25 +2712,60 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     #[test]
-    fn streaming_identity_matches_selected_content_and_version() {
+    fn streaming_identity_matches_selected_content_package_and_version() {
         let content_id = uuid::Uuid::from_u128(1);
-        let expected = super::StreamingIdentity {
-            content_id,
-            version: "1.2.3.4".to_owned(),
-        };
-        assert!(super::validate_streaming_identity(content_id, "1.2.3.4", Some(&expected)).is_ok());
+        let package_id = uuid::Uuid::from_u128(2);
+        let expected = super::parse_streaming_identity(
+            &content_id.to_string(),
+            &format!("1.26.6005.0.{package_id}"),
+        )
+        .unwrap();
         assert!(
             super::validate_streaming_identity(
-                uuid::Uuid::from_u128(2),
-                "1.2.3.4",
+                content_id,
+                package_id,
+                "1.26.6005.0",
+                Some(&expected)
+            )
+            .is_ok()
+        );
+        assert!(
+            super::validate_streaming_identity(
+                uuid::Uuid::from_u128(3),
+                package_id,
+                "1.26.6005.0",
                 Some(&expected)
             )
             .is_err()
         );
         assert!(
-            super::validate_streaming_identity(content_id, "1.2.3.5", Some(&expected)).is_err()
+            super::validate_streaming_identity(
+                content_id,
+                uuid::Uuid::from_u128(3),
+                "1.26.6005.0",
+                Some(&expected)
+            )
+            .is_err()
         );
-        assert!(super::validate_streaming_identity(content_id, "1.2.3.4", None).is_ok());
+        assert!(
+            super::validate_streaming_identity(
+                content_id,
+                package_id,
+                "1.26.6006.0",
+                Some(&expected)
+            )
+            .is_err()
+        );
+        assert!(
+            super::validate_streaming_identity(content_id, package_id, "1.26.6005.0", None).is_ok()
+        );
+        for invalid in [
+            "1.26.6005.0",
+            "1.26.6005.bad.invalid",
+            "1.26.999999.0.00000000-0000-0000-0000-000000000002",
+        ] {
+            assert!(super::parse_streaming_identity(&content_id.to_string(), invalid).is_err());
+        }
     }
 
     fn ownership_fixture_files() -> HashMap<String, SegmentFile> {
