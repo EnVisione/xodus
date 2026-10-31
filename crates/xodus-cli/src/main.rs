@@ -38,6 +38,21 @@ enum SubCommand {
         )]
         dry_run: bool,
     },
+    #[command(about = "Inspect package revision metadata without downloading package content")]
+    PackageInfo {
+        product: String,
+        #[arg(short, long)]
+        market: Option<String>,
+        #[arg(long, value_name = "VERSION_ID", conflicts_with = "from_xvd")]
+        version_id: Option<String>,
+        #[arg(
+            long,
+            value_name = "PATH",
+            conflicts_with = "version_id",
+            help = "Match a local Microsoft-signed XVD header to its package revision"
+        )]
+        from_xvd: Option<String>,
+    },
     #[command(about = "Dump CIKs for use with XvdTool")]
     License {
         #[clap(help = "Content Id of a license")]
@@ -152,6 +167,50 @@ enum SubCommand {
     SpLicense {
         block: String,
     },
+}
+
+#[cfg(test)]
+mod cli_argument_tests {
+    use clap::Parser;
+
+    use super::CliArgs;
+
+    #[test]
+    fn package_info_accepts_one_revision_selector() {
+        assert!(
+            CliArgs::try_parse_from([
+                "xodus-cli",
+                "package-info",
+                "product",
+                "--from-xvd",
+                "input.xvd"
+            ])
+            .is_ok()
+        );
+        assert!(
+            CliArgs::try_parse_from([
+                "xodus-cli",
+                "package-info",
+                "product",
+                "--version-id",
+                "revision"
+            ])
+            .is_ok()
+        );
+        assert!(
+            CliArgs::try_parse_from([
+                "xodus-cli",
+                "package-info",
+                "product",
+                "--version-id",
+                "revision",
+                "--from-xvd",
+                "input.xvd"
+            ])
+            .is_err()
+        );
+        assert!(CliArgs::try_parse_from(["xodus-cli", "package-info"]).is_err());
+    }
 }
 
 #[derive(Subcommand)]
@@ -284,6 +343,15 @@ async fn run_inner(args: CliArgs) -> ExitCode {
                 &client, &tokens, product, market, version_id, manifest, dry_run,
             )
             .await
+        }
+        SubCommand::PackageInfo {
+            product,
+            market,
+            version_id,
+            from_xvd,
+        } => {
+            commands::package_info::run(&client, &tokens, product, market, version_id, from_xvd)
+                .await
         }
         SubCommand::License {
             content_id,

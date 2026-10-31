@@ -13,6 +13,7 @@ const MAX_CONTENT_ID_REDIRECTS: usize = 8;
 const MAX_PACKAGE_ID_BYTES: usize = 512;
 const MAX_PACKAGE_CDN_ROOT_BYTES: usize = 4096;
 const MAX_PACKAGE_RELATIVE_URL_BYTES: usize = 4096;
+const MAX_PACKAGE_SUMMARY_FILES: usize = 4096;
 pub(crate) const MAX_FILE_HASH_BASE64_CHARS: usize = 64;
 
 fn package_download_url_capacity(
@@ -108,7 +109,9 @@ fn package_endpoint_url(content_id: &str, version_id: Option<&str>) -> io::Resul
 }
 
 fn validate_package_id(value: &str, name: &str) -> io::Result<()> {
-    if value.is_empty() || value.len() > MAX_PACKAGE_ID_BYTES || value.chars().any(char::is_control)
+    if value.trim().is_empty()
+        || value.len() > MAX_PACKAGE_ID_BYTES
+        || value.chars().any(char::is_control)
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -255,6 +258,22 @@ fn validate_package_details(
     expected_content_id: &str,
     expected_version_id: Option<&str>,
 ) -> io::Result<()> {
+    validate_package_metadata(package, expected_content_id, expected_version_id)?;
+    for file in &package.package_files {
+        validate_package_download_metadata(
+            &file.cdn_root_paths,
+            &file.background_cdn_root_paths,
+            &file.relative_url,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_package_metadata(
+    package: &PackageDetails,
+    expected_content_id: &str,
+    expected_version_id: Option<&str>,
+) -> io::Result<()> {
     if !package.package_found {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -283,6 +302,7 @@ fn validate_package_details(
             "package response version is empty",
         ));
     }
+    validate_package_id(&package.version, "package response version")?;
     if package.package_files.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -337,11 +357,6 @@ fn validate_package_file(file: &PackageFile, content_id: &str, version_id: &str)
         )
     })?;
     decode_file_hash(&file.file_hash)?;
-    validate_package_download_metadata(
-        &file.cdn_root_paths,
-        &file.background_cdn_root_paths,
-        &file.relative_url,
-    )?;
     if file
         .delta_version_id
         .as_deref()
@@ -352,7 +367,70 @@ fn validate_package_file(file: &PackageFile, content_id: &str, version_id: &str)
             "package file delta version ID is empty",
         ));
     }
+    if let Some(value) = &file.delta_version_id {
+        validate_package_id(value, "package file delta version ID")?;
+    }
     Ok(())
+}
+
+#[derive(Debug)]
+pub(crate) struct PackageInfoFile {
+    pub name: String,
+    pub size: u64,
+    pub delta_version_id: Option<String>,
+}
+
+#[derive(Debug)]
+pub(crate) struct PackageInfo {
+    pub content_id: String,
+    pub version_id: String,
+    pub version: String,
+    pub files: Vec<PackageInfoFile>,
+}
+
+fn package_info_from_response(
+    package: PackageDetails,
+    content_id: &str,
+    revision: Option<&str>,
+) -> io::Result<PackageInfo> {
+    if package.package_files.len() > MAX_PACKAGE_SUMMARY_FILES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "package metadata contains too many files",
+        ));
+    }
+    validate_package_metadata(&package, content_id, revision)?;
+    let mut files = Vec::new();
+    files
+        .try_reserve_exact(package.package_files.len())
+        .map_err(|_| io::Error::other("package metadata allocation failed"))?;
+    for file in package.package_files {
+        files.push(PackageInfoFile {
+            name: file.file_name,
+            size: u64::try_from(file.file_size).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidData, "package file size is negative")
+            })?,
+            delta_version_id: file.delta_version_id,
+        });
+    }
+    Ok(PackageInfo {
+        content_id: package.content_id,
+        version_id: package.version_id,
+        version: package.version,
+        files,
+    })
+}
+
+pub(crate) async fn get_package_info(
+    client: &reqwest::Client,
+    tokens: &TokenManager,
+    content_id: &str,
+    revision: Option<&str>,
+) -> Result<PackageInfo, Box<dyn std::error::Error>> {
+    let package =
+        get_packages_at_endpoint(client, tokens, package_endpoint_url(content_id, revision)?)
+            .await?;
+    Ok(package_info_from_response(package, content_id, revision)?)
 }
 
 pub(crate) fn decode_file_hash(value: &str) -> io::Result<Option<[u8; 32]>> {
@@ -578,6 +656,54 @@ mod tests {
             update_predownload: false,
             availability_date: String::new(),
         }
+    }
+
+    #[test]
+    fn metadata_summary_discards_untrusted_transport_and_secrets() {
+        let mut package = package();
+        package.package_files[0].cdn_root_paths = vec!["http://secret-cdn.example/".into()];
+        package.package_files[0].relative_url = "private-path?token=secret-query".into();
+        package.package_files[0].key_blob = "secret-key-material".into();
+        assert!(super::validate_package_details(&package, "content-id", None).is_err());
+        let info = super::package_info_from_response(package, "content-id", None).unwrap();
+        let output = format!("{info:?}");
+        for private in [
+            "secret-cdn",
+            "private-path",
+            "secret-query",
+            "secret-key-material",
+        ] {
+            assert!(!output.contains(private));
+        }
+        assert_eq!(info.files[0].name, "package.msixvc");
+    }
+
+    #[test]
+    fn metadata_summary_rejects_invalid_display_and_revision_fields() {
+        let mut value = package();
+        value.version = "1.0\u{1b}[2J".into();
+        assert!(super::package_info_from_response(value, "content-id", None).is_err());
+        let mut value = package();
+        value.package_files[0].delta_version_id = Some(" \n".into());
+        assert!(super::package_info_from_response(value, "content-id", None).is_err());
+        let mut value = package();
+        value.version_id = "   ".into();
+        assert!(super::package_info_from_response(value, "content-id", None).is_err());
+    }
+
+    #[test]
+    fn metadata_summary_rejects_mismatched_revision_and_oversized_file_list() {
+        assert!(super::package_info_from_response(package(), "content-id", Some("other")).is_err());
+        let mut value = package();
+        value.package_found = false;
+        assert!(super::package_info_from_response(value, "content-id", None).is_err());
+        let mut value = package();
+        value.package_files[0].file_name = "../unsafe".into();
+        assert!(super::package_info_from_response(value, "content-id", None).is_err());
+        let mut value = package();
+        value.package_files =
+            vec![value.package_files[0].clone(); super::MAX_PACKAGE_SUMMARY_FILES + 1];
+        assert!(super::package_info_from_response(value, "content-id", None).is_err());
     }
 
     #[test]

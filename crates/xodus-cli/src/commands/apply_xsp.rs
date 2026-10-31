@@ -38,7 +38,7 @@ fn open_regular_file(path: &Path, error_message: &'static str) -> io::Result<std
     Ok(file)
 }
 
-async fn open_regular_input(path: &Path) -> io::Result<File> {
+pub(crate) async fn open_regular_input(path: &Path) -> io::Result<File> {
     let mut options = tokio::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]

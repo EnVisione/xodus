@@ -7,6 +7,7 @@ pub mod install_msixvc2;
 pub mod license;
 pub mod login;
 pub mod logout;
+pub mod package_info;
 #[cfg(unix)]
 pub mod run;
 pub mod splicense;
