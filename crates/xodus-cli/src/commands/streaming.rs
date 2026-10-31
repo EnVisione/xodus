@@ -59,6 +59,8 @@ const TRANSACTION_JOURNAL_TEMP: &str = ".xodus-streaming-journal.tmp";
 const TRANSACTION_MARKER: &str = ".xodus-streaming-owner";
 const TRANSACTION_MARKER_CONTENT: &[u8] = b"xodus-transaction-v1\n";
 const TRANSACTION_LOCK_FILE: &str = ".xodus-streaming.lock";
+const STREAMING_CACHE_FILE: &str = ".xodus-streaming.msixvc";
+const STREAMING_STAGED_CACHE_FILE: &str = ".xodus-streaming-tmp.msixvc";
 pub(crate) const MSIXVC2_OWNERSHIP_FILE: &str = ".xodus-msixvc2-members";
 const MAX_TRANSACTION_JOURNAL_BYTES: usize = 64 * 1024 * 1024;
 const MAX_PACKAGE_PATH_BYTES: usize = 4096;
@@ -1362,7 +1364,15 @@ async fn changed_jobs(
 ) -> io::Result<Vec<Job>> {
     let mut jobs = Vec::new();
     for (name, remote) in remote_files {
-        package_path_components(name)?;
+        let components = package_path_components(name)?;
+        if components.iter().any(|component| {
+            component.eq_ignore_ascii_case(STREAMING_CACHE_FILE)
+                || component.eq_ignore_ascii_case(STREAMING_STAGED_CACHE_FILE)
+        }) {
+            return Err(invalid_package_path(
+                "package path uses a reserved streaming cache name",
+            ));
+        }
         let matches_metadata = local_files.get(name).is_some_and(|local| {
             remote.keep_encrypted
                 && !remote.data_hashs.is_empty()
@@ -1887,7 +1897,7 @@ where
             return false;
         }
     };
-    let cache_path = transaction_payload.join(".xodus-streaming-tmp.msixvc");
+    let cache_path = transaction_payload.join(STREAMING_STAGED_CACHE_FILE);
     let remote_file = match streaming::PrefixCacheFile::new(reader, l, cache_path.clone()).await {
         Ok(file) => file,
         Err(err) => {
@@ -1981,7 +1991,7 @@ where
         rfiles.extend(sfiles);
     }
 
-    let file = match open_package_input(out, ".xodus-streaming.msixvc") {
+    let file = match open_package_input(out, STREAMING_CACHE_FILE) {
         Ok(file) => Some(File::from_std(file)),
         Err(error) if error.kind() == io::ErrorKind::NotFound => None,
         Err(error) => {
@@ -2263,8 +2273,8 @@ where
         return false;
     }
     promotion_specs.push((
-        ".xodus-streaming-tmp.msixvc".to_owned(),
-        ".xodus-streaming.msixvc".to_owned(),
+        STREAMING_STAGED_CACHE_FILE.to_owned(),
+        STREAMING_CACHE_FILE.to_owned(),
     ));
     promotion_specs.extend(job_names.into_iter().map(|name| (name.clone(), name)));
     let mut entries = match promotion_entries(&promotion_specs) {
@@ -2751,20 +2761,26 @@ mod tests {
     #[tokio::test]
     async fn changed_jobs_reject_unsafe_paths_before_selection() {
         let temporary = tempfile::tempdir().unwrap();
-        let remote = HashMap::from([(
-            "../escape".to_owned(),
-            SegmentFile {
-                offset: 0,
-                length: 1,
-                data_hashs: Vec::new(),
-                keep_encrypted: false,
-            },
-        )]);
-        assert!(
-            changed_jobs(temporary.path(), &remote, &HashMap::new())
-                .await
-                .is_err()
-        );
+        for name in [
+            "../escape",
+            ".XODUS-STREAMING.MSIXVC",
+            "dir/.xodus-streaming-tmp.msixvc",
+        ] {
+            let remote = HashMap::from([(
+                name.to_owned(),
+                SegmentFile {
+                    offset: 0,
+                    length: 1,
+                    data_hashs: Vec::new(),
+                    keep_encrypted: false,
+                },
+            )]);
+            assert!(
+                changed_jobs(temporary.path(), &remote, &HashMap::new())
+                    .await
+                    .is_err()
+            );
+        }
     }
 
     #[test]
