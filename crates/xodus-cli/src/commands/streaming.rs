@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use fs2::{FileExt, available_space};
 use futures_util::{StreamExt, stream};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use msixvc::layout::PAGE_SIZE;
 use msixvc::streaming;
 use msixvc::xvd::{SegmentFile, XvdFile};
 #[cfg(not(target_os = "linux"))]
@@ -1315,29 +1316,56 @@ pub(crate) fn new_transaction(output_root: &Path) -> io::Result<(TempDir, PathBu
     Ok((transaction, payload_root))
 }
 
+fn installed_file_length(file: &SegmentFile) -> io::Result<u64> {
+    if file.keep_encrypted {
+        Ok(file
+            .length
+            .checked_add(PAGE_SIZE as u64 - 1)
+            .ok_or_else(|| invalid_package_path("encrypted file length overflows"))?
+            / PAGE_SIZE as u64
+            * PAGE_SIZE as u64)
+    } else {
+        Ok(file.length)
+    }
+}
+
 fn changed_jobs(
+    output_root: &Path,
     remote_files: &HashMap<String, SegmentFile>,
     local_files: &HashMap<String, SegmentFile>,
-) -> Vec<Job> {
-    remote_files
-        .iter()
-        .filter(|(name, remote)| {
-            if let Some(local) = local_files.get(*name) {
-                remote.data_hashs != local.data_hashs || remote.data_hashs.is_empty()
-            } else {
-                true
+) -> io::Result<Vec<Job>> {
+    let mut jobs = Vec::new();
+    for (name, remote) in remote_files {
+        package_path_components(name)?;
+        let matches_metadata = local_files.get(name).is_some_and(|local| {
+            !remote.data_hashs.is_empty()
+                && remote.data_hashs == local.data_hashs
+                && remote.length == local.length
+                && remote.keep_encrypted == local.keep_encrypted
+        });
+        let expected_length = installed_file_length(remote)?;
+        let installed_matches = if matches_metadata {
+            match open_package_input(output_root, name) {
+                Ok(file) => file.metadata()?.len() == expected_length,
+                Err(error) if error.kind() == ErrorKind::NotFound => false,
+                Err(error) => return Err(error),
             }
-        })
-        .map(|(name, remote)| Job {
-            name: name.clone(),
-            content: SegmentFile {
-                offset: remote.offset,
-                length: remote.length,
-                data_hashs: remote.data_hashs.clone(),
-                keep_encrypted: remote.keep_encrypted,
-            },
-        })
-        .collect()
+        } else {
+            false
+        };
+        if !installed_matches {
+            jobs.push(Job {
+                name: name.clone(),
+                content: SegmentFile {
+                    offset: remote.offset,
+                    length: remote.length,
+                    data_hashs: remote.data_hashs.clone(),
+                    keep_encrypted: remote.keep_encrypted,
+                },
+            });
+        }
+    }
+    Ok(jobs)
 }
 
 enum ProgressEvent {
@@ -1455,14 +1483,18 @@ pub struct StreamingRequest {
 }
 
 async fn open_regular_stream_source(path: &Path) -> io::Result<File> {
-    let metadata = tokio::fs::metadata(path).await?;
-    if !metadata.is_file() {
+    let mut options = tokio::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(nix::libc::O_NONBLOCK);
+    let file = options.open(path).await?;
+    if !file.metadata().await?.is_file() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "stream source is not a regular file",
         ));
     }
-    File::open(path).await
+    Ok(file)
 }
 
 pub async fn run(
@@ -1895,19 +1927,25 @@ where
         }
     };
 
-    let Some(total_size) = rfiles
-        .iter()
-        .filter(|(k, v1)| {
-            if let Some(v2) = lfiles.get(*k) {
-                v1.data_hashs != v2.data_hashs || v1.data_hashs.is_empty()
-            } else {
-                true
-            }
-        })
-        .try_fold(0_u64, |total, (_, v)| total.checked_add(v.length))
-    else {
-        eprintln!("package size exceeds supported range");
-        return false;
+    let jobs = match changed_jobs(out, &rfiles, &lfiles) {
+        Ok(jobs) => jobs,
+        Err(err) => {
+            eprintln!("failed to validate installed package files: {err}");
+            return false;
+        }
+    };
+    let total_size = jobs.iter().try_fold(0_u64, |total, job| {
+        let length = installed_file_length(&job.content)?;
+        total
+            .checked_add(length)
+            .ok_or_else(|| invalid_package_path("package size exceeds supported range"))
+    });
+    let total_size = match total_size {
+        Ok(size) => size,
+        Err(err) => {
+            eprintln!("{err}");
+            return false;
+        }
     };
 
     let available_free_space = match available_space(out) {
@@ -1938,15 +1976,6 @@ where
     .ok();
 
     let remote_xvd_ref = &remote_xvd;
-    let jobs = changed_jobs(&rfiles, &lfiles);
-    if let Some(err) = jobs
-        .iter()
-        .find_map(|job| package_path_components(&job.name).err())
-    {
-        eprintln!("refusing unsafe package path: {err}");
-        return false;
-    }
-
     let job_names = jobs.iter().map(|job| job.name.clone()).collect::<Vec<_>>();
     let write_failed = Arc::new(AtomicBool::new(false));
     let transaction_payload = transaction_payload.clone();
@@ -2151,7 +2180,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_source_open_rejects_non_regular_files_before_opening() {
+    async fn stream_source_open_rejects_non_regular_files() {
         let temporary = tempfile::tempdir().expect("temporary directory must exist");
 
         let error = open_regular_stream_source(temporary.path())
@@ -2159,6 +2188,44 @@ mod tests {
             .expect_err("a directory must not be opened as a streaming source");
 
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stream_source_rejects_fifo_without_waiting_for_a_writer() {
+        let temporary = tempfile::tempdir().unwrap();
+        let fifo = temporary.path().join("source");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            open_regular_stream_source(&fifo),
+        )
+        .await
+        .expect("opening a FIFO must not block")
+        .expect_err("a FIFO is not a package file");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[tokio::test]
+    async fn stream_source_uses_the_checked_open_handle() {
+        use tokio::io::AsyncReadExt;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("source");
+        let old_path = temporary.path().join("old-source");
+        std::fs::write(&path, b"original").unwrap();
+        let mut source = open_regular_stream_source(&path).await.unwrap();
+        std::fs::rename(&path, old_path).unwrap();
+        std::fs::write(&path, b"replacement").unwrap();
+        let mut contents = Vec::new();
+        source.read_to_end(&mut contents).await.unwrap();
+        assert_eq!(contents, b"original");
     }
 
     #[tokio::test]
@@ -2351,10 +2418,92 @@ mod tests {
             },
         );
 
-        let jobs = changed_jobs(&remote, &HashMap::new());
+        let temporary = tempfile::tempdir().unwrap();
+        let jobs = changed_jobs(temporary.path(), &remote, &HashMap::new()).unwrap();
 
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].content.data_hashs, vec![[0x11; 20]]);
+    }
+
+    #[test]
+    fn changed_jobs_restore_missing_and_wrong_sized_files() {
+        let temporary = tempfile::tempdir().unwrap();
+        let segment = || SegmentFile {
+            offset: 0,
+            length: 5,
+            data_hashs: vec![[0x11; 20]],
+            keep_encrypted: true,
+        };
+        let remote = HashMap::from([("game.bin".to_owned(), segment())]);
+        let local = HashMap::from([("game.bin".to_owned(), segment())]);
+        assert_eq!(
+            changed_jobs(temporary.path(), &remote, &local)
+                .unwrap()
+                .len(),
+            1
+        );
+        std::fs::write(temporary.path().join("game.bin"), b"short").unwrap();
+        assert_eq!(
+            changed_jobs(temporary.path(), &remote, &local)
+                .unwrap()
+                .len(),
+            1
+        );
+        std::fs::write(temporary.path().join("game.bin"), vec![0; super::PAGE_SIZE]).unwrap();
+        assert!(
+            changed_jobs(temporary.path(), &remote, &local)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn changed_jobs_reject_unsafe_paths_before_selection() {
+        let temporary = tempfile::tempdir().unwrap();
+        let remote = HashMap::from([(
+            "../escape".to_owned(),
+            SegmentFile {
+                offset: 0,
+                length: 1,
+                data_hashs: Vec::new(),
+                keep_encrypted: false,
+            },
+        )]);
+        assert!(changed_jobs(temporary.path(), &remote, &HashMap::new()).is_err());
+    }
+
+    #[test]
+    fn installed_file_length_accounts_for_encrypted_page_padding() {
+        let mut segment = SegmentFile {
+            offset: 0,
+            length: 5,
+            data_hashs: Vec::new(),
+            keep_encrypted: false,
+        };
+        assert_eq!(super::installed_file_length(&segment).unwrap(), 5);
+        segment.keep_encrypted = true;
+        assert_eq!(
+            super::installed_file_length(&segment).unwrap(),
+            super::PAGE_SIZE as u64
+        );
+        segment.length = u64::MAX;
+        assert!(super::installed_file_length(&segment).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn changed_jobs_refuse_symlinked_installed_files() {
+        let temporary = tempfile::tempdir().unwrap();
+        let segment = || SegmentFile {
+            offset: 0,
+            length: 5,
+            data_hashs: vec![[0x11; 20]],
+            keep_encrypted: false,
+        };
+        let remote = HashMap::from([("game.bin".to_owned(), segment())]);
+        let local = HashMap::from([("game.bin".to_owned(), segment())]);
+        std::os::unix::fs::symlink("elsewhere", temporary.path().join("game.bin")).unwrap();
+        assert!(changed_jobs(temporary.path(), &remote, &local).is_err());
     }
 
     #[cfg(target_os = "linux")]
