@@ -594,6 +594,13 @@ pub enum SegmentMetadataParseError {
         segment_table_end: u64,
         metadata_length: u64,
     },
+    #[error(
+        "segment metadata table end overflows for metadata offset {metadata_offset} and relative table end {segment_table_end}"
+    )]
+    SegmentTableOffsetOverflow {
+        metadata_offset: u64,
+        segment_table_end: u64,
+    },
     #[error("segment metadata count {segment_count} cannot fit in memory")]
     SegmentCountTooLarge { segment_count: u32 },
     #[error("unable to reserve {segment_count} segment metadata entries")]
@@ -1402,6 +1409,24 @@ fn reserve_segment_metadata_entries(
         .map_err(|_| SegmentMetadataParseError::SegmentAllocationFailed { segment_count })?;
 
     Ok(segments)
+}
+
+fn segment_table_absolute_offset(
+    metadata_offset: u64,
+    header_length: u32,
+    segment_table_end: u64,
+) -> Result<u64, SegmentMetadataParseError> {
+    let error = || SegmentMetadataParseError::SegmentTableOffsetOverflow {
+        metadata_offset,
+        segment_table_end,
+    };
+    let table_offset = metadata_offset
+        .checked_add(u64::from(header_length))
+        .ok_or_else(error)?;
+    metadata_offset
+        .checked_add(segment_table_end)
+        .ok_or_else(error)?;
+    Ok(table_offset)
 }
 
 fn segment_path_offset(
@@ -2746,9 +2771,19 @@ impl XvdFile {
             segment_header.segment_count,
             segment_metadata.length,
         )?;
+        let table_offset = segment_table_absolute_offset(
+            segment_metadata.offset,
+            segment_header.header_length,
+            paths_offset,
+        )?;
 
         let mut segments = reserve_segment_metadata_entries(segment_header.segment_count)?;
         let mut buf = XvdSegmentMetadataSegment::buffer();
+        if segment_header.segment_count != 0
+            && u64::from(segment_header.header_length) != metadata_header_end
+        {
+            file.seek(SeekFrom::Start(table_offset)).await?;
+        }
         for _ in 0..segment_header.segment_count {
             file.read_exact(&mut buf).await?;
             let segment = XvdSegmentMetadataSegment::from_array(&buf);
@@ -4672,6 +4707,21 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn segment_metadata_table_absolute_range_rejects_overflow() {
+        let error = super::segment_table_absolute_offset(u64::MAX - 100, 100, 116)
+            .expect_err("table end must not overflow");
+        assert!(matches!(
+            error,
+            SegmentMetadataParseError::SegmentTableOffsetOverflow { .. }
+        ));
+        assert!(super::segment_table_absolute_offset(u64::MAX - 99, 100, 100).is_err());
+        assert_eq!(
+            super::segment_table_absolute_offset(u64::MAX - 116, 100, 116).unwrap(),
+            u64::MAX - 16
+        );
+    }
+
     #[tokio::test]
     async fn parse_segment_metadata_uses_fixed_capacity_for_maximum_declared_length() {
         let xvd = XvdFile::parse(SyntheticXvdReader::synthetic_xvd_with_region_count(0))
@@ -4924,6 +4974,52 @@ mod tests {
             .get("a")
             .expect("declared segment path must be retained");
         assert_eq!(file.data_hashs, vec![[0; 20]]);
+    }
+
+    #[tokio::test]
+    async fn parse_segment_metadata_reads_table_after_extended_header() {
+        let mut xvd = XvdFile::parse(SyntheticXvdReader::synthetic_xvd_with_region_count(0))
+            .await
+            .expect("synthetic XVD must parse");
+        xvd.encrypted_section_infos.push(EncryptedSectionInfo {
+            section_offset: 0,
+            section_length: PAGE_SIZE as u64,
+            header_id: XvcRegionId::Unknown,
+            vduid: [0; 8],
+            data_units: None,
+            first_segment_index: 0,
+            data_hashs: vec![[0; 20]],
+        });
+        let (mut reader, _) = SyntheticXvdReader::synthetic_segment_metadata_with_single_segment(
+            1,
+            0,
+            PAGE_SIZE as u64,
+            true,
+        );
+        let bytes = reader.inner.get_mut();
+        let header_length = SEGMENT_METADATA_HEADER_SIZE + 8;
+        bytes[SEGMENT_METADATA_HEADER_LENGTH_OFFSET..SEGMENT_METADATA_HEADER_LENGTH_OFFSET + 4]
+            .copy_from_slice(&(header_length as u32).to_le_bytes());
+        bytes.splice(
+            SEGMENT_METADATA_HEADER_SIZE..SEGMENT_METADATA_HEADER_SIZE,
+            [0_u8; 8],
+        );
+        let metadata_length = bytes.len() as u64;
+        bytes.splice(0..0, [0_u8; 7]);
+        let files = xvd
+            .parse_segment_metadata(
+                reader,
+                &UserPackageFile {
+                    offset: 7,
+                    length: metadata_length,
+                },
+            )
+            .await
+            .expect("extended-header segment table must parse");
+        assert_eq!(
+            files.get("a").expect("segment path").length,
+            PAGE_SIZE as u64
+        );
     }
 
     #[tokio::test]
