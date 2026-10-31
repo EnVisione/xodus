@@ -180,7 +180,8 @@ impl<R: AsyncRead> PageStream<R> {
 /// a [`Stream`] of hash entries. The hash tree is fetched page by page, and
 /// each page is hashed and verified against the corresponding hash provided in
 /// [`HashTreeStream::new`]. Because this struct already pulls data in pages,
-/// the underlying reader doesn't need to be buffered.
+/// the underlying reader doesn't need to be buffered. A read or integrity
+/// error terminates the stream, so no entries from a failed page are exposed.
 #[pin_project]
 pub struct HashTreeStream<R> {
     #[pin]
@@ -241,13 +242,22 @@ where
             return Poll::Ready(Some(Ok(*hash)));
         }
 
-        let buf = ready!(this.reader.poll_next_page(cx)?);
+        let buf = match ready!(this.reader.poll_next_page(cx)) {
+            Ok(buf) => buf,
+            Err(error) => {
+                *this.remaining_hashes = 0;
+                return Poll::Ready(Some(Err(error.into())));
+            }
+        };
 
         // Check that the hash of the current page is the expected one. It's fine
         // to calculate the hash here because it's a single hash, so it doesn't
         // block the thread for long.
 
-        this.page_verifier.verify_page(buf, *this.current_page)?;
+        if let Err(error) = this.page_verifier.verify_page(buf, *this.current_page) {
+            *this.remaining_hashes = 0;
+            return Poll::Ready(Some(Err(error.into())));
+        }
         *this.current_page += 1;
 
         // Return the first hash of the current page, and set `next_entry_in_page`
@@ -270,6 +280,7 @@ where
 mod tests {
     use super::*;
 
+    use futures_util::StreamExt;
     use std::io::Cursor;
     use std::pin::pin;
     use std::task::Waker;
@@ -280,6 +291,68 @@ mod tests {
             HashTreeStream::new(Cursor::new(Vec::<u8>::new()), Box::new([]), 1),
             Err(HashTreeStreamError::InvalidHashCount)
         ));
+    }
+
+    #[tokio::test]
+    async fn hash_mismatch_never_exposes_entries_on_later_polls() {
+        let page = vec![1u8; PAGE_SIZE];
+        let stream = HashTreeStream::new(Cursor::new(page), Box::new([[0; HASH_ENTRY_LENGTH]]), 1)
+            .expect("one level-one hash must match one hash-tree page");
+        let mut stream = pin!(stream);
+
+        assert!(matches!(
+            stream.next().await,
+            Some(Err(HashTreeStreamError::HashMismatch(_)))
+        ));
+        assert!(stream.next().await.is_none());
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn verified_entries_are_returned_before_a_later_page_fails() {
+        let first_page = [1u8; PAGE_SIZE];
+        let second_page = [2u8; PAGE_SIZE];
+        let first_hash: HashEntry = Sha256::digest(first_page)[..HASH_ENTRY_LENGTH]
+            .try_into()
+            .expect("SHA-256 provides enough bytes for a hash entry");
+        let data = [first_page.as_slice(), second_page.as_slice()].concat();
+        let stream = HashTreeStream::new(
+            Cursor::new(data),
+            Box::new([first_hash, [0; HASH_ENTRY_LENGTH]]),
+            HASH_ENTRIES_IN_PAGE as usize + 1,
+        )
+        .expect("the level-one hashes must match the hash-tree page count");
+        let mut stream = pin!(stream);
+
+        for _ in 0..HASH_ENTRIES_IN_PAGE {
+            assert_eq!(
+                stream.next().await.unwrap().unwrap(),
+                [1; HASH_ENTRY_LENGTH]
+            );
+        }
+        assert!(matches!(
+            stream.next().await,
+            Some(Err(HashTreeStreamError::HashMismatch(_)))
+        ));
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn truncated_page_error_terminates_the_stream() {
+        let stream = HashTreeStream::new(
+            Cursor::new(vec![0u8; PAGE_SIZE - 1]),
+            Box::new([[0; HASH_ENTRY_LENGTH]]),
+            1,
+        )
+        .expect("one level-one hash must match one hash-tree page");
+        let mut stream = pin!(stream);
+
+        assert!(matches!(
+            stream.next().await,
+            Some(Err(HashTreeStreamError::Io(ref error)))
+                if error.kind() == io::ErrorKind::UnexpectedEof
+        ));
+        assert!(stream.next().await.is_none());
     }
 
     #[test]
