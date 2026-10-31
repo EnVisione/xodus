@@ -65,21 +65,31 @@ pub struct AuthenticatedXvd<R> {
 
 impl<R: AsyncRead + AsyncSeek + Unpin> AuthenticatedXvd<R> {
     pub async fn open(
-        mut reader: R,
+        reader: R,
         key: &PinnedXvdKey,
         expected: ExpectedXvdIdentity,
+    ) -> Result<Self, AuthenticatedXvdError> {
+        let xvd = Self::open_signed(reader, key).await?;
+        if xvd.header.vduid != expected.content_id
+            || xvd.header.pduid != expected.package_id
+            || xvd.header.package_version != expected.version
+        {
+            return Err(AuthenticatedXvdError::IdentityMismatch);
+        }
+        Ok(xvd)
+    }
+
+    /// Verify a publisher signature without independently selecting an identity.
+    /// Callers must bind the returned identity to their own package selection.
+    pub async fn open_signed(
+        mut reader: R,
+        key: &PinnedXvdKey,
     ) -> Result<Self, AuthenticatedXvdError> {
         reader.seek(SeekFrom::Start(0)).await?;
         let mut bytes = XvdHeader::buffer();
         reader.read_exact(&mut bytes).await?;
         key.verify_header(&bytes)?;
         let header = XvdHeader::try_from_array(&bytes)?;
-        if header.vduid != expected.content_id
-            || header.pduid != expected.package_id
-            || header.package_version != expected.version
-        {
-            return Err(AuthenticatedXvdError::IdentityMismatch);
-        }
         let layout = header.layout()?;
         let mut header_page = [0_u8; PAGE_SIZE];
         header_page.copy_from_slice(&bytes);
@@ -580,6 +590,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn signed_open_authenticates_before_exposing_identity() {
+        let (file, key, expected, _) = fixture(2);
+        let xvd = AuthenticatedXvd::open_signed(Cursor::new(file.clone()), &key)
+            .await
+            .unwrap();
+        assert_eq!(xvd.header().vduid, expected.content_id);
+        let mut altered = file;
+        altered[0x220] ^= 1;
+        assert!(matches!(
+            AuthenticatedXvd::open_signed(Cursor::new(altered), &key).await,
+            Err(AuthenticatedXvdError::Signature(_))
+        ));
+    }
+
+    #[tokio::test]
     async fn random_access_never_exposes_tampered_tree_or_data() {
         let (file, key, expected, layout) = fixture(HASH_ENTRIES_IN_PAGE + 1);
         let leaf_offset = layout.hash_tree.start.to_bytes().0
@@ -697,6 +722,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn authenticated_hash_ranges_are_bounded_and_cover_each_requested_page() {
+        use crate::authenticated_reader::{AuthenticatedReader, MAX_AUTHENTICATED_RANGE_BYTES};
+
+        let (file, key, expected, layout) = fixture(HASH_ENTRIES_IN_PAGE + 1);
+        let xvd = AuthenticatedXvd::open(Cursor::new(file), &key, expected)
+            .await
+            .unwrap();
+        let mut reader = AuthenticatedReader::new(xvd).unwrap();
+        let start = layout.user_data.start.to_bytes().0;
+        let offset = start + u64::from(HASH_ENTRIES_IN_PAGE - 1) * PAGE_SIZE as u64;
+        let hashes = reader
+            .hashes_for_range(offset, PAGE_SIZE as u64 + 1)
+            .await
+            .unwrap();
+        assert_eq!(hashes.len(), 2);
+        for (index, hash) in hashes.iter().enumerate() {
+            let value = (HASH_ENTRIES_IN_PAGE - 1) as u8 + index as u8;
+            assert_eq!(hash.as_slice(), &Sha256::digest([value; PAGE_SIZE])[..20]);
+        }
+        assert!(reader.hashes_for_range(start + 1, 1).await.is_err());
+        assert!(
+            reader
+                .hashes_for_range(start, MAX_AUTHENTICATED_RANGE_BYTES + 1)
+                .await
+                .is_err()
+        );
+        assert!(
+            reader
+                .hashes_for_range(offset, PAGE_SIZE as u64 * 3)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
     async fn authenticated_reader_seeks_after_a_cancelled_pending_read() {
         use crate::authenticated_reader::AuthenticatedReader;
         use std::sync::{
@@ -779,6 +839,96 @@ mod tests {
             .unwrap();
         let mut reader = AuthenticatedReader::new(xvd).unwrap();
         assert!(XvdFile::parse(&mut reader).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn authenticated_hashes_protect_a_separate_extraction_source() {
+        use crate::authenticated_reader::AuthenticatedReader;
+        use crate::xvd::{SegmentFile, XvdFile};
+
+        let (file, key, expected, layout) = metadata_fixture();
+        let xvd = AuthenticatedXvd::open(Cursor::new(file.clone()), &key, expected)
+            .await
+            .unwrap();
+        let mut reader = AuthenticatedReader::new(xvd).unwrap();
+        let parsed = XvdFile::parse(&mut reader).await.unwrap();
+        let offset = layout.drive_data.start.to_bytes().0;
+        let hashes = reader
+            .hashes_for_range(offset, PAGE_SIZE as u64)
+            .await
+            .unwrap();
+        let segment = SegmentFile {
+            offset,
+            length: PAGE_SIZE as u64,
+            data_hashs: hashes,
+            keep_encrypted: false,
+        };
+        let mut output = Cursor::new(Vec::new());
+        parsed
+            .extract_file(
+                &mut Cursor::new(file.clone()),
+                &mut output,
+                &segment,
+                [0; 32],
+                |_, _| {},
+            )
+            .await
+            .unwrap();
+        assert_eq!(output.into_inner(), vec![0; PAGE_SIZE]);
+
+        let mut altered = file;
+        altered[offset as usize] ^= 1;
+        let mut output = Cursor::new(Vec::new());
+        assert!(
+            parsed
+                .extract_file(
+                    &mut Cursor::new(altered),
+                    &mut output,
+                    &segment,
+                    [0; 32],
+                    |_, _| {}
+                )
+                .await
+                .is_err()
+        );
+        assert!(output.into_inner().is_empty());
+    }
+
+    #[tokio::test]
+    async fn authenticated_chunks_extract_across_the_bounded_range_limit() {
+        use crate::authenticated_reader::{AuthenticatedReader, MAX_AUTHENTICATED_RANGE_BYTES};
+        use crate::xvd::{SegmentFile, XvdFile};
+
+        let page_count = (MAX_AUTHENTICATED_RANGE_BYTES / PAGE_SIZE as u64) as u32 + 1;
+        let (file, key, expected, layout) = fixture(page_count);
+        let xvd = AuthenticatedXvd::open(Cursor::new(file.clone()), &key, expected)
+            .await
+            .unwrap();
+        let mut authenticated = AuthenticatedReader::new(xvd).unwrap();
+        let parsed = XvdFile::parse(&mut authenticated).await.unwrap();
+        let start = layout.user_data.start.to_bytes().0;
+        let mut input = Cursor::new(file.clone());
+        let mut output = Cursor::new(Vec::new());
+        for (offset, length) in [
+            (start, MAX_AUTHENTICATED_RANGE_BYTES),
+            (start + MAX_AUTHENTICATED_RANGE_BYTES, PAGE_SIZE as u64),
+        ] {
+            let hashes = authenticated
+                .hashes_for_range(offset, length)
+                .await
+                .unwrap();
+            let segment = SegmentFile {
+                offset,
+                length,
+                data_hashs: hashes,
+                keep_encrypted: false,
+            };
+            parsed
+                .extract_file(&mut input, &mut output, &segment, [0; 32], |_, _| {})
+                .await
+                .unwrap();
+        }
+        assert_eq!(output.into_inner(), file[start as usize..]);
     }
 
     #[tokio::test]

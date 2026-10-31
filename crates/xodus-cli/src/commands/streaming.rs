@@ -12,7 +12,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use fs2::{FileExt, available_space};
 use futures_util::{StreamExt, stream};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use msixvc::authenticated_reader::{AuthenticatedReader, MAX_AUTHENTICATED_RANGE_BYTES};
+use msixvc::authenticated_xvd::AuthenticatedXvd;
 use msixvc::layout::PAGE_SIZE;
+use msixvc::signature::PinnedXvdKey;
 use msixvc::streaming;
 use msixvc::xvd::{SegmentFile, XvdFile};
 #[cfg(not(target_os = "linux"))]
@@ -1361,7 +1364,8 @@ async fn changed_jobs(
     for (name, remote) in remote_files {
         package_path_components(name)?;
         let matches_metadata = local_files.get(name).is_some_and(|local| {
-            !remote.data_hashs.is_empty()
+            remote.keep_encrypted
+                && !remote.data_hashs.is_empty()
                 && remote.data_hashs == local.data_hashs
                 && remote.length == local.length
                 && remote.keep_encrypted == local.keep_encrypted
@@ -1416,6 +1420,28 @@ struct StreamingRun<'a> {
     market: Option<String>,
     url: &'a str,
     tx: &'a Sender<ProgressEvent>,
+    expected: Option<StreamingIdentity>,
+}
+
+struct StreamingIdentity {
+    content_id: Uuid,
+    version: String,
+}
+
+fn validate_streaming_identity(
+    content_id: Uuid,
+    version: &str,
+    expected: Option<&StreamingIdentity>,
+) -> io::Result<()> {
+    if expected
+        .is_some_and(|expected| expected.content_id != content_id || expected.version != version)
+    {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "signed package identity does not match the selected content and version",
+        ));
+    }
+    Ok(())
 }
 
 fn progress_style() -> ProgressStyle {
@@ -1587,6 +1613,7 @@ pub async fn run(
                     market,
                     url: &worker_source,
                     tx: &tx,
+                    expected: None,
                 },
                 f,
                 l,
@@ -1599,13 +1626,13 @@ pub async fn run(
         drop(pinned_source);
         result
     } else {
-        let (urls, expected_length) =
+        let (urls, expected_length, expected) =
             if source.starts_with("http://") || source.starts_with("https://") {
                 if let Err(error) = validate_streaming_source_url(&source) {
                     eprintln!("could not use remote package source: {error}");
                     return ExitCode::FAILURE;
                 }
-                (vec![source], None)
+                (vec![source], None, None)
             } else {
                 let content_id = if Uuid::try_parse(&source).is_err() {
                     let content_id_task = get_content_id(client, source, market.clone()).await;
@@ -1660,7 +1687,21 @@ pub async fn run(
                         return ExitCode::FAILURE;
                     }
                 };
-                (urls, Some(expected_length))
+                let content_id = match Uuid::try_parse(&package.content_id) {
+                    Ok(content_id) => content_id,
+                    Err(_) => {
+                        eprintln!("package response content ID is not a UUID");
+                        return ExitCode::FAILURE;
+                    }
+                };
+                (
+                    urls,
+                    Some(expected_length),
+                    Some(StreamingIdentity {
+                        content_id,
+                        version: package.version,
+                    }),
+                )
             };
         let progress_position = Arc::new(AtomicU64::new(0));
         let mut selected_url = None;
@@ -1721,6 +1762,7 @@ pub async fn run(
                     market,
                     url: &url,
                     tx: &tx,
+                    expected,
                 },
                 http_file,
                 l,
@@ -1739,7 +1781,7 @@ async fn run_cli_reader<Reader>(
     mut rx: Receiver<ProgressEvent>,
 ) -> bool
 where
-    Reader: AsyncRead + Unpin,
+    Reader: AsyncRead + Unpin + Send + 'static,
 {
     tokio::spawn(async move {
         let multi_progress = MultiProgress::new();
@@ -1791,7 +1833,7 @@ where
 
 async fn run_reader<Reader>(run: StreamingRun<'_>, reader: Reader, l: u64) -> bool
 where
-    Reader: AsyncRead + Unpin,
+    Reader: AsyncRead + Unpin + Send + 'static,
 {
     let StreamingRun {
         client,
@@ -1802,6 +1844,7 @@ where
         market,
         url,
         tx,
+        expected,
     } = run;
     let out: &Path = Path::new(&destination);
 
@@ -1845,11 +1888,47 @@ where
         }
     };
     let cache_path = transaction_payload.join(".xodus-streaming-tmp.msixvc");
-    let mut remote_file = match streaming::PrefixCacheFile::new(reader, l, cache_path.clone()).await
-    {
+    let remote_file = match streaming::PrefixCacheFile::new(reader, l, cache_path.clone()).await {
         Ok(file) => file,
         Err(err) => {
             eprintln!("failed to create package cache: {err}");
+            return false;
+        }
+    };
+    let key = match PinnedXvdKey::microsoft_retail() {
+        Ok(key) => key,
+        Err(err) => {
+            eprintln!("failed to load the pinned Microsoft package key: {err}");
+            return false;
+        }
+    };
+    let authenticated = match AuthenticatedXvd::open_signed(remote_file, &key).await {
+        Ok(xvd) => xvd,
+        Err(err) => {
+            eprintln!("failed to authenticate package header: {err}");
+            return false;
+        }
+    };
+    if let Err(err) = validate_streaming_identity(
+        authenticated.header().vduid,
+        &authenticated.header().package_version.to_string(),
+        expected.as_ref(),
+    ) {
+        eprintln!("{err}");
+        return false;
+    }
+    if authenticated.layout().embedded_xvd.len.0 != 0 {
+        eprintln!("embedded XVD verification is not supported");
+        return false;
+    }
+    let mut remote_file = match AuthenticatedReader::new(authenticated) {
+        Ok(file) if file.len() == l => file,
+        Ok(_) => {
+            eprintln!("package length does not match its signed data extent");
+            return false;
+        }
+        Err(err) => {
+            eprintln!("failed to open authenticated package: {err}");
             return false;
         }
     };
@@ -2028,6 +2107,7 @@ where
     .ok();
 
     let remote_xvd_ref = &remote_xvd;
+    let authenticated_source = Arc::new(tokio::sync::Mutex::new(remote_file));
     let job_names = jobs.iter().map(|job| job.name.clone()).collect::<Vec<_>>();
     let write_failed = Arc::new(AtomicBool::new(false));
     let transaction_payload = transaction_payload.clone();
@@ -2037,6 +2117,7 @@ where
             let client = client.clone();
             let transaction_payload = transaction_payload.clone();
             let write_failed = write_failed.clone();
+            let authenticated_source = Arc::clone(&authenticated_source);
             async move {
                 let output = match open_package_output(&transaction_payload, &job.name) {
                     Ok(output) => output,
@@ -2049,7 +2130,7 @@ where
                 let mut fout = File::from_std(output);
                 let mut lp: u64 = 0;
 
-                let progress = |pos: u64, _| {
+                let mut progress = |pos: u64, _| {
                     if tx
                         .try_send(ProgressEvent::Advanced {
                             id,
@@ -2075,52 +2156,81 @@ where
                 .await
                 .ok();
 
-                if let Some(fpath) = url.strip_prefix("file://") {
-                    let mut i = match open_regular_stream_source(Path::new(fpath)).await {
-                        Ok(file) => file,
+                let mut local_source = if let Some(fpath) = url.strip_prefix("file://") {
+                    match open_regular_stream_source(Path::new(fpath)).await {
+                        Ok(file) => Some(file),
                         Err(err) => {
                             eprintln!("failed to open {fpath}: {err}");
                             write_failed.store(true, Ordering::Relaxed);
                             return;
                         }
-                    };
-                    if let Err(err) = remote_xvd_ref
-                        .extract_file(&mut i, &mut fout, &job.content, *full_key, progress)
-                        .await
-                    {
-                        eprintln!("failed to extract {}: {err}", job.name);
-                        write_failed.store(true, Ordering::Relaxed);
-                        return;
                     }
-                    if let Err(err) = fout.sync_all().await {
-                        eprintln!("failed to sync {}: {err}", job.name);
-                        write_failed.store(true, Ordering::Relaxed);
-                        return;
-                    }
-                    tx.send(ProgressEvent::Finished { id }).await.ok();
                 } else {
-                    if let Err(err) = remote_xvd_ref
-                        .download_file_http(
-                            &client,
-                            url,
-                            &mut fout,
-                            &job.content,
-                            *full_key,
-                            progress,
-                        )
+                    None
+                };
+                let mut completed = 0_u64;
+                while completed < job.content.length {
+                    let Some(offset) = job.content.offset.checked_add(completed) else {
+                        eprintln!("package file offset overflows: {}", job.name);
+                        write_failed.store(true, Ordering::Relaxed);
+                        return;
+                    };
+                    let length =
+                        (job.content.length - completed).min(MAX_AUTHENTICATED_RANGE_BYTES);
+                    let hashes = match authenticated_source
+                        .lock()
+                        .await
+                        .hashes_for_range(offset, length)
                         .await
                     {
-                        eprintln!("failed to download {}: {err}", job.name);
+                        Ok(hashes) => hashes,
+                        Err(err) => {
+                            eprintln!("failed to authenticate file hashes for {}: {err}", job.name);
+                            write_failed.store(true, Ordering::Relaxed);
+                            return;
+                        }
+                    };
+                    let chunk = SegmentFile {
+                        offset,
+                        length,
+                        data_hashs: hashes,
+                        keep_encrypted: job.content.keep_encrypted,
+                    };
+                    let result = if let Some(source) = local_source.as_mut() {
+                        remote_xvd_ref
+                            .extract_file(source, &mut fout, &chunk, *full_key, |pos, _| {
+                                progress(completed.saturating_add(pos), job.content.length)
+                            })
+                            .await
+                            .map_err(io::Error::other)
+                    } else {
+                        remote_xvd_ref
+                            .download_file_http(
+                                &client,
+                                url,
+                                &mut fout,
+                                &chunk,
+                                *full_key,
+                                |pos, _| {
+                                    progress(completed.saturating_add(pos), job.content.length)
+                                },
+                            )
+                            .await
+                            .map_err(io::Error::other)
+                    };
+                    if let Err(err) = result {
+                        eprintln!("failed to verify and extract {}: {err}", job.name);
                         write_failed.store(true, Ordering::Relaxed);
                         return;
                     }
-                    if let Err(err) = fout.sync_all().await {
-                        eprintln!("failed to sync {}: {err}", job.name);
-                        write_failed.store(true, Ordering::Relaxed);
-                        return;
-                    }
-                    tx.send(ProgressEvent::Finished { id }).await.ok();
+                    completed += length;
                 }
+                if let Err(err) = fout.sync_all().await {
+                    eprintln!("failed to sync {}: {err}", job.name);
+                    write_failed.store(true, Ordering::Relaxed);
+                    return;
+                }
+                tx.send(ProgressEvent::Finished { id }).await.ok();
             }
         })
         .await;
@@ -2157,12 +2267,7 @@ where
         ".xodus-streaming.msixvc".to_owned(),
     ));
     promotion_specs.extend(job_names.into_iter().map(|name| (name.clone(), name)));
-    let stale_sidecars = lfiles
-        .keys()
-        .filter(|name| !rfiles.contains_key(*name))
-        .cloned()
-        .collect::<Vec<_>>();
-    let mut entries = match promotion_entries_with_removals(&promotion_specs, &stale_sidecars) {
+    let mut entries = match promotion_entries(&promotion_specs) {
         Ok(entries) => entries,
         Err(err) => {
             eprintln!("failed to prepare package transaction journal: {err}");
@@ -2182,6 +2287,58 @@ mod tests {
     use std::io::{self, Cursor, Write};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn streaming_identity_matches_selected_content_and_version() {
+        let content_id = uuid::Uuid::from_u128(1);
+        let expected = super::StreamingIdentity {
+            content_id,
+            version: "1.2.3.4".to_owned(),
+        };
+        assert!(super::validate_streaming_identity(content_id, "1.2.3.4", Some(&expected)).is_ok());
+        assert!(
+            super::validate_streaming_identity(
+                uuid::Uuid::from_u128(2),
+                "1.2.3.4",
+                Some(&expected)
+            )
+            .is_err()
+        );
+        assert!(
+            super::validate_streaming_identity(content_id, "1.2.3.5", Some(&expected)).is_err()
+        );
+        assert!(super::validate_streaming_identity(content_id, "1.2.3.4", None).is_ok());
+    }
+
+    #[tokio::test]
+    async fn streaming_rejects_unsigned_source_before_promotion_or_license() {
+        let temporary = tempfile::tempdir().unwrap();
+        let destination = temporary.path().join("output");
+        let client = reqwest::Client::new();
+        let tokens = xodus::tokens::TokenManager::with_keychain_and_memory();
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let input = std::io::Cursor::new(vec![0_u8; super::PAGE_SIZE]);
+        let run = super::StreamingRun {
+            client: &client,
+            tokens: &tokens,
+            destination: destination.to_string_lossy().into_owned(),
+            try_skip_ntfs: false,
+            parallel: None,
+            market: None,
+            url: "file://unused",
+            tx: &tx,
+            expected: None,
+        };
+        assert!(!super::run_reader(run, input, super::PAGE_SIZE as u64).await);
+        assert!(!destination.join(".xodus-streaming.msixvc").exists());
+        assert!(std::fs::read_dir(&destination).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(super::TRANSACTION_DIRECTORY_PREFIX)
+        }));
+    }
 
     use super::{
         PromotionState, SegmentFile, TRANSACTION_DIRECTORY_PREFIX, TRANSACTION_JOURNAL,
@@ -2553,6 +2710,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn changed_jobs_do_not_trust_cached_metadata_for_decrypted_files() {
+        let temporary = tempfile::tempdir().unwrap();
+        let segment = || SegmentFile {
+            offset: 0,
+            length: 5,
+            data_hashs: vec![[0x11; 20]],
+            keep_encrypted: false,
+        };
+        let remote = HashMap::from([("game.bin".to_owned(), segment())]);
+        let local = HashMap::from([("game.bin".to_owned(), segment())]);
+        std::fs::write(temporary.path().join("game.bin"), b"wrong").unwrap();
+        assert_eq!(
+            changed_jobs(temporary.path(), &remote, &local)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
     async fn protected_file_rejects_missing_or_inconsistent_page_hashes() {
         let temporary = tempfile::tempdir().unwrap();
         let path = temporary.path().join("game.bin");
@@ -2615,7 +2793,7 @@ mod tests {
             offset: 0,
             length: 5,
             data_hashs: vec![[0x11; 20]],
-            keep_encrypted: false,
+            keep_encrypted: true,
         };
         let remote = HashMap::from([("game.bin".to_owned(), segment())]);
         let local = HashMap::from([("game.bin".to_owned(), segment())]);

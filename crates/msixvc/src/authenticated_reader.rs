@@ -9,6 +9,8 @@ use crate::authenticated_xvd::{AuthenticatedXvd, AuthenticatedXvdError};
 use crate::layout::PAGE_SIZE;
 use crate::models::xvd::layout::XvdLayout;
 
+pub const MAX_AUTHENTICATED_RANGE_BYTES: u64 = 8 * 1024 * 1024;
+
 type PageBytes = Result<([u8; PAGE_SIZE], usize), AuthenticatedXvdError>;
 type PageResult<R> = (Box<AuthenticatedXvd<R>>, PageBytes);
 type PendingPage<R> = Pin<Box<dyn Future<Output = PageResult<R>> + Send>>;
@@ -48,6 +50,14 @@ impl<R: AsyncRead + AsyncSeek + Unpin + Send + 'static> AuthenticatedReader<R> {
         self.layout
     }
 
+    pub fn len(&self) -> u64 {
+        self.length
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.length == 0
+    }
+
     /// Obtain an authenticated hash for a data-page index without reading payload bytes.
     pub async fn page_hash(&mut self, page: u32) -> io::Result<[u8; 20]> {
         if self.pending.is_some() || self.seek_target.is_some() {
@@ -61,6 +71,45 @@ impl<R: AsyncRead + AsyncSeek + Unpin + Send + 'static> AuthenticatedReader<R> {
             .as_mut()
             .ok_or_else(|| io::Error::other("authenticated reader has no source"))?;
         xvd.page_hash(page).await.map_err(io::Error::other)
+    }
+
+    /// Collect a bounded range of signed-tree hashes for page-aligned file bytes.
+    pub async fn hashes_for_range(
+        &mut self,
+        offset: u64,
+        length: u64,
+    ) -> io::Result<Vec<[u8; 20]>> {
+        let invalid = || {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "range is outside the supported authenticated data extent",
+            )
+        };
+        if length > MAX_AUTHENTICATED_RANGE_BYTES {
+            return Err(invalid());
+        }
+        let relative = offset
+            .checked_sub(self.layout.user_data.start.to_bytes().0)
+            .ok_or_else(invalid)?;
+        if !relative.is_multiple_of(PAGE_SIZE as u64) {
+            return Err(invalid());
+        }
+        let first = relative / PAGE_SIZE as u64;
+        let count = length.div_ceil(PAGE_SIZE as u64);
+        let end = first.checked_add(count).ok_or_else(invalid)?;
+        if end > u64::from(self.layout.hash_tree_layout.level0.num_hashes.0) {
+            return Err(invalid());
+        }
+        let count = usize::try_from(count).map_err(|_| invalid())?;
+        let mut hashes = Vec::new();
+        hashes
+            .try_reserve_exact(count)
+            .map_err(|_| io::Error::other("authenticated hash allocation failed"))?;
+        for index in first..end {
+            let page = u32::try_from(index).map_err(|_| invalid())?;
+            hashes.push(self.page_hash(page).await?);
+        }
+        Ok(hashes)
     }
 
     fn poll_pending(&mut self, cx: &mut Context<'_>) -> Poll<Option<PageBytes>> {
