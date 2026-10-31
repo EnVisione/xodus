@@ -98,7 +98,9 @@ fn collect_nonces(
             .map_err(|_| super::RSTError::DerivedKeyTokenAllocationFailed)?;
         nonce.push_str(&token.nonce);
 
-        nonces.insert(id, nonce);
+        if nonces.insert(id, nonce).is_some() {
+            return Err(super::RSTError::DuplicateDerivedKeyToken);
+        }
     }
     Ok(nonces)
 }
@@ -115,9 +117,11 @@ fn verify_and_decrypt_envelope<'a>(
     log::trace!("Decrypting soap::Envelope");
     let nonces = collect_nonces(&envelope.header.security.derived_key_tokens)?;
 
-    if let Some(security_signature) = &envelope.header.security.signature
-        && let Some(key_info) = &security_signature.key_info
-    {
+    if let Some(security_signature) = &envelope.header.security.signature {
+        let key_info = security_signature
+            .key_info
+            .as_ref()
+            .ok_or(super::RSTError::MissingResponseSignatureKeyInfo)?;
         let id = referenced_token_id(&key_info.security_token_reference.reference.uri)?;
         let nonce = nonces.get(id).ok_or(super::RSTError::MissingNonce)?;
         let nonce = BASE64_STANDARD.decode(nonce)?;
@@ -158,8 +162,74 @@ fn verify_and_decrypt_envelope<'a>(
 mod tests {
     use super::{
         append_response_chunk, collect_nonces, referenced_token_id, response_text_from_body,
+        verify_and_decrypt_envelope,
     };
     use crate::models::soap;
+
+    fn response_envelope(header: soap::Header) -> soap::Envelope {
+        let body = soap::Body {
+            body: soap::BodyContent::RequestMultipleSecurityTokens(
+                soap::RequestMultipleSecurityTokens {
+                    id: "test".to_owned(),
+                    ps: "test".to_owned(),
+                    security_tokens: Vec::new(),
+                },
+            ),
+        };
+        soap::Envelope::new(header, body)
+    }
+
+    #[test]
+    fn response_signature_without_key_information_is_rejected() {
+        let mut header = soap::Header::new();
+        let mut signature = soap::Signature::empty_hmac();
+        signature.key_info = None;
+        header.security.signature = Some(signature);
+        let envelope = response_envelope(header);
+        let request_signature = crate::api::live::rst::RSTSignature::Hmac {
+            clep_secret: b"synthetic",
+            tpm_secret: &[],
+        };
+
+        let error = verify_and_decrypt_envelope(Some(request_signature), String::new(), envelope)
+            .expect_err("a claimed response signature must not be silently ignored");
+        assert!(matches!(
+            error,
+            crate::api::live::rst::RSTError::MissingResponseSignatureKeyInfo
+        ));
+    }
+
+    #[test]
+    fn response_without_security_signature_preserves_existing_behavior() {
+        let envelope = response_envelope(soap::Header::new());
+        let request_signature = crate::api::live::rst::RSTSignature::Hmac {
+            clep_secret: b"synthetic",
+            tpm_secret: &[],
+        };
+        assert!(
+            verify_and_decrypt_envelope(Some(request_signature), String::new(), envelope).is_ok()
+        );
+    }
+
+    #[test]
+    fn response_signature_with_unknown_key_reference_is_rejected() {
+        let mut header = soap::Header::new();
+        header.security.signature = Some(soap::Signature::empty_hmac());
+        let request_signature = crate::api::live::rst::RSTSignature::Hmac {
+            clep_secret: b"synthetic",
+            tpm_secret: &[],
+        };
+        let error = verify_and_decrypt_envelope(
+            Some(request_signature),
+            String::new(),
+            response_envelope(header),
+        )
+        .expect_err("unknown signature key references must fail");
+        assert!(matches!(
+            error,
+            crate::api::live::rst::RSTError::MissingNonce
+        ));
+    }
 
     #[test]
     fn referenced_token_id_requires_nonempty_fragment_uri() {
@@ -192,5 +262,18 @@ mod tests {
         let nonces = collect_nonces(&tokens).expect("nonce index allocation must succeed");
 
         assert_eq!(nonces.get("SignKey"), Some(&"nonce".to_owned()));
+    }
+
+    #[test]
+    fn duplicate_derived_key_token_ids_are_rejected() {
+        let tokens = vec![
+            soap::DerivedKeyToken::sign_key("first".to_owned()),
+            soap::DerivedKeyToken::sign_key("second".to_owned()),
+        ];
+        let error = collect_nonces(&tokens).expect_err("ambiguous token IDs must fail");
+        assert!(matches!(
+            error,
+            crate::api::live::rst::RSTError::DuplicateDerivedKeyToken
+        ));
     }
 }

@@ -19,6 +19,8 @@ pub enum RSTError {
     HmacKey,
     #[error("The signature verification failed - {0}")]
     InvalidResponseSignature(String),
+    #[error("SOAP response signature is missing key information")]
+    MissingResponseSignatureKeyInfo,
     #[error("Response token collection is empty")]
     EmptyTokenCollection,
     #[error("Unsupported token response body")]
@@ -45,6 +47,8 @@ pub enum RSTError {
     InsecureRedirect,
     #[error("SOAP derived key token index allocation failed")]
     DerivedKeyTokenAllocationFailed,
+    #[error("SOAP response contains duplicate derived key token IDs")]
+    DuplicateDerivedKeyToken,
     #[error("SP license key derivation failed: {0}")]
     SpLicenseKey(#[from] crate::licensing::splicense::SpLicenseKeyError),
 }
