@@ -2758,6 +2758,7 @@ name = "msixvc"
 version = "0.1.0"
 dependencies = [
  "aes",
+ "aws-lc-rs",
  "bitflags 2.13.2",
  "bytes",
  "chrono",
