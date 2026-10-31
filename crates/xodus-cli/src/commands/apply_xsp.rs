@@ -15,6 +15,7 @@ use crate::commands::streaming::{
 
 const MAX_HASH_MANIFEST_BYTES: usize = 64 * 1024 * 1024;
 const XVD_HEADER_BYTES: u64 = 4096;
+const XVD_PAGE_BYTES: u64 = msixvc::layout::PAGE_SIZE as u64;
 const SPACE_RESERVE_MULTIPLIER: u64 = 6;
 const SPACE_RESERVE_DIVISOR: u64 = 5;
 
@@ -246,6 +247,7 @@ async fn authenticate_update_image(
     key: &PinnedXvdKey,
     identity: ExpectedXvdIdentity,
 ) -> io::Result<()> {
+    let actual_length = file.metadata().await?.len();
     let mut xvd = AuthenticatedXvd::open(file, key, identity)
         .await
         .map_err(io::Error::other)?;
@@ -255,7 +257,31 @@ async fn authenticate_update_image(
             "embedded XVD verification is not supported",
         ));
     }
+    let layout = xvd.layout();
+    validate_authenticated_extent(
+        actual_length,
+        layout.user_data.start.to_bytes().0,
+        layout.hash_tree_layout.level0.num_hashes.0,
+    )?;
     xvd.verify_all().await.map_err(io::Error::other)?;
+    Ok(())
+}
+
+fn validate_authenticated_extent(
+    actual_length: u64,
+    data_start: u64,
+    page_count: u32,
+) -> io::Result<()> {
+    let expected_length = u64::from(page_count)
+        .checked_mul(XVD_PAGE_BYTES)
+        .and_then(|length| data_start.checked_add(length))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "signed XVD extent overflows"))?;
+    if actual_length != expected_length {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "XVD length does not match the signed data extent",
+        ));
+    }
     Ok(())
 }
 
@@ -535,7 +561,7 @@ mod tests {
 
     use super::{
         ApplyXspRequest, XspVerification, load_update_verification, open_regular_input,
-        read_bounded_text, run, run_with_hook,
+        read_bounded_text, run, run_with_hook, validate_authenticated_extent,
     };
 
     fn fixture(name: &str) -> PathBuf {
@@ -568,6 +594,18 @@ mod tests {
         assert!(
             load_update_verification(input(Some(key_path.to_string_lossy().into_owned()))).is_err()
         );
+    }
+
+    #[test]
+    fn signed_xvd_extent_rejects_truncated_and_appended_bytes() {
+        let data_start = 3 * 4096;
+        let expected = data_start + 4 * 4096;
+        assert!(validate_authenticated_extent(expected, data_start, 4).is_ok());
+        assert!(validate_authenticated_extent(expected - 1, data_start, 4).is_err());
+        assert!(validate_authenticated_extent(expected + 1, data_start, 4).is_err());
+        assert!(validate_authenticated_extent(0, u64::MAX, 1).is_err());
+        assert!(validate_authenticated_extent(2_069_975_040, 2_979 * 4096, 502_386).is_ok());
+        assert!(validate_authenticated_extent(2_087_206_912, 3_003 * 4096, 506_569).is_ok());
     }
 
     #[tokio::test]
