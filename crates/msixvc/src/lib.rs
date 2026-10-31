@@ -8,6 +8,7 @@ pub mod math;
 mod microsoft_retail_key;
 pub mod models;
 pub mod msixvc2;
+pub mod package_path;
 pub mod signature;
 pub mod streaming;
 pub mod streaming_ntfs;

@@ -15,6 +15,7 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use msixvc::authenticated_reader::{AuthenticatedReader, MAX_AUTHENTICATED_RANGE_BYTES};
 use msixvc::authenticated_xvd::AuthenticatedXvd;
 use msixvc::layout::PAGE_SIZE;
+use msixvc::package_path::{MAX_PACKAGE_PATH_BYTES, invalid_windows_filename};
 use msixvc::signature::PinnedXvdKey;
 use msixvc::streaming;
 use msixvc::xvd::{SegmentFile, XvdFile};
@@ -67,7 +68,6 @@ const MAX_STREAMING_OWNERSHIP_BYTES: usize = 64 * 1024 * 1024;
 const MAX_STREAMING_OWNERSHIP_ENTRIES: usize = 1_048_576;
 pub(crate) const MSIXVC2_OWNERSHIP_FILE: &str = ".xodus-msixvc2-members";
 const MAX_TRANSACTION_JOURNAL_BYTES: usize = 64 * 1024 * 1024;
-const MAX_PACKAGE_PATH_BYTES: usize = 4096;
 
 fn invalid_package_path(message: impl Into<String>) -> io::Error {
     io::Error::new(ErrorKind::InvalidData, message.into())
@@ -236,13 +236,7 @@ pub(crate) fn package_path_components(path: &str) -> io::Result<Vec<&str>> {
                 "package path contains an invalid component",
             ));
         }
-        if component.ends_with(['.', ' '])
-            || component.chars().any(|character| {
-                character.is_control()
-                    || matches!(character, '<' | '>' | ':' | '"' | '|' | '?' | '*')
-            })
-            || is_windows_reserved_name(component)
-        {
+        if invalid_windows_filename(component) {
             return Err(invalid_package_path(
                 "package path contains an invalid filename",
             ));
@@ -261,37 +255,6 @@ pub(crate) fn package_path_components(path: &str) -> io::Result<Vec<&str>> {
     }
 
     Ok(components)
-}
-
-fn is_windows_reserved_name(component: &str) -> bool {
-    let stem = component
-        .split_once('.')
-        .map_or(component, |(stem, _)| stem);
-    matches!(
-        stem.to_ascii_uppercase().as_str(),
-        "CON"
-            | "PRN"
-            | "AUX"
-            | "NUL"
-            | "COM1"
-            | "COM2"
-            | "COM3"
-            | "COM4"
-            | "COM5"
-            | "COM6"
-            | "COM7"
-            | "COM8"
-            | "COM9"
-            | "LPT1"
-            | "LPT2"
-            | "LPT3"
-            | "LPT4"
-            | "LPT5"
-            | "LPT6"
-            | "LPT7"
-            | "LPT8"
-            | "LPT9"
-    )
 }
 
 pub(crate) fn open_package_output(root: &Path, package_path: &str) -> io::Result<std::fs::File> {

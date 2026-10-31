@@ -5,6 +5,8 @@ use std::{
 
 use zip::{CompressionMethod, ZipArchive, result::ZipError};
 
+use crate::package_path::{MAX_PACKAGE_PATH_BYTES, invalid_windows_filename};
+
 const MAX_MSIXVC2_ENTRIES: usize = 1_048_576;
 const MAX_METADATA_ENTRY_BYTES: u64 = 8 * 1024 * 1024;
 
@@ -37,6 +39,8 @@ pub enum Msixvc2ParseError {
     EmptyEntryName,
     #[error("MSIXVC2 archive entry {name:?} uses an unsafe path")]
     UnsafeEntryPath { name: String },
+    #[error("MSIXVC2 archive entry name is {length} bytes, exceeding the supported maximum {max}")]
+    EntryNameTooLong { length: usize, max: usize },
     #[error("MSIXVC2 archive entry {name:?} is a symbolic link")]
     SymbolicLinkEntry { name: String },
     #[error("MSIXVC2 archive contains duplicate entry {name:?}")]
@@ -207,6 +211,12 @@ fn validate_entry_name(name: &str) -> Result<(), Msixvc2ParseError> {
     if name.is_empty() {
         return Err(Msixvc2ParseError::EmptyEntryName);
     }
+    if name.len() > MAX_PACKAGE_PATH_BYTES {
+        return Err(Msixvc2ParseError::EntryNameTooLong {
+            length: name.len(),
+            max: MAX_PACKAGE_PATH_BYTES,
+        });
+    }
     if name.starts_with('/')
         || name.contains('\\')
         || name.contains(':')
@@ -216,8 +226,12 @@ fn validate_entry_name(name: &str) -> Result<(), Msixvc2ParseError> {
             .split('/')
             .any(str::is_empty)
         || name
+            .strip_suffix('/')
+            .unwrap_or(name)
             .split('/')
-            .any(|component| component == "." || component == "..")
+            .any(|component| {
+                component == "." || component == ".." || invalid_windows_filename(component)
+            })
     {
         return Err(Msixvc2ParseError::UnsafeEntryPath {
             name: name.to_owned(),
@@ -298,6 +312,41 @@ mod tests {
             );
         }
         assert!(super::validate_entry_name("outer/inner/").is_ok());
+    }
+
+    #[test]
+    fn rejects_windows_unsafe_names_before_visiting() {
+        use zip::write::SimpleFileOptions;
+
+        for invalid in ["safe?.txt", "NUL.txt", "trailing.", "line\nbreak"] {
+            let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
+            archive
+                .start_file(invalid, SimpleFileOptions::default())
+                .unwrap();
+            let bytes = archive.finish().unwrap().into_inner();
+            let mut visited = false;
+            let result = visit_entries(Cursor::new(bytes), 1_000_000, |_, _| {
+                visited = true;
+                Ok(())
+            });
+            assert!(matches!(
+                result,
+                Err(Msixvc2ParseError::UnsafeEntryPath { .. })
+            ));
+            assert!(
+                !visited,
+                "invalid archive must fail before any visitor runs"
+            );
+        }
+        assert!(super::validate_entry_name("assets/normal.txt").is_ok());
+        assert!(super::validate_entry_name(&"a".repeat(4096)).is_ok());
+        assert!(matches!(
+            super::validate_entry_name(&"a".repeat(4097)),
+            Err(Msixvc2ParseError::EntryNameTooLong {
+                length: 4097,
+                max: 4096
+            })
+        ));
     }
 
     #[test]
