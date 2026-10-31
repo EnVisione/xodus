@@ -210,6 +210,7 @@ async fn run_inner(args: CliArgs) -> ExitCode {
     registry.init();
     let client = reqwest::ClientBuilder::new()
         .user_agent(format!("xodus-cli/{}", env!("CARGO_PKG_VERSION")))
+        .redirect(xodus::api::secure_redirect_policy())
         .build();
     let client = match client {
         Ok(client) => client,

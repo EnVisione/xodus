@@ -25,6 +25,8 @@ enum ServiceError {
     Secrets(String),
     #[error("device token is unavailable: {0}")]
     DeviceToken(String),
+    #[error("http client is unavailable: {0}")]
+    HttpClient(String),
     #[error("device token is not a legacy token")]
     UnsupportedDeviceToken,
     #[error("runtime directory is unavailable: {0}")]
@@ -107,7 +109,11 @@ async fn run_service() -> Result<(), ServiceError> {
     registry.init();
     xodus::secrets::init_secrets().map_err(|error| ServiceError::Secrets(error.to_string()))?;
     let tokens = Arc::new(TokenManager::with_keychain_and_memory());
-    xodus::tokens::device::ensure_device_credentials(&reqwest::Client::new(), &tokens)
+    let client = reqwest::ClientBuilder::new()
+        .redirect(xodus::api::secure_redirect_policy())
+        .build()
+        .map_err(|error| ServiceError::HttpClient(error.to_string()))?;
+    xodus::tokens::device::ensure_device_credentials(&client, &tokens)
         .await
         .map_err(|error| ServiceError::DeviceToken(error.to_string()))?;
     let device_token = tokens
