@@ -20,25 +20,37 @@ const SPACE_RESERVE_MULTIPLIER: u64 = 6;
 const SPACE_RESERVE_DIVISOR: u64 = 5;
 
 fn open_regular_manifest(path: &Path) -> io::Result<std::fs::File> {
-    let metadata = std::fs::metadata(path)?;
-    if !metadata.is_file() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "hash manifest is not a regular file",
-        ));
+    open_regular_file(path, "hash manifest is not a regular file")
+}
+
+fn open_regular_file(path: &Path, error_message: &'static str) -> io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(nix::libc::O_NONBLOCK);
     }
-    std::fs::File::open(path)
+    let file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, error_message));
+    }
+    Ok(file)
 }
 
 async fn open_regular_input(path: &Path) -> io::Result<File> {
-    let metadata = tokio::fs::metadata(path).await?;
-    if !metadata.is_file() {
+    let mut options = tokio::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(nix::libc::O_NONBLOCK);
+    let file = options.open(path).await?;
+    if !file.metadata().await?.is_file() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "XSP input is not a regular file",
         ));
     }
-    File::open(path).await
+    Ok(file)
 }
 
 fn validate_update_space(required: u64, available: u64) -> io::Result<()> {
@@ -206,7 +218,7 @@ struct VerifiedUpdate {
 
 fn load_update_verification(input: XspVerification) -> io::Result<VerifiedUpdate> {
     let key = if let Some(path) = input.retail_key_path {
-        let file = std::fs::File::open(path)?;
+        let file = open_regular_file(Path::new(&path), "retail public key is not a regular file")?;
         let metadata = file.metadata()?;
         if !metadata.is_file() || metadata.len() != 539 {
             return Err(io::Error::new(
@@ -243,7 +255,7 @@ fn load_update_verification(input: XspVerification) -> io::Result<VerifiedUpdate
 }
 
 async fn authenticate_update_image(
-    file: File,
+    file: &mut File,
     key: &PinnedXvdKey,
     identity: ExpectedXvdIdentity,
 ) -> io::Result<()> {
@@ -349,20 +361,22 @@ where
         eprintln!("XSP update rejected base identity: {error}");
         return ExitCode::FAILURE;
     }
+    let mut base_file = match open_regular_input(Path::new(&base)).await {
+        Ok(file) => file,
+        Err(error) => {
+            eprintln!("XSP update could not open base content: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
     if let Some(verification) = &verification {
-        let file = match open_regular_input(Path::new(&base)).await {
-            Ok(file) => file,
-            Err(error) => {
-                eprintln!("XSP update could not open source for authentication: {error}");
-                return ExitCode::FAILURE;
-            }
-        };
         let identity = ExpectedXvdIdentity {
             content_id: xsp.header.content_id,
             package_id: verification.source_package_id,
             version: xsp.header.upgrade_from_version,
         };
-        if let Err(error) = authenticate_update_image(file, &verification.key, identity).await {
+        if let Err(error) =
+            authenticate_update_image(&mut base_file, &verification.key, identity).await
+        {
             eprintln!("XSP update rejected source authentication: {error}");
             return ExitCode::FAILURE;
         }
@@ -450,13 +464,6 @@ where
         }
     };
 
-    let mut base_file = match open_regular_input(Path::new(&base)).await {
-        Ok(file) => file,
-        Err(error) => {
-            eprintln!("XSP update could not open base content: {error}");
-            return ExitCode::FAILURE;
-        }
-    };
     let mut new_data_file = match open_regular_input(Path::new(&new_data)).await {
         Ok(file) => file,
         Err(error) => {
@@ -517,7 +524,7 @@ where
     drop(staged_file);
 
     if let Some(verification) = &verification {
-        let file = match open_package_input(&payload_root, &output) {
+        let mut file = match open_package_input(&payload_root, &output) {
             Ok(file) => File::from_std(file),
             Err(error) => {
                 eprintln!("XSP update could not open staged target for authentication: {error}");
@@ -529,7 +536,8 @@ where
             package_id: verification.target_package_id,
             version: xsp.header.upgrade_to_version,
         };
-        if let Err(error) = authenticate_update_image(file, &verification.key, identity).await {
+        if let Err(error) = authenticate_update_image(&mut file, &verification.key, identity).await
+        {
             eprintln!("XSP update rejected staged target authentication: {error}");
             return ExitCode::FAILURE;
         }
@@ -716,7 +724,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn xsp_input_open_rejects_non_regular_files_before_opening() {
+    async fn xsp_input_open_rejects_non_regular_files() {
         let temporary = tempfile::tempdir().expect("temporary directory must exist");
 
         let error = open_regular_input(temporary.path())
@@ -724,6 +732,36 @@ mod tests {
             .expect_err("a directory must not be opened as an XSP input stream");
 
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rejects_fifo_inputs_without_waiting_for_a_writer() {
+        let temporary = tempfile::tempdir().unwrap();
+        let fifo = temporary.path().join("input");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let error =
+            tokio::time::timeout(std::time::Duration::from_secs(2), open_regular_input(&fifo))
+                .await
+                .expect("opening the input must not block")
+                .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(
+            super::open_regular_manifest(&fifo).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            super::open_regular_file(&fifo, "invalid key")
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidInput
+        );
     }
 
     #[test]
