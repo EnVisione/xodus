@@ -211,8 +211,10 @@ fn validate_entry_name(name: &str) -> Result<(), Msixvc2ParseError> {
         || name.contains('\\')
         || name.contains(':')
         || name
+            .strip_suffix('/')
+            .unwrap_or(name)
             .split('/')
-            .any(|component| component.is_empty() && !name.ends_with('/'))
+            .any(str::is_empty)
         || name
             .split('/')
             .any(|component| component == "." || component == "..")
@@ -264,6 +266,38 @@ mod tests {
             inspect(Cursor::new(ADVERSARIAL_PATH)),
             Err(Msixvc2ParseError::UnsafeEntryPath { .. })
         ));
+    }
+
+    #[test]
+    fn rejects_empty_components_in_directory_entries_before_visiting() {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+
+        for invalid in ["outer//inner/", "outer//"] {
+            let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
+            archive
+                .start_file("safe.txt", SimpleFileOptions::default())
+                .unwrap();
+            archive.write_all(b"safe").unwrap();
+            archive
+                .add_directory(invalid, SimpleFileOptions::default())
+                .unwrap();
+            let bytes = archive.finish().unwrap().into_inner();
+            let mut visited = false;
+            let result = visit_entries(Cursor::new(bytes), 1_000_000, |_, _| {
+                visited = true;
+                Ok(())
+            });
+            assert!(matches!(
+                result,
+                Err(Msixvc2ParseError::UnsafeEntryPath { .. })
+            ));
+            assert!(
+                !visited,
+                "invalid archive must fail before any visitor runs"
+            );
+        }
+        assert!(super::validate_entry_name("outer/inner/").is_ok());
     }
 
     #[test]
