@@ -61,6 +61,10 @@ const TRANSACTION_MARKER_CONTENT: &[u8] = b"xodus-transaction-v1\n";
 const TRANSACTION_LOCK_FILE: &str = ".xodus-streaming.lock";
 const STREAMING_CACHE_FILE: &str = ".xodus-streaming.msixvc";
 const STREAMING_STAGED_CACHE_FILE: &str = ".xodus-streaming-tmp.msixvc";
+const STREAMING_OWNERSHIP_FILE: &str = ".xodus-streaming-members";
+const STREAMING_OWNERSHIP_HEADER: &str = "xodus-streaming-members-v1";
+const MAX_STREAMING_OWNERSHIP_BYTES: usize = 64 * 1024 * 1024;
+const MAX_STREAMING_OWNERSHIP_ENTRIES: usize = 1_048_576;
 pub(crate) const MSIXVC2_OWNERSHIP_FILE: &str = ".xodus-msixvc2-members";
 const MAX_TRANSACTION_JOURNAL_BYTES: usize = 64 * 1024 * 1024;
 const MAX_PACKAGE_PATH_BYTES: usize = 4096;
@@ -245,6 +249,7 @@ pub(crate) fn package_path_components(path: &str) -> io::Result<Vec<&str>> {
         }
         if component.eq_ignore_ascii_case(TRANSACTION_LOCK_FILE)
             || component.eq_ignore_ascii_case(MSIXVC2_OWNERSHIP_FILE)
+            || component.eq_ignore_ascii_case(STREAMING_OWNERSHIP_FILE)
             || component
                 .get(..TRANSACTION_DIRECTORY_PREFIX.len())
                 .is_some_and(|prefix| prefix.eq_ignore_ascii_case(TRANSACTION_DIRECTORY_PREFIX))
@@ -534,6 +539,22 @@ pub(crate) fn promotion_entries_with_ownership(
     Ok(entries)
 }
 
+fn append_streaming_ownership_entry(entries: &mut Vec<PromotionEntry>) -> io::Result<()> {
+    let relative = PathBuf::from(STREAMING_OWNERSHIP_FILE);
+    entries
+        .try_reserve(1)
+        .map_err(|_| invalid_package_path("streaming ownership entry allocation failed"))?;
+    entries.push(PromotionEntry {
+        staged_relative: relative.clone(),
+        backup_relative: PathBuf::from(TRANSACTION_BACKUP_DIRECTORY).join(&relative),
+        final_relative: relative,
+        had_previous: false,
+        remove_final: false,
+        state: PromotionState::Pending,
+    });
+    Ok(())
+}
+
 fn journal_path(root: &Path) -> PathBuf {
     root.join(TRANSACTION_JOURNAL)
 }
@@ -629,17 +650,17 @@ fn read_transaction_journal(root: &Path) -> io::Result<Option<Vec<PromotionEntry
         }
         let staged_relative = journal_member_path(staged_text)?;
         let final_relative = journal_member_path(final_text)?;
-        let ownership_backup = format!("{TRANSACTION_BACKUP_DIRECTORY}/{MSIXVC2_OWNERSHIP_FILE}");
-        let backup_relative = if final_relative == Path::new(MSIXVC2_OWNERSHIP_FILE)
-            && backup_text == ownership_backup
-        {
+        let is_ownership = final_relative == Path::new(MSIXVC2_OWNERSHIP_FILE)
+            || final_relative == Path::new(STREAMING_OWNERSHIP_FILE);
+        let ownership_backup = format!("{TRANSACTION_BACKUP_DIRECTORY}/{final_text}");
+        let backup_relative = if is_ownership && backup_text == ownership_backup {
             PathBuf::from(backup_text)
         } else {
             package_relative_path(backup_text)?
         };
-        if (final_relative == Path::new(MSIXVC2_OWNERSHIP_FILE))
-            != (staged_relative == Path::new(MSIXVC2_OWNERSHIP_FILE))
-        {
+        let staged_is_ownership = staged_relative == Path::new(MSIXVC2_OWNERSHIP_FILE)
+            || staged_relative == Path::new(STREAMING_OWNERSHIP_FILE);
+        if (is_ownership || staged_is_ownership) && staged_relative != final_relative {
             return Err(invalid_package_path(
                 "transaction ownership path is invalid",
             ));
@@ -670,7 +691,7 @@ fn read_transaction_journal(root: &Path) -> io::Result<Option<Vec<PromotionEntry
 }
 
 fn journal_member_path(path: &str) -> io::Result<PathBuf> {
-    if path == MSIXVC2_OWNERSHIP_FILE {
+    if path == MSIXVC2_OWNERSHIP_FILE || path == STREAMING_OWNERSHIP_FILE {
         Ok(PathBuf::from(path))
     } else {
         package_relative_path(path)
@@ -1335,6 +1356,274 @@ fn installed_file_length(file: &SegmentFile) -> io::Result<u64> {
     }
 }
 
+#[derive(PartialEq, Eq)]
+struct StreamingOwnership {
+    content_id: Uuid,
+    paths: HashSet<String>,
+}
+
+fn validate_streaming_ownership_title(
+    ownership: Option<&StreamingOwnership>,
+    content_id: Uuid,
+) -> io::Result<()> {
+    if ownership.is_some_and(|record| record.content_id != content_id) {
+        return Err(invalid_package_path(
+            "streaming destination belongs to a different title",
+        ));
+    }
+    Ok(())
+}
+
+fn normalized_streaming_member(name: &str) -> io::Result<String> {
+    let components = package_path_components(name)?;
+    if components.iter().any(|component| {
+        component.eq_ignore_ascii_case(STREAMING_CACHE_FILE)
+            || component.eq_ignore_ascii_case(STREAMING_STAGED_CACHE_FILE)
+    }) {
+        return Err(invalid_package_path(
+            "package path uses a reserved streaming cache name",
+        ));
+    }
+    Ok(components.join("/"))
+}
+
+fn read_streaming_ownership(root: &Path) -> io::Result<Option<StreamingOwnership>> {
+    let mut file = match open_transaction_file(root, STREAMING_OWNERSHIP_FILE, false) {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() > MAX_STREAMING_OWNERSHIP_BYTES as u64 {
+        return Err(invalid_package_path(
+            "streaming ownership record has invalid size or type",
+        ));
+    }
+    let mut bytes = Vec::new();
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        if bytes
+            .len()
+            .checked_add(count)
+            .is_none_or(|length| length > MAX_STREAMING_OWNERSHIP_BYTES)
+        {
+            return Err(invalid_package_path(
+                "streaming ownership record is too large",
+            ));
+        }
+        bytes
+            .try_reserve(count)
+            .map_err(|_| io::Error::other("streaming ownership allocation failed"))?;
+        bytes.extend_from_slice(&buffer[..count]);
+    }
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|_| invalid_package_path("streaming ownership record is not UTF-8"))?;
+    if !text.ends_with('\n') {
+        return Err(invalid_package_path(
+            "streaming ownership record is truncated",
+        ));
+    }
+    let mut lines = text.lines();
+    let (header, identity) = lines
+        .next()
+        .and_then(|line| line.split_once(' '))
+        .ok_or_else(|| invalid_package_path("streaming ownership header is invalid"))?;
+    let content_id = Uuid::parse_str(identity)
+        .map_err(|_| invalid_package_path("streaming ownership identity is invalid"))?;
+    if header != STREAMING_OWNERSHIP_HEADER || content_id.to_string() != identity {
+        return Err(invalid_package_path(
+            "streaming ownership header is invalid",
+        ));
+    }
+    let mut paths = HashSet::new();
+    for line in lines {
+        if paths.len() >= MAX_STREAMING_OWNERSHIP_ENTRIES {
+            return Err(invalid_package_path(
+                "streaming ownership record has too many paths",
+            ));
+        }
+        let normalized = normalized_streaming_member(line)?;
+        paths
+            .try_reserve(1)
+            .map_err(|_| io::Error::other("streaming ownership allocation failed"))?;
+        if normalized != line || !paths.insert(normalized) {
+            return Err(invalid_package_path("streaming ownership path is invalid"));
+        }
+    }
+    Ok(Some(StreamingOwnership { content_id, paths }))
+}
+
+fn streaming_ownership_record(
+    content_id: Uuid,
+    prior: Option<&StreamingOwnership>,
+    files: &HashMap<String, SegmentFile>,
+) -> io::Result<Vec<u8>> {
+    validate_streaming_ownership_title(prior, content_id)?;
+    let previous_count = prior.map_or(0, |ownership| ownership.paths.len());
+    let capacity = previous_count
+        .checked_add(files.len())
+        .ok_or_else(|| invalid_package_path("streaming ownership count overflows"))?;
+    let mut names = HashSet::new();
+    names
+        .try_reserve(capacity)
+        .map_err(|_| io::Error::other("streaming ownership allocation failed"))?;
+    if let Some(ownership) = prior {
+        for path in &ownership.paths {
+            let mut name = String::new();
+            name.try_reserve_exact(path.len())
+                .map_err(|_| io::Error::other("streaming ownership allocation failed"))?;
+            name.push_str(path);
+            names.insert(name);
+        }
+    }
+    for name in files.keys() {
+        names.insert(normalized_streaming_member(name)?);
+    }
+    if names.len() > MAX_STREAMING_OWNERSHIP_ENTRIES {
+        return Err(invalid_package_path(
+            "streaming ownership record has too many paths",
+        ));
+    }
+    let mut sorted = Vec::new();
+    sorted
+        .try_reserve_exact(names.len())
+        .map_err(|_| io::Error::other("streaming ownership allocation failed"))?;
+    sorted.extend(names);
+    sorted.sort_unstable();
+    let mut record = format!("{STREAMING_OWNERSHIP_HEADER} {content_id}\n").into_bytes();
+    for name in sorted {
+        let additional = name
+            .len()
+            .checked_add(1)
+            .ok_or_else(|| invalid_package_path("streaming ownership size overflows"))?;
+        if record
+            .len()
+            .checked_add(additional)
+            .is_none_or(|length| length > MAX_STREAMING_OWNERSHIP_BYTES)
+        {
+            return Err(invalid_package_path(
+                "streaming ownership record is too large",
+            ));
+        }
+        record
+            .try_reserve(additional)
+            .map_err(|_| io::Error::other("streaming ownership allocation failed"))?;
+        record.extend_from_slice(name.as_bytes());
+        record.push(b'\n');
+    }
+    Ok(record)
+}
+
+fn check_streaming_collisions(
+    root: &Path,
+    ownership: Option<&StreamingOwnership>,
+    files: &HashMap<String, SegmentFile>,
+    adopt: bool,
+) -> io::Result<()> {
+    for name in files.keys() {
+        let normalized = normalized_streaming_member(name)?;
+        match open_package_input(root, name) {
+            Ok(_)
+                if ownership.is_none_or(|record| !record.paths.contains(&normalized)) && !adopt =>
+            {
+                return Err(invalid_package_path(
+                    "streaming package would overwrite an unowned file",
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    match open_package_input(root, STREAMING_CACHE_FILE) {
+        Ok(_) if ownership.is_none() && !adopt => Err(invalid_package_path(
+            "streaming cache is unowned; use verified legacy adoption",
+        )),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+async fn verify_legacy_streaming_cache(
+    root: &Path,
+    key: &PinnedXvdKey,
+    content_id: Uuid,
+) -> io::Result<()> {
+    let file = match open_package_input(root, STREAMING_CACHE_FILE) {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let xvd = AuthenticatedXvd::open_signed(File::from_std(file), key)
+        .await
+        .map_err(io::Error::other)?;
+    if xvd.header().vduid != content_id {
+        return Err(invalid_package_path(
+            "legacy streaming cache belongs to a different title",
+        ));
+    }
+    Ok(())
+}
+
+async fn verify_legacy_streaming_files(
+    root: &Path,
+    staged: &Path,
+    ownership: Option<&StreamingOwnership>,
+    files: &HashMap<String, SegmentFile>,
+) -> io::Result<()> {
+    use tokio::io::AsyncReadExt;
+
+    for name in files.keys() {
+        let normalized = normalized_streaming_member(name)?;
+        if ownership.is_some_and(|record| record.paths.contains(&normalized)) {
+            continue;
+        }
+        let existing = match open_package_input(root, name) {
+            Ok(file) => file,
+            Err(error) if error.kind() == ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        let candidate = open_package_input(staged, name)?;
+        let length = existing.metadata()?.len();
+        if candidate.metadata()?.len() != length {
+            return Err(invalid_package_path(
+                "existing file does not match the authenticated legacy package",
+            ));
+        }
+        let mut existing =
+            tokio::io::BufReader::with_capacity(1024 * 1024, File::from_std(existing));
+        let mut candidate =
+            tokio::io::BufReader::with_capacity(1024 * 1024, File::from_std(candidate));
+        let mut left = [0_u8; 64 * 1024];
+        let mut right = [0_u8; 64 * 1024];
+        let mut remaining = length;
+        while remaining != 0 {
+            let count = usize::try_from(remaining.min(left.len() as u64))
+                .map_err(|_| invalid_package_path("legacy comparison length is invalid"))?;
+            existing.read_exact(&mut left[..count]).await?;
+            candidate.read_exact(&mut right[..count]).await?;
+            if left[..count] != right[..count] {
+                return Err(invalid_package_path(
+                    "existing file does not match the authenticated legacy package",
+                ));
+            }
+            remaining -= count as u64;
+        }
+        if existing.read(&mut left[..1]).await? != 0 || candidate.read(&mut right[..1]).await? != 0
+        {
+            return Err(invalid_package_path(
+                "legacy file changed during comparison",
+            ));
+        }
+    }
+    Ok(())
+}
+
 async fn protected_file_matches(file: std::fs::File, expected: &SegmentFile) -> io::Result<bool> {
     use tokio::io::AsyncReadExt;
 
@@ -1364,15 +1653,7 @@ async fn changed_jobs(
 ) -> io::Result<Vec<Job>> {
     let mut jobs = Vec::new();
     for (name, remote) in remote_files {
-        let components = package_path_components(name)?;
-        if components.iter().any(|component| {
-            component.eq_ignore_ascii_case(STREAMING_CACHE_FILE)
-                || component.eq_ignore_ascii_case(STREAMING_STAGED_CACHE_FILE)
-        }) {
-            return Err(invalid_package_path(
-                "package path uses a reserved streaming cache name",
-            ));
-        }
+        normalized_streaming_member(name)?;
         let matches_metadata = local_files.get(name).is_some_and(|local| {
             remote.keep_encrypted
                 && !remote.data_hashs.is_empty()
@@ -1431,6 +1712,7 @@ struct StreamingRun<'a> {
     url: &'a str,
     tx: &'a Sender<ProgressEvent>,
     expected: Option<StreamingIdentity>,
+    adopt_existing: bool,
 }
 
 struct StreamingIdentity {
@@ -1547,6 +1829,7 @@ pub struct StreamingRequest {
     pub parallel: Option<usize>,
     pub market: Option<String>,
     pub version_id: Option<String>,
+    pub adopt_existing: bool,
 }
 
 async fn open_regular_stream_source(path: &Path) -> io::Result<File> {
@@ -1582,6 +1865,7 @@ pub async fn run(
         parallel,
         market,
         version_id,
+        adopt_existing,
     } = request;
     let (tx, rx) = tokio::sync::mpsc::channel::<ProgressEvent>(256);
     if source.starts_with("file://") {
@@ -1624,6 +1908,7 @@ pub async fn run(
                     url: &worker_source,
                     tx: &tx,
                     expected: None,
+                    adopt_existing,
                 },
                 f,
                 l,
@@ -1773,6 +2058,7 @@ pub async fn run(
                     url: &url,
                     tx: &tx,
                     expected,
+                    adopt_existing,
                 },
                 http_file,
                 l,
@@ -1855,6 +2141,7 @@ where
         url,
         tx,
         expected,
+        adopt_existing,
     } = run;
     let out: &Path = Path::new(&destination);
 
@@ -1905,14 +2192,14 @@ where
             return false;
         }
     };
-    let key = match PinnedXvdKey::microsoft_retail() {
+    let retail_key = match PinnedXvdKey::microsoft_retail() {
         Ok(key) => key,
         Err(err) => {
             eprintln!("failed to load the pinned Microsoft package key: {err}");
             return false;
         }
     };
-    let authenticated = match AuthenticatedXvd::open_signed(remote_file, &key).await {
+    let authenticated = match AuthenticatedXvd::open_signed(remote_file, &retail_key).await {
         Ok(xvd) => xvd,
         Err(err) => {
             eprintln!("failed to authenticate package header: {err}");
@@ -1991,6 +2278,42 @@ where
         rfiles.extend(sfiles);
     }
 
+    if rfiles.is_empty() {
+        eprintln!("package has no installable files");
+        return false;
+    }
+    let ownership = match read_streaming_ownership(out) {
+        Ok(ownership) => ownership,
+        Err(err) => {
+            eprintln!("failed to read streaming ownership: {err}");
+            return false;
+        }
+    };
+    let content_id = remote_xvd.content_id();
+    if let Err(err) = validate_streaming_ownership_title(ownership.as_ref(), content_id) {
+        eprintln!("{err}");
+        return false;
+    }
+    if let Err(err) = check_streaming_collisions(out, ownership.as_ref(), &rfiles, adopt_existing) {
+        eprintln!("refusing streaming destination: {err}");
+        return false;
+    }
+    if adopt_existing
+        && ownership.is_none()
+        && let Err(err) = verify_legacy_streaming_cache(out, &retail_key, content_id).await
+    {
+        eprintln!("refusing legacy streaming cache: {err}");
+        return false;
+    }
+    let ownership_record = match streaming_ownership_record(content_id, ownership.as_ref(), &rfiles)
+    {
+        Ok(record) => record,
+        Err(err) => {
+            eprintln!("failed to prepare streaming ownership: {err}");
+            return false;
+        }
+    };
+
     let file = match open_package_input(out, STREAMING_CACHE_FILE) {
         Ok(file) => Some(File::from_std(file)),
         Err(error) if error.kind() == io::ErrorKind::NotFound => None,
@@ -2068,7 +2391,13 @@ where
         }
     };
 
-    let jobs = match changed_jobs(out, &rfiles, &lfiles).await {
+    let empty_local_files = HashMap::new();
+    let comparison_files = if adopt_existing {
+        &empty_local_files
+    } else {
+        &lfiles
+    };
+    let jobs = match changed_jobs(out, &rfiles, comparison_files).await {
         Ok(jobs) => jobs,
         Err(err) => {
             eprintln!("failed to validate installed package files: {err}");
@@ -2249,6 +2578,52 @@ where
         return false;
     }
 
+    match read_streaming_ownership(out) {
+        Ok(current) if current == ownership => {}
+        Ok(_) => {
+            eprintln!("streaming ownership changed before promotion");
+            return false;
+        }
+        Err(err) => {
+            eprintln!("failed to recheck streaming ownership: {err}");
+            return false;
+        }
+    }
+    if let Err(err) = check_streaming_collisions(out, ownership.as_ref(), &rfiles, adopt_existing) {
+        eprintln!("refusing streaming destination before promotion: {err}");
+        return false;
+    }
+    if adopt_existing
+        && ownership.is_none()
+        && let Err(err) = verify_legacy_streaming_cache(out, &retail_key, content_id).await
+    {
+        eprintln!("refusing changed legacy streaming cache: {err}");
+        return false;
+    }
+    if adopt_existing
+        && let Err(err) =
+            verify_legacy_streaming_files(out, &transaction_payload, ownership.as_ref(), &rfiles)
+                .await
+    {
+        eprintln!("refusing legacy streaming adoption: {err}");
+        return false;
+    }
+    let mut owner_file =
+        match open_transaction_file(&transaction_payload, STREAMING_OWNERSHIP_FILE, true) {
+            Ok(file) => file,
+            Err(err) => {
+                eprintln!("failed to stage streaming ownership: {err}");
+                return false;
+            }
+        };
+    if let Err(err) = owner_file
+        .write_all(&ownership_record)
+        .and_then(|()| owner_file.sync_all())
+    {
+        eprintln!("failed to sync streaming ownership: {err}");
+        return false;
+    }
+
     let cache_file = match std::fs::File::open(&cache_path) {
         Ok(file) => file,
         Err(err) => {
@@ -2284,6 +2659,10 @@ where
             return false;
         }
     };
+    if let Err(err) = append_streaming_ownership_entry(&mut entries) {
+        eprintln!("failed to prepare streaming ownership promotion: {err}");
+        return false;
+    }
     if let Err(err) = promote_owned_transaction(transaction, out, &mut entries) {
         eprintln!("failed to promote package cache: {err}");
         return false;
@@ -2320,6 +2699,149 @@ mod tests {
         assert!(super::validate_streaming_identity(content_id, "1.2.3.4", None).is_ok());
     }
 
+    fn ownership_fixture_files() -> HashMap<String, SegmentFile> {
+        HashMap::from([(
+            "game.bin".to_owned(),
+            SegmentFile {
+                offset: 0,
+                length: 5,
+                data_hashs: Vec::new(),
+                keep_encrypted: false,
+            },
+        )])
+    }
+
+    #[test]
+    fn streaming_ownership_refuses_unowned_collisions_and_round_trips() {
+        let temporary = tempfile::tempdir().unwrap();
+        let files = ownership_fixture_files();
+        let path = temporary.path().join("game.bin");
+        std::fs::write(&path, b"user!").unwrap();
+        assert!(super::check_streaming_collisions(temporary.path(), None, &files, false).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"user!");
+        assert!(super::check_streaming_collisions(temporary.path(), None, &files, true).is_ok());
+        let id = uuid::Uuid::from_u128(1);
+        let record = super::streaming_ownership_record(id, None, &files).unwrap();
+        std::fs::write(
+            temporary.path().join(super::STREAMING_OWNERSHIP_FILE),
+            record,
+        )
+        .unwrap();
+        let owner = super::read_streaming_ownership(temporary.path())
+            .unwrap()
+            .unwrap();
+        assert_eq!(owner.content_id, id);
+        assert!(super::validate_streaming_ownership_title(Some(&owner), id).is_ok());
+        assert!(
+            super::validate_streaming_ownership_title(Some(&owner), uuid::Uuid::from_u128(2))
+                .is_err()
+        );
+        assert!(
+            super::streaming_ownership_record(uuid::Uuid::from_u128(2), Some(&owner), &files)
+                .is_err()
+        );
+        assert!(owner.paths.contains("game.bin"));
+        assert!(
+            super::check_streaming_collisions(temporary.path(), Some(&owner), &files, false)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn streaming_ownership_rejects_truncated_and_reserved_records() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join(super::STREAMING_OWNERSHIP_FILE);
+        let id = uuid::Uuid::from_u128(1);
+        std::fs::write(
+            &path,
+            format!("{} {id}\ngame.bin", super::STREAMING_OWNERSHIP_HEADER),
+        )
+        .unwrap();
+        assert!(super::read_streaming_ownership(temporary.path()).is_err());
+        std::fs::write(
+            &path,
+            format!(
+                "{} {id}\n{}\n",
+                super::STREAMING_OWNERSHIP_HEADER,
+                super::STREAMING_CACHE_FILE
+            ),
+        )
+        .unwrap();
+        assert!(super::read_streaming_ownership(temporary.path()).is_err());
+    }
+
+    #[tokio::test]
+    async fn legacy_streaming_adoption_requires_byte_exact_staged_files() {
+        let temporary = tempfile::tempdir().unwrap();
+        let existing = temporary.path().join("existing");
+        let staged = temporary.path().join("staged");
+        std::fs::create_dir(&existing).unwrap();
+        std::fs::create_dir(&staged).unwrap();
+        std::fs::write(existing.join("game.bin"), b"user!").unwrap();
+        std::fs::write(staged.join("game.bin"), b"game!").unwrap();
+        let files = ownership_fixture_files();
+        assert!(
+            super::verify_legacy_streaming_files(&existing, &staged, None, &files)
+                .await
+                .is_err()
+        );
+        assert_eq!(std::fs::read(existing.join("game.bin")).unwrap(), b"user!");
+        std::fs::write(staged.join("game.bin"), b"user!").unwrap();
+        assert!(
+            super::verify_legacy_streaming_files(&existing, &staged, None, &files)
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_streaming_adoption_rejects_unsigned_cache() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join(super::STREAMING_CACHE_FILE);
+        std::fs::write(&path, vec![0; super::PAGE_SIZE]).unwrap();
+        let key = msixvc::signature::PinnedXvdKey::microsoft_retail().unwrap();
+        assert!(
+            super::verify_legacy_streaming_cache(temporary.path(), &key, uuid::Uuid::nil())
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::metadata(path).unwrap().len(),
+            super::PAGE_SIZE as u64
+        );
+    }
+
+    #[tokio::test]
+    async fn matching_legacy_files_can_be_adopted_transactionally() {
+        let temporary = tempfile::tempdir().unwrap();
+        let output = temporary.path().join("output");
+        std::fs::create_dir(&output).unwrap();
+        std::fs::write(output.join("game.bin"), b"game!").unwrap();
+        std::fs::write(output.join("unrelated.txt"), b"keep").unwrap();
+        let files = ownership_fixture_files();
+        assert!(super::check_streaming_collisions(&output, None, &files, false).is_err());
+        let (transaction, payload) = new_transaction(&output).unwrap();
+        std::fs::write(payload.join("game.bin"), b"game!").unwrap();
+        super::verify_legacy_streaming_files(&output, &payload, None, &files)
+            .await
+            .unwrap();
+        let id = uuid::Uuid::from_u128(1);
+        let record = super::streaming_ownership_record(id, None, &files).unwrap();
+        std::fs::write(payload.join(super::STREAMING_OWNERSHIP_FILE), record).unwrap();
+        let mut entries =
+            promotion_entries(&[("game.bin".to_owned(), "game.bin".to_owned())]).unwrap();
+        super::append_streaming_ownership_entry(&mut entries).unwrap();
+        super::promote_owned_transaction(transaction, &output, &mut entries).unwrap();
+        let owner = super::read_streaming_ownership(&output).unwrap().unwrap();
+        assert_eq!(owner.content_id, id);
+        assert!(owner.paths.contains("game.bin"));
+        assert_eq!(std::fs::read(output.join("game.bin")).unwrap(), b"game!");
+        assert_eq!(
+            std::fs::read(output.join("unrelated.txt")).unwrap(),
+            b"keep"
+        );
+    }
+
     #[tokio::test]
     async fn streaming_rejects_unsigned_source_before_promotion_or_license() {
         let temporary = tempfile::tempdir().unwrap();
@@ -2338,6 +2860,7 @@ mod tests {
             url: "file://unused",
             tx: &tx,
             expected: None,
+            adopt_existing: false,
         };
         assert!(!super::run_reader(run, input, super::PAGE_SIZE as u64).await);
         assert!(!destination.join(".xodus-streaming.msixvc").exists());
@@ -2765,6 +3288,7 @@ mod tests {
             "../escape",
             ".XODUS-STREAMING.MSIXVC",
             "dir/.xodus-streaming-tmp.msixvc",
+            ".XODUS-STREAMING-MEMBERS",
         ] {
             let remote = HashMap::from([(
                 name.to_owned(),
@@ -3360,6 +3884,109 @@ mod tests {
                 std::fs::read(output.join(super::MSIXVC2_OWNERSHIP_FILE)).unwrap(),
                 expected_ownership
             );
+            assert!(!transaction_root.exists());
+        }
+    }
+
+    #[test]
+    fn recovery_keeps_streaming_ownership_consistent_at_each_checkpoint() {
+        for checkpoint in 0..=11 {
+            let temporary = tempfile::tempdir().unwrap();
+            let output = temporary.path().join("output");
+            std::fs::create_dir(&output).unwrap();
+            std::fs::write(output.join("game.bin"), b"verified").unwrap();
+            std::fs::write(
+                output.join(super::STREAMING_OWNERSHIP_FILE),
+                b"old ownership",
+            )
+            .unwrap();
+            let (transaction, payload) = new_transaction(&output).unwrap();
+            std::fs::write(payload.join("game.bin"), b"replacement").unwrap();
+            std::fs::write(
+                payload.join(super::STREAMING_OWNERSHIP_FILE),
+                b"new ownership",
+            )
+            .unwrap();
+            let transaction_root = transaction.keep();
+            let mut entries =
+                promotion_entries(&[("game.bin".to_owned(), "game.bin".to_owned())]).unwrap();
+            super::append_streaming_ownership_entry(&mut entries).unwrap();
+            assert!(
+                promote_transaction_with_interruption(
+                    &transaction_root,
+                    &output,
+                    &mut entries,
+                    checkpoint
+                )
+                .is_err()
+            );
+            recover_transactions(&output).unwrap();
+            let (expected_file, expected_owner) = if checkpoint == 11 {
+                (b"replacement".as_slice(), b"new ownership".as_slice())
+            } else {
+                (b"verified".as_slice(), b"old ownership".as_slice())
+            };
+            assert_eq!(
+                std::fs::read(output.join("game.bin")).unwrap(),
+                expected_file
+            );
+            assert_eq!(
+                std::fs::read(output.join(super::STREAMING_OWNERSHIP_FILE)).unwrap(),
+                expected_owner
+            );
+            assert!(!transaction_root.exists());
+        }
+    }
+
+    #[test]
+    fn recovery_keeps_cache_files_and_streaming_ownership_consistent() {
+        for checkpoint in 0..=16 {
+            let temporary = tempfile::tempdir().unwrap();
+            let output = temporary.path().join("output");
+            std::fs::create_dir(&output).unwrap();
+            for name in [
+                "game.bin",
+                super::STREAMING_CACHE_FILE,
+                super::STREAMING_OWNERSHIP_FILE,
+            ] {
+                std::fs::write(output.join(name), b"old").unwrap();
+            }
+            let (transaction, payload) = new_transaction(&output).unwrap();
+            for name in [
+                "game.bin",
+                super::STREAMING_STAGED_CACHE_FILE,
+                super::STREAMING_OWNERSHIP_FILE,
+            ] {
+                std::fs::write(payload.join(name), b"new").unwrap();
+            }
+            let transaction_root = transaction.keep();
+            let mut entries = promotion_entries(&[
+                (
+                    super::STREAMING_STAGED_CACHE_FILE.to_owned(),
+                    super::STREAMING_CACHE_FILE.to_owned(),
+                ),
+                ("game.bin".to_owned(), "game.bin".to_owned()),
+            ])
+            .unwrap();
+            super::append_streaming_ownership_entry(&mut entries).unwrap();
+            assert!(
+                promote_transaction_with_interruption(
+                    &transaction_root,
+                    &output,
+                    &mut entries,
+                    checkpoint
+                )
+                .is_err()
+            );
+            recover_transactions(&output).unwrap();
+            let expected = if checkpoint == 16 { b"new" } else { b"old" };
+            for name in [
+                "game.bin",
+                super::STREAMING_CACHE_FILE,
+                super::STREAMING_OWNERSHIP_FILE,
+            ] {
+                assert_eq!(std::fs::read(output.join(name)).unwrap(), expected);
+            }
             assert!(!transaction_root.exists());
         }
     }

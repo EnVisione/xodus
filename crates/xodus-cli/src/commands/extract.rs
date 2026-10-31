@@ -10,6 +10,7 @@ pub async fn run(
     path: String,
     destination: String,
     market: String,
+    adopt_existing: bool,
 ) -> ExitCode {
     streaming::run(
         client,
@@ -21,6 +22,7 @@ pub async fn run(
             parallel: None,
             market: Some(market),
             version_id: None,
+            adopt_existing,
         },
     )
     .await

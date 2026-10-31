@@ -53,6 +53,11 @@ enum SubCommand {
         destination: String,
         #[arg(short, long)]
         market: Option<String>,
+        #[arg(
+            long,
+            help = "Claim existing files only after matching authenticated package output"
+        )]
+        adopt_existing: bool,
     },
     #[command(about = "Inspect a local MSIXVC2 archive without extracting it")]
     Inspect {
@@ -114,6 +119,11 @@ enum SubCommand {
         try_skip_ntfs: bool,
         #[arg(short, long)]
         parallel: Option<usize>,
+        #[arg(
+            long,
+            help = "Claim existing files only after matching authenticated package output"
+        )]
+        adopt_existing: bool,
         #[arg(short, long)]
         market: Option<String>,
         #[arg(
@@ -295,6 +305,7 @@ async fn run_inner(args: CliArgs) -> ExitCode {
             path,
             destination,
             market,
+            adopt_existing,
         } => {
             commands::extract::run(
                 &client,
@@ -302,6 +313,7 @@ async fn run_inner(args: CliArgs) -> ExitCode {
                 path,
                 destination,
                 market.unwrap_or("neutral".to_string()),
+                adopt_existing,
             )
             .await
         }
@@ -376,6 +388,7 @@ async fn run_inner(args: CliArgs) -> ExitCode {
             market,
             parallel,
             version_id,
+            adopt_existing,
         } => {
             commands::streaming::run(
                 &client,
@@ -387,6 +400,7 @@ async fn run_inner(args: CliArgs) -> ExitCode {
                     parallel,
                     market,
                     version_id,
+                    adopt_existing,
                 },
             )
             .await
