@@ -21,6 +21,10 @@ pub enum RSTError {
     InvalidResponseSignature(String),
     #[error("SOAP response signature is missing key information")]
     MissingResponseSignatureKeyInfo,
+    #[error("SOAP response signature structure is unsupported or ambiguous")]
+    InvalidResponseSignatureStructure,
+    #[error("SOAP response signature does not authenticate the body")]
+    UnsignedResponseBody,
     #[error("Response token collection is empty")]
     EmptyTokenCollection,
     #[error("Unsupported token response body")]
