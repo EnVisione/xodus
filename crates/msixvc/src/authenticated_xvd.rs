@@ -757,6 +757,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn authenticated_file_hashes_span_chunks_and_reject_late_tree_tampering() {
+        use crate::authenticated_reader::{AuthenticatedReader, MAX_AUTHENTICATED_RANGE_BYTES};
+
+        let pages = u32::try_from(MAX_AUTHENTICATED_RANGE_BYTES / PAGE_SIZE as u64 + 1).unwrap();
+        let (file, key, expected, layout) = fixture(pages);
+        let start = layout.user_data.start.to_bytes().0;
+        let length = u64::from(pages) * PAGE_SIZE as u64;
+        let mut reader = AuthenticatedReader::new(
+            AuthenticatedXvd::open(Cursor::new(file.clone()), &key, expected)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let hashes = reader.hashes_for_file(start, length).await.unwrap();
+        assert_eq!(hashes.len(), pages as usize);
+        assert_eq!(
+            hashes[0].as_slice(),
+            &Sha256::digest([0_u8; PAGE_SIZE])[..20]
+        );
+        assert_eq!(
+            hashes[(pages - 1) as usize].as_slice(),
+            &Sha256::digest([(pages - 1) as u8; PAGE_SIZE])[..20]
+        );
+        assert!(reader.hashes_for_file(start + 1, length).await.is_err());
+        assert!(reader.hashes_for_file(start, u64::MAX).await.is_err());
+
+        let leaf = layout.hash_tree.start.to_bytes().0
+            + layout.hash_tree_layout.level0.page_range.start.to_bytes().0
+            + u64::from((pages - 1) / HASH_ENTRIES_IN_PAGE) * PAGE_SIZE as u64;
+        let mut tampered = file;
+        tampered[leaf as usize] ^= 1;
+        let mut reader = AuthenticatedReader::new(
+            AuthenticatedXvd::open(Cursor::new(tampered), &key, expected)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(reader.hashes_for_file(start, length).await.is_err());
+    }
+
+    #[tokio::test]
     async fn authenticated_reader_seeks_after_a_cancelled_pending_read() {
         use crate::authenticated_reader::AuthenticatedReader;
         use std::sync::{

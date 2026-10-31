@@ -112,6 +112,40 @@ impl<R: AsyncRead + AsyncSeek + Unpin + Send + 'static> AuthenticatedReader<R> {
         Ok(hashes)
     }
 
+    /// Obtain signed hashes for an entire page-aligned file in bounded requests.
+    pub async fn hashes_for_file(&mut self, offset: u64, length: u64) -> io::Result<Vec<[u8; 20]>> {
+        let invalid = || {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "file range is outside the authenticated data extent",
+            )
+        };
+        let relative = offset
+            .checked_sub(self.layout.user_data.start.to_bytes().0)
+            .ok_or_else(invalid)?;
+        let count = length.div_ceil(PAGE_SIZE as u64);
+        let first = relative / PAGE_SIZE as u64;
+        if !relative.is_multiple_of(PAGE_SIZE as u64)
+            || first
+                .checked_add(count)
+                .is_none_or(|end| end > u64::from(self.layout.hash_tree_layout.level0.num_hashes.0))
+        {
+            return Err(invalid());
+        }
+        let mut hashes = Vec::new();
+        hashes
+            .try_reserve_exact(usize::try_from(count).map_err(|_| invalid())?)
+            .map_err(|_| io::Error::other("authenticated hash allocation failed"))?;
+        let mut done = 0_u64;
+        while done < length {
+            let chunk_len = (length - done).min(MAX_AUTHENTICATED_RANGE_BYTES);
+            let chunk_offset = offset.checked_add(done).ok_or_else(invalid)?;
+            hashes.extend(self.hashes_for_range(chunk_offset, chunk_len).await?);
+            done += chunk_len;
+        }
+        Ok(hashes)
+    }
+
     fn poll_pending(&mut self, cx: &mut Context<'_>) -> Poll<Option<PageBytes>> {
         let Some(pending) = self.pending.as_mut() else {
             return Poll::Ready(None);

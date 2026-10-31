@@ -4,7 +4,10 @@ use std::os::fd::{AsFd, AsRawFd};
 use std::path::Path;
 use std::process::{ExitCode, ExitStatus};
 
+use msixvc::authenticated_reader::AuthenticatedReader;
+use msixvc::authenticated_xvd::AuthenticatedXvd;
 use msixvc::layout::PAGE_SIZE;
+use msixvc::signature::PinnedXvdKey;
 use msixvc::xvd::{SegmentFile, XvdFile};
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
@@ -14,6 +17,7 @@ use rustix::io::{FdFlags, fcntl_getfd, fcntl_setfd};
 #[cfg(not(target_os = "linux"))]
 use tempfile::{tempdir, tempfile, tempfile_in};
 use tokio::fs::File;
+use tokio::io::{AsyncRead, AsyncSeek};
 use tokio::process::Command;
 use xodus::tokens::TokenManager;
 
@@ -27,6 +31,32 @@ fn expected_hash_count(length: u64) -> Result<usize, std::io::Error> {
             "package page count does not fit in memory index",
         )
     })
+}
+
+async fn authenticate_protected_segments<R>(
+    reader: &mut AuthenticatedReader<R>,
+    files: &mut HashMap<String, SegmentFile>,
+) -> io::Result<()>
+where
+    R: AsyncRead + AsyncSeek + Unpin + Send + 'static,
+{
+    for file in files.values_mut().filter(|file| file.keep_encrypted) {
+        if file.length == 0 {
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                "empty protected file",
+            ));
+        }
+        let hashes = reader.hashes_for_file(file.offset, file.length).await?;
+        if hashes.len() != expected_hash_count(file.length)? {
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                "protected file hash count mismatch",
+            ));
+        }
+        file.data_hashs = hashes;
+    }
+    Ok(())
 }
 
 fn child_exit_code(status: ExitStatus) -> ExitCode {
@@ -310,10 +340,36 @@ pub async fn run(
     };
     let final_path = out_absolute.join(".xodus-streaming.msixvc");
 
-    let mut file = match open_package_input(&out_absolute, ".xodus-streaming.msixvc") {
+    let file = match open_package_input(&out_absolute, ".xodus-streaming.msixvc") {
         Ok(file) => File::from_std(file),
         Err(err) => {
             eprintln!("failed to open {}: {err}", final_path.display());
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let key = match PinnedXvdKey::microsoft_retail() {
+        Ok(key) => key,
+        Err(err) => {
+            eprintln!("failed to load the pinned Microsoft package key: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let authenticated = match AuthenticatedXvd::open_signed(file, &key).await {
+        Ok(package) if package.layout().embedded_xvd.len.0 == 0 => package,
+        Ok(_) => {
+            eprintln!("embedded XVD verification is not supported");
+            return ExitCode::FAILURE;
+        }
+        Err(err) => {
+            eprintln!("failed to authenticate package header: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut file = match AuthenticatedReader::new(authenticated) {
+        Ok(file) => file,
+        Err(err) => {
+            eprintln!("failed to open authenticated package: {err}");
             return ExitCode::FAILURE;
         }
     };
@@ -358,19 +414,12 @@ pub async fn run(
                 return ExitCode::FAILURE;
             }
         };
-        for (n, sfile) in &sfiles {
-            let expected_hashes = match expected_hash_count(sfile.length) {
-                Ok(expected_hashes) => expected_hashes,
-                Err(error) => {
-                    eprintln!("invalid hash count for {n}: {error}");
-                    return ExitCode::FAILURE;
-                }
-            };
-            if expected_hashes != sfile.data_hashs.len() {
-                println!("{}: {} {}", n, sfile.offset, sfile.length);
-            }
-        }
         lfiles.extend(sfiles);
+    }
+
+    if let Err(err) = authenticate_protected_segments(&mut file, &mut lfiles).await {
+        eprintln!("failed to authenticate protected file hashes: {err}");
+        return ExitCode::FAILURE;
     }
 
     let entrypoint = match select_entrypoint(&lfiles, exe.as_deref()) {
@@ -574,6 +623,29 @@ mod tests {
             data_hashs: Vec::new(),
             keep_encrypted,
         }
+    }
+
+    #[tokio::test]
+    async fn run_rejects_unsigned_cache_before_license_or_launch() {
+        let temporary = tempfile::tempdir().expect("temporary directory must exist");
+        std::fs::write(
+            temporary.path().join(".xodus-streaming.msixvc"),
+            vec![0_u8; msixvc::layout::PAGE_SIZE],
+        )
+        .expect("unsigned cache must be writable");
+        let tokens = xodus::tokens::TokenManager::with_keychain_and_memory();
+
+        let result = super::run(
+            &reqwest::Client::new(),
+            &tokens,
+            temporary.path().to_string_lossy().into_owned(),
+            "nonexistent-test-wine".to_owned(),
+            None,
+            None,
+        )
+        .await;
+
+        assert_eq!(result, std::process::ExitCode::FAILURE);
     }
 
     #[test]
