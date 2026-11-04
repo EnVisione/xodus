@@ -2121,6 +2121,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn http_read_stops_after_bounded_retry_budget() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let expected_requests = super::HTTP_RETRY_LIMIT + 1;
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let server_count = Arc::clone(&request_count);
+        let server = tokio::spawn(async move {
+            for _ in 0..expected_requests {
+                let accepted =
+                    tokio::time::timeout(tokio::time::Duration::from_secs(5), listener.accept())
+                        .await;
+                let Ok(Ok((mut stream, _))) = accepted else {
+                    break;
+                };
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 1024];
+                loop {
+                    let read = tokio::time::timeout(
+                        tokio::time::Duration::from_secs(5),
+                        stream.read(&mut buffer),
+                    )
+                    .await
+                    .expect("retry request read must finish")
+                    .expect("retry request read must succeed");
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..read]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                if request.is_empty() {
+                    break;
+                }
+                server_count.fetch_add(1, Ordering::SeqCst);
+                stream
+                    .write_all(
+                        b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .await
+                    .expect("retry status response must write");
+            }
+        });
+
+        let url = format!("http://{address}/file");
+        let mut output = Vec::new();
+        let result = match HttpRead::open(reqwest::Client::new(), url, None::<fn(u64, u64)>).await {
+            Ok(mut reader) => reader.read_to_end(&mut output).await,
+            Err(error) => Err(error),
+        };
+        let error = result.expect_err("repeated transient statuses must exhaust the retry budget");
+        server.await.expect("bounded retry server must exit");
+
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert!(error.to_string().contains("retry budget exhausted"));
+        assert_eq!(request_count.load(Ordering::SeqCst), expected_requests);
+        assert!(output.is_empty());
+    }
+
+    #[tokio::test]
     async fn cached_backward_seek_uses_prefix() {
         let body = test_body();
         let server = spawn_server(body.clone(), None, 0).await.unwrap();
