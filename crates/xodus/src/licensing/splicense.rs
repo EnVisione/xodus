@@ -728,6 +728,24 @@ mod tests {
     }
 
     #[test]
+    fn clep_key_states_match_their_4096_byte_wire_layout() {
+        assert_eq!(std::mem::size_of::<ClepSignState>(), 4096);
+        assert_eq!(std::mem::align_of::<ClepSignState>(), 1);
+        assert_eq!(std::mem::size_of::<ClepHmacState>(), 4096);
+        assert_eq!(std::mem::align_of::<ClepHmacState>(), 1);
+
+        let bytes: [u8; 4096] = std::array::from_fn(|index| index as u8);
+
+        let sign_state: ClepSignState = zerocopy::transmute!(bytes);
+        let sign_state_bytes: [u8; 4096] = zerocopy::transmute!(sign_state);
+        assert_eq!(sign_state_bytes, bytes);
+
+        let hmac_state: ClepHmacState = zerocopy::transmute!(bytes);
+        let hmac_state_bytes: [u8; 4096] = zerocopy::transmute!(hmac_state);
+        assert_eq!(hmac_state_bytes, bytes);
+    }
+
+    #[test]
     fn clep_key_states_reject_unsupported_versions_without_panicking() {
         let sign_state = ClepSignState {
             version: 3,

@@ -147,10 +147,22 @@ pub(crate) fn build(data: &Bytes, extended: bool) -> Result<HierarchicalSchema, 
                 context: "resource path total",
             });
         }
-        paths.insert(Arc::from(path), name.index_property as u32);
+        insert_resource_path(&mut paths, path, name.index_property as u32)?;
     }
 
     Ok(HierarchicalSchema { paths })
+}
+
+fn insert_resource_path(
+    paths: &mut HashMap<Arc<str>, u32>,
+    path: String,
+    index_property: u32,
+) -> Result<(), PriParseError> {
+    if paths.contains_key(path.as_str()) {
+        return Err(PriParseError::DuplicateResourcePath { path });
+    }
+    paths.insert(Arc::from(path), index_property);
+    Ok(())
 }
 
 fn resolve_name(unicode_block: &[u8], ascii_block: &[u8], entry: &ResourceNameEntry) -> String {
@@ -287,5 +299,21 @@ mod tests {
         assert_eq!(schema.paths.get("Files"), None);
         assert_eq!(schema.paths.get("Files/icon.png"), Some(&20));
         assert_eq!(schema.paths.len(), 1);
+    }
+
+    #[test]
+    fn rejects_duplicate_full_resource_paths_without_overwriting() {
+        let mut paths = HashMap::new();
+        insert_resource_path(&mut paths, "Files/icon.png".to_owned(), 20)
+            .expect("first path must insert");
+
+        let error = insert_resource_path(&mut paths, "Files/icon.png".to_owned(), 21)
+            .expect_err("a duplicate full path must not overwrite its original index");
+
+        assert!(matches!(
+            error,
+            PriParseError::DuplicateResourcePath { path } if path == "Files/icon.png"
+        ));
+        assert_eq!(paths.get("Files/icon.png"), Some(&20));
     }
 }

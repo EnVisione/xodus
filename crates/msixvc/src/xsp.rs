@@ -778,7 +778,7 @@ impl XspFile {
             });
         }
 
-        let record_table_offset = u64::from(header.page_size);
+        let record_table_offset = u64::from(header.record_table_offset);
         if record_table_offset < XSP_HEADER_SIZE {
             return Err(XspFileParseError::RecordTableBeforeHeader {
                 offset: record_table_offset,
@@ -962,6 +962,7 @@ mod tests {
     async fn parses_valid_fixture_without_filesystem_access() {
         let xsp = parse(VALID_XSP).await.expect("valid synthetic XSP fixture");
 
+        assert_eq!(xsp.header.record_table_offset, 860);
         assert_eq!(xsp.entries.len(), 2);
     }
 
@@ -986,6 +987,16 @@ mod tests {
                 tokio::spawn(async move { XspFile::parse_file(TestReader::new(&bytes)).await })
                     .await;
             assert!(result.is_ok(), "XSP mutation {seed} panicked");
+        }
+    }
+
+    #[tokio::test]
+    async fn every_truncated_valid_xsp_prefix_is_rejected() {
+        for length in 0..VALID_XSP.len() {
+            assert!(
+                parse(&VALID_XSP[..length]).await.is_err(),
+                "truncated XSP prefix of {length} bytes was accepted"
+            );
         }
     }
 

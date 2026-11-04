@@ -562,6 +562,8 @@ pub enum UserPackageFilesParseError {
     },
     #[error("package file name contains invalid UTF-16")]
     InvalidFileName(#[source] std::string::FromUtf16Error),
+    #[error("package files table contains duplicate file name {name}")]
+    DuplicateFileName { name: String },
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -821,6 +823,8 @@ pub enum NtfsSegmentMetadataParseError {
     FileEndOverflow { file_offset: u64, file_length: u64 },
     #[error("NTFS file end {file_end} exceeds partition end {partition_end}")]
     FileBeyondPartition { file_end: u64, partition_end: u64 },
+    #[error("NTFS metadata contains duplicate file path {path:?}")]
+    DuplicateFilePath { path: String },
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -1790,6 +1794,9 @@ fn collect_ntfs_segment_files(
         if let Some((path, segment_file)) =
             segment_file_from_ntfs_report(&report, partition, only_plain)?
         {
+            if files.contains_key(&path) {
+                return Err(NtfsSegmentMetadataParseError::DuplicateFilePath { path });
+            }
             files.insert(path, segment_file);
         }
     }
@@ -1817,6 +1824,19 @@ struct ExtractFilePlan {
     page_start: u64,
     page_count: u64,
     page_loop_end: u64,
+}
+
+#[derive(Clone, Copy)]
+struct ExtractFilePreflight<'a> {
+    section: Option<&'a EncryptedSectionInfo>,
+    page_plan: ExtractFilePlan,
+}
+
+struct ExtractFileRequest<'a> {
+    sfile: &'a SegmentFile,
+    preflight: Option<ExtractFilePreflight<'a>>,
+    full_key: [u8; 32],
+    decrypt_all: bool,
 }
 
 fn download_file_end(file_offset: u64, file_length: u64) -> Result<u64, DownloadFileHttpError> {
@@ -1924,6 +1944,22 @@ fn extract_page_plan(
         page_count,
         page_loop_end,
     })
+}
+
+fn extract_file_preflight<'a>(
+    sections: &'a [EncryptedSectionInfo],
+    sfile: &SegmentFile,
+) -> Result<Option<ExtractFilePreflight<'a>>, ExtractFileError> {
+    if sfile.length == 0 {
+        return Ok(None);
+    }
+
+    let file_end = extract_file_end(sfile.offset, sfile.length)?;
+    let section = extract_encrypted_section(sections, sfile.offset, file_end)?;
+    let file_offset_in_section = extract_file_offset_in_section(sfile.offset, section)?;
+    let page_plan = extract_page_plan(file_offset_in_section, sfile.length)?;
+
+    Ok(Some(ExtractFilePreflight { section, page_plan }))
 }
 
 fn extract_progress_bytes(
@@ -2115,7 +2151,7 @@ fn validate_download_response_extent(
 }
 
 fn validate_download_response_encoding(headers: &HeaderMap) -> Result<(), DownloadFileHttpError> {
-    let Some(value) = headers.get(CONTENT_ENCODING) else {
+    let Some(value) = crate::http_error::single_header_value(headers, &CONTENT_ENCODING)? else {
         return Ok(());
     };
     let value = value
@@ -2244,9 +2280,7 @@ async fn open_download_response(
     })?;
 
     validate_download_response_scheme(&request_url, response.url())?;
-    let content_range = response
-        .headers()
-        .get(CONTENT_RANGE)
+    let content_range = crate::http_error::single_header_value(response.headers(), &CONTENT_RANGE)?
         .and_then(|value| value.to_str().ok());
     validate_download_response_encoding(response.headers())?;
     let total = validate_download_response_extent(
@@ -2254,9 +2288,7 @@ async fn open_download_response(
         request.start,
         request.end,
         content_range,
-        response
-            .headers()
-            .get(CONTENT_LENGTH)
+        crate::http_error::single_header_value(response.headers(), &CONTENT_LENGTH)?
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.parse::<u64>().ok()),
         expected_total,
@@ -2527,9 +2559,17 @@ impl XvdFile {
         Reader: AsyncRead + AsyncSeek + Unpin,
     {
         let mut buf = XvdHeader::buffer();
-        file.read_exact(&mut buf).await?;
         if let Some(key) = key {
-            key.verify_header(&buf)?;
+            let mut signed_header =
+                [0_u8; crate::models::xvd::XVD_HEADER_INCL_SIGNATURE_SIZE as usize];
+            file.read_exact(&mut signed_header).await?;
+            key.verify_header(&signed_header)?;
+            let first_page = signed_header
+                .get(..buf.len())
+                .ok_or(XvdSignatureError::TruncatedHeader)?;
+            buf.copy_from_slice(first_page);
+        } else {
+            file.read_exact(&mut buf).await?;
         }
         let xvd_header = XvdHeader::try_from_array(&buf)?;
 
@@ -2760,7 +2800,9 @@ impl XvdFile {
                 let s: u32 = user_data_package_file_entry.size;
                 let package_file = package_file_payload(user_data_offset, user_data_length, o, s)?;
                 let pfull_name = package_file_name(&user_data_package_file_entry.file_path)?;
-
+                if files.contains_key(&pfull_name) {
+                    return Err(UserPackageFilesParseError::DuplicateFileName { name: pfull_name });
+                }
                 files.insert(pfull_name, package_file);
             }
         }
@@ -3249,25 +3291,23 @@ impl XvdFile {
         &self,
         i: &mut Reader,
         out: &mut Writer,
-        sfile: &SegmentFile,
-        full_key: [u8; 32],
+        request: ExtractFileRequest<'_>,
         mut progress: Progress,
-        decrypt_all: bool,
     ) -> Result<(), ExtractFileError>
     where
         Reader: AsyncRead + Unpin,
         Writer: AsyncWrite + Unpin,
         Progress: FnMut(u64, u64),
     {
-        if sfile.length == 0 {
+        let ExtractFileRequest {
+            sfile,
+            preflight,
+            full_key,
+            decrypt_all,
+        } = request;
+        let Some(ExtractFilePreflight { section, page_plan }) = preflight else {
             return Ok(());
-        }
-
-        let file_end = extract_file_end(sfile.offset, sfile.length)?;
-        let section =
-            extract_encrypted_section(&self.encrypted_section_infos, sfile.offset, file_end)?;
-        let file_offset_in_section = extract_file_offset_in_section(sfile.offset, section)?;
-        let page_plan = extract_page_plan(file_offset_in_section, sfile.length)?;
+        };
 
         let decryption = if let Some(section) = section
             && (!sfile.keep_encrypted || decrypt_all)
@@ -3362,9 +3402,20 @@ impl XvdFile {
         Writer: AsyncWrite + Unpin,
         Progress: FnMut(u64, u64),
     {
+        let preflight = extract_file_preflight(&self.encrypted_section_infos, sfile)?;
         i.seek(std::io::SeekFrom::Start(sfile.offset)).await?;
-        self.extract_file_ex(i, out, sfile, full_key, progress, false)
-            .await
+        self.extract_file_ex(
+            i,
+            out,
+            ExtractFileRequest {
+                sfile,
+                preflight,
+                full_key,
+                decrypt_all: false,
+            },
+            progress,
+        )
+        .await
     }
 
     // Reader points to file content
@@ -3381,8 +3432,19 @@ impl XvdFile {
         Writer: AsyncWrite + Unpin,
         Progress: FnMut(u64, u64),
     {
-        self.extract_file_ex(i, out, sfile, full_key, progress, true)
-            .await
+        let preflight = extract_file_preflight(&self.encrypted_section_infos, sfile)?;
+        self.extract_file_ex(
+            i,
+            out,
+            ExtractFileRequest {
+                sfile,
+                preflight,
+                full_key,
+                decrypt_all: true,
+            },
+            progress,
+        )
+        .await
     }
 }
 
@@ -3436,6 +3498,8 @@ mod tests {
     };
 
     const XVD_HEADER_SIZE: usize = 4096;
+    const XVD_SIGNED_HEADER_SIZE: usize =
+        crate::models::xvd::XVD_HEADER_INCL_SIGNATURE_SIZE as usize;
     const XVC_INFO_OFFSET: usize = 0x4000;
     const XVC_INFO_SIZE: usize = 0xda8;
     const XVC_INFO_VERSION_OFFSET: usize = 0xd10;
@@ -3600,6 +3664,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn extract_file_rejects_truncated_page_before_output() {
+        let xvd = XvdFile::parse(SyntheticXvdReader::synthetic_xvd_with_region_count(0))
+            .await
+            .expect("synthetic XVD must parse");
+        let read_bytes = Arc::new(AtomicUsize::new(0));
+        let mut reader = SyntheticXvdReader {
+            inner: Cursor::new(vec![7_u8; PAGE_SIZE - 1]),
+            fail_seeks: false,
+            read_bytes: Arc::clone(&read_bytes),
+        };
+        let mut writer = RecordingAsyncWriter(Vec::new());
+        let file = SegmentFile {
+            offset: 0,
+            length: 1,
+            data_hashs: Vec::new(),
+            keep_encrypted: false,
+        };
+
+        let error = xvd
+            .extract_file(&mut reader, &mut writer, &file, [0_u8; 32], |_, _| {})
+            .await
+            .expect_err("a truncated extraction page must fail before output");
+
+        assert!(matches!(
+            error,
+            ExtractFileError::Io(error)
+                if error.kind() == std::io::ErrorKind::UnexpectedEof
+        ));
+        assert_eq!(read_bytes.load(Ordering::SeqCst), PAGE_SIZE - 1);
+        assert!(writer.0.is_empty());
+    }
+
+    #[tokio::test]
     async fn download_file_http_verifies_page_hash_before_promotion() {
         let xvd = XvdFile::parse(SyntheticXvdReader::synthetic_xvd_with_region_count(0))
             .await
@@ -3665,6 +3762,125 @@ mod tests {
             .expect("transient download test server must finish");
 
         assert_eq!(writer.0, vec![9]);
+    }
+
+    #[tokio::test]
+    async fn download_file_http_stops_after_bounded_transient_status_retries() {
+        let xvd = XvdFile::parse(SyntheticXvdReader::synthetic_xvd_with_region_count(0))
+            .await
+            .expect("synthetic XVD must parse");
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("retry-budget test server must bind");
+        let address = listener
+            .local_addr()
+            .expect("retry-budget test server address must be available");
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let server_request_count = Arc::clone(&request_count);
+        let server = tokio::spawn(async move {
+            for _ in 0..=super::DOWNLOAD_HTTP_RETRY_LIMIT {
+                let (mut stream, _) =
+                    tokio::time::timeout(tokio::time::Duration::from_secs(5), listener.accept())
+                        .await
+                        .expect("bounded retry request must arrive")
+                        .expect("bounded retry request must connect");
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 512];
+                tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
+                    loop {
+                        let read = tokio::io::AsyncReadExt::read(&mut stream, &mut buffer)
+                            .await
+                            .expect("bounded retry request must read");
+                        if read == 0 {
+                            break;
+                        }
+                        request.extend_from_slice(&buffer[..read]);
+                        if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                })
+                .await
+                .expect("bounded retry request headers must arrive");
+                server_request_count.fetch_add(1, Ordering::SeqCst);
+                tokio::io::AsyncWriteExt::write_all(
+                    &mut stream,
+                    b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .expect("transient response must write");
+            }
+        });
+
+        let mut writer = RecordingAsyncWriter(Vec::new());
+        let file = SegmentFile {
+            offset: 0,
+            length: 1,
+            data_hashs: vec![[0_u8; 20]],
+            keep_encrypted: false,
+        };
+        let result = tokio::time::timeout(
+            tokio::time::Duration::from_secs(5),
+            xvd.download_file_http(
+                &reqwest::Client::new(),
+                &format!("http://{address}/file"),
+                &mut writer,
+                &file,
+                [0_u8; 32],
+                |_, _| {},
+            ),
+        )
+        .await
+        .expect("download retry loop must remain bounded");
+
+        assert!(matches!(
+            result,
+            Err(DownloadFileHttpError::HttpRetryBudgetExhausted)
+        ));
+        assert_eq!(
+            request_count.load(Ordering::SeqCst),
+            super::DOWNLOAD_HTTP_RETRY_LIMIT + 1
+        );
+        assert!(
+            writer.0.is_empty(),
+            "transient failures must not write output"
+        );
+        server.await.expect("retry-budget test server must finish");
+    }
+
+    #[tokio::test]
+    async fn download_file_http_resumes_short_response_before_hashing_or_writing() {
+        let xvd = XvdFile::parse(SyntheticXvdReader::synthetic_xvd_with_region_count(0))
+            .await
+            .expect("synthetic XVD must parse");
+        let body = (0..PAGE_SIZE).map(|index| index as u8).collect::<Vec<_>>();
+        let digest = Sha256::digest(&body);
+        let mut page_hash = [0_u8; 20];
+        page_hash.copy_from_slice(&digest[..20]);
+        let (url, server) = spawn_truncated_page_download_server(body.clone(), 1024).await;
+        let mut writer = RecordingAsyncWriter(Vec::new());
+        let file = SegmentFile {
+            offset: 0,
+            length: 1,
+            data_hashs: vec![page_hash],
+            keep_encrypted: false,
+        };
+
+        xvd.download_file_http(
+            &reqwest::Client::new(),
+            &url,
+            &mut writer,
+            &file,
+            [0_u8; 32],
+            |_, _| {},
+        )
+        .await
+        .expect("a short response must resume before its page is verified and written");
+        server
+            .await
+            .expect("short-response download server must finish both requests");
+
+        assert_eq!(writer.0, vec![body[0]]);
     }
 
     #[tokio::test]
@@ -4034,6 +4250,72 @@ mod tests {
         (format!("http://{address}/file"), handle)
     }
 
+    async fn spawn_truncated_page_download_server(
+        body: Vec<u8>,
+        first_body_length: usize,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("truncated download test server must bind");
+        let address = listener
+            .local_addr()
+            .expect("truncated download test server address must be available");
+        let total = body.len();
+        let handle = tokio::spawn(async move {
+            for request_index in 0..2 {
+                let (mut stream, _) =
+                    tokio::time::timeout(tokio::time::Duration::from_secs(5), listener.accept())
+                        .await
+                        .expect("truncated download test server must receive both requests")
+                        .expect("truncated download test server must accept");
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 1024];
+                tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
+                    loop {
+                        let read = tokio::io::AsyncReadExt::read(&mut stream, &mut buffer)
+                            .await
+                            .expect("truncated download test request must read");
+                        if read == 0 {
+                            break;
+                        }
+                        request.extend_from_slice(&buffer[..read]);
+                        if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                })
+                .await
+                .expect("truncated download test request headers must arrive");
+
+                let (start, end, response_body, content_length) = if request_index == 0 {
+                    let request = String::from_utf8_lossy(&request);
+                    assert!(request.lines().any(|line| {
+                        line.eq_ignore_ascii_case(&format!("range: bytes=0-{}", total - 1))
+                    }));
+                    (0, total - 1, &body[..first_body_length], total)
+                } else {
+                    let start = first_body_length;
+                    let request = String::from_utf8_lossy(&request);
+                    assert!(request.lines().any(|line| {
+                        line.eq_ignore_ascii_case(&format!("range: bytes={start}-{}", total - 1))
+                    }));
+                    (start, total - 1, &body[start..], total - start)
+                };
+                let headers = format!(
+                    "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {start}-{end}/{total}\r\nContent-Length: {content_length}\r\nConnection: close\r\n\r\n"
+                );
+                tokio::io::AsyncWriteExt::write_all(&mut stream, headers.as_bytes())
+                    .await
+                    .expect("truncated download response headers must write");
+                tokio::io::AsyncWriteExt::write_all(&mut stream, response_body)
+                    .await
+                    .expect("truncated download response body must write");
+            }
+        });
+
+        (format!("http://{address}/file"), handle)
+    }
+
     struct SyntheticXvdReader {
         inner: Cursor<Vec<u8>>,
         fail_seeks: bool,
@@ -4210,6 +4492,30 @@ mod tests {
             (reader, read_bytes)
         }
 
+        fn synthetic_user_package_files_with_duplicate_entries() -> (Self, Arc<AtomicUsize>) {
+            let (mut reader, read_bytes) =
+                Self::synthetic_user_package_files(USER_DATA_HEADER_SIZE as u32, 2);
+            let entries_offset = USER_DATA_HEADER_SIZE + USER_DATA_PACKAGE_FILES_HEADER_SIZE;
+            let entry_size = USER_DATA_PACKAGE_FILES_HEADER_SIZE;
+            reader
+                .inner
+                .get_mut()
+                .resize(entries_offset + 2 * entry_size, 0);
+            for index in 0..2 {
+                let entry_offset = entries_offset + index * entry_size;
+                reader.inner.get_mut()[entry_offset..entry_offset + 2]
+                    .copy_from_slice(&('a' as u16).to_le_bytes());
+                reader.inner.get_mut()[entry_offset + USER_DATA_PACKAGE_FILE_SIZE_OFFSET
+                    ..entry_offset + USER_DATA_PACKAGE_FILE_SIZE_OFFSET + 4]
+                    .copy_from_slice(&0_u32.to_le_bytes());
+                reader.inner.get_mut()[entry_offset + USER_DATA_PACKAGE_FILE_OFFSET_OFFSET
+                    ..entry_offset + USER_DATA_PACKAGE_FILE_OFFSET_OFFSET + 4]
+                    .copy_from_slice(&0_u32.to_le_bytes());
+            }
+
+            (reader, read_bytes)
+        }
+
         fn synthetic_xvd_with_region_count(region_count: u32) -> Self {
             let mut reader = Self::synthetic_xvd_header(false);
             reader
@@ -4351,17 +4657,22 @@ mod tests {
                 .is_ok()
         );
 
-        let mut tampered = SyntheticXvdReader::synthetic_xvd_with_region_count(0);
-        *tampered.inner.get_mut() = signed_bytes;
-        tampered.inner.get_mut()[0x300] ^= 1;
-        let bytes_read = Arc::clone(&tampered.read_bytes);
-        assert!(matches!(
-            XvdFile::parse_with_verified_header(tampered, &key).await,
-            Err(XvdFileParseError::Signature(
+        for offset in [0x300, XVD_SIGNED_HEADER_SIZE - 1] {
+            let mut tampered = SyntheticXvdReader::synthetic_xvd_with_region_count(0);
+            *tampered.inner.get_mut() = signed_bytes.clone();
+            tampered.inner.get_mut()[offset] ^= 1;
+            let bytes_read = Arc::clone(&tampered.read_bytes);
+            let expected_error = if offset < XVD_HEADER_SIZE {
                 XvdSignatureError::InvalidSignature
-            ))
-        ));
-        assert_eq!(bytes_read.load(Ordering::Relaxed), XVD_HEADER_SIZE);
+            } else {
+                XvdSignatureError::NonZeroHeaderPadding
+            };
+            assert!(matches!(
+                XvdFile::parse_with_verified_header(tampered, &key).await,
+                Err(XvdFileParseError::Signature(error)) if error == expected_error
+            ));
+            assert_eq!(bytes_read.load(Ordering::Relaxed), XVD_SIGNED_HEADER_SIZE);
+        }
 
         let mut unsigned = SyntheticXvdReader::synthetic_xvd_with_region_count(0);
         unsigned.fail_seeks = true;
@@ -5929,6 +6240,34 @@ mod tests {
     }
 
     #[test]
+    fn ntfs_segment_files_reject_duplicate_paths() {
+        let drive = ntfs_drive_extents(500, 100, 100).unwrap();
+        let partition = ntfs_partition_extents(500, 100, drive, 0, 100, 100).unwrap();
+        let report = |file_record_number| NtfsStreamLayoutReport {
+            file_record_number,
+            path: "games/app.exe".to_string(),
+            resident_data: false,
+            resident_data_length: 0,
+            value_length: 20,
+            data_runs: vec![NtfsDataRunReport {
+                start: Some(10),
+                length: 20,
+            }],
+        };
+
+        let error = match collect_ntfs_segment_files(vec![report(1), report(2)], partition, false) {
+            Ok(_) => panic!("duplicate NTFS file paths must not overwrite earlier files"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            NtfsSegmentMetadataParseError::DuplicateFilePath { path }
+                if path == "games\\app.exe"
+        ));
+    }
+
+    #[test]
     fn download_preflight_rejects_file_end_overflow_before_request_or_write() {
         let error = download_file_end(u64::MAX, 1)
             .expect_err("overflowing download file extent must fail before request creation");
@@ -6290,6 +6629,49 @@ mod tests {
                 actual_length: 4_095,
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn download_response_rejects_duplicate_content_range_before_body_use() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("duplicate-header test server must bind");
+        let address = listener
+            .local_addr()
+            .expect("duplicate-header test server address must be available");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) =
+                tokio::time::timeout(tokio::time::Duration::from_secs(5), listener.accept())
+                    .await
+                    .expect("download request must arrive")
+                    .expect("download request must connect");
+            tokio::time::timeout(
+                tokio::time::Duration::from_secs(5),
+                tokio::io::AsyncWriteExt::write_all(
+                    &mut stream,
+                    b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-3/4\r\nContent-Range: bytes 0-3/4\r\nContent-Length: 4\r\nConnection: close\r\n\r\ntest",
+                ),
+            )
+            .await
+            .expect("duplicate-header response must not stall")
+            .expect("duplicate-header response must write");
+        });
+
+        let result = super::open_download_response(
+            &reqwest::Client::new(),
+            &format!("http://{address}/file"),
+            super::DownloadRequestRange { start: 0, end: 3 },
+            None,
+            tokio::time::Duration::from_secs(5),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "duplicate Content-Range headers must fail closed"
+        );
+        server
+            .await
+            .expect("duplicate-header test server must finish");
     }
 
     #[test]
@@ -6658,6 +7040,33 @@ mod tests {
 
         assert_eq!(files.len(), 1);
         assert!(files.contains_key("a"));
+    }
+
+    #[tokio::test]
+    async fn parse_user_package_files_rejects_duplicate_names() {
+        let mut xvd = XvdFile::parse(SyntheticXvdReader::synthetic_xvd_with_region_count(0))
+            .await
+            .expect("synthetic XVD must parse");
+        xvd.user_data_offset = 0;
+        xvd.header.user_data_length =
+            (USER_DATA_HEADER_SIZE + 3 * USER_DATA_PACKAGE_FILES_HEADER_SIZE) as u32;
+        let (reader, read_bytes) =
+            SyntheticXvdReader::synthetic_user_package_files_with_duplicate_entries();
+
+        let error = match xvd.parse_user_package_files(reader).await {
+            Ok(_) => panic!("duplicate package file names must be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            UserPackageFilesParseError::DuplicateFileName { name } if name == "a"
+        ));
+        assert_eq!(
+            read_bytes.load(Ordering::Relaxed),
+            USER_DATA_HEADER_SIZE + 3 * USER_DATA_PACKAGE_FILES_HEADER_SIZE,
+            "both declared entries must be inspected before the duplicate is reported"
+        );
     }
 
     #[tokio::test]

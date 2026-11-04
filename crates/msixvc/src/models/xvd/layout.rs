@@ -108,7 +108,7 @@ impl XvdHeader {
                 "unsupported hash tree page count",
             ));
         }
-        let hash_tree_layout = HashTreeLayout::new(hashed_pages);
+        let hash_tree_layout = HashTreeLayout::new(hashed_pages)?;
         if u64::from(hash_tree_layout.pages().0) != checked.hash_tree_page_count {
             return Err(io::Error::new(
                 ErrorKind::InvalidData,
@@ -319,9 +319,13 @@ impl Debug for HashTreeLayout {
 
 impl HashTreeLayout {
     /// `hashed_pages` must be in the range `1..MAX_HASHED_PAGES`.
-    fn new(hashed_pages: Pages) -> HashTreeLayout {
-        assert!(hashed_pages > Pages(0));
-        assert!(hashed_pages <= MAX_HASHED_PAGES);
+    fn new(hashed_pages: Pages) -> io::Result<HashTreeLayout> {
+        if hashed_pages == Pages(0) || hashed_pages > MAX_HASHED_PAGES {
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                "unsupported hash tree page count",
+            ));
+        }
 
         // The level 0 hash tree must always exist, even when there's a single hashed page.
         let level0_pages = cmp::max(hash_tree_level_pages(hashed_pages), Pages(1));
@@ -330,7 +334,12 @@ impl HashTreeLayout {
         let level3_pages = hash_tree_level_pages(level2_pages);
 
         // The level 3 hash tree level must be at most one page long.
-        assert!(level3_pages.0 <= 1);
+        if level3_pages.0 > 1 {
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                "hash tree top level exceeds one page",
+            ));
+        }
 
         // Compute the start, number of pages and number of hashes of each level.
 
@@ -364,13 +373,13 @@ impl HashTreeLayout {
             marker: PhantomData,
         };
 
-        HashTreeLayout {
+        Ok(HashTreeLayout {
             level3,
             level2,
             level1,
             level0,
             marker: PhantomData,
-        }
+        })
     }
 
     /// Returns the length of the hash tree section (in `Pages`).
@@ -383,12 +392,11 @@ impl HashTreeLayout {
     ///
     /// Add one to get the number of levels in the hash tree.
     #[inline]
-    pub fn top_level(&self) -> u8 {
+    pub fn top_level(&self) -> Option<u8> {
         [self.level0, self.level1, self.level2, self.level3]
             .into_iter()
             .position(|l| l.is_top())
-            .map(|n| n as u8)
-            .expect("level 0 must contain at least one hash entry")
+            .and_then(|level| u8::try_from(level).ok())
     }
 }
 
@@ -405,23 +413,30 @@ mod tests {
         assert_level(level, Pages(0), Pages(0));
     }
 
-    #[test]
-    #[should_panic]
-    fn test_empty() {
-        HashTreeLayout::new(Pages(0));
+    fn hash_tree_layout(hashed_pages: Pages) -> HashTreeLayout {
+        HashTreeLayout::new(hashed_pages).expect("test page count must produce a valid layout")
     }
 
     #[test]
-    #[should_panic]
-    fn test_overflow() {
-        HashTreeLayout::new(MAX_HASHED_PAGES + Pages(1));
+    fn test_empty_page_count_returns_invalid_data() {
+        let error = HashTreeLayout::new(Pages(0)).expect_err("empty tree must be rejected");
+
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn test_oversized_page_count_returns_invalid_data() {
+        let error = HashTreeLayout::new(MAX_HASHED_PAGES + Pages(1))
+            .expect_err("oversized tree must be rejected");
+
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
     }
 
     #[test]
     fn test_single_hashed_page() {
         // Even when there's a single hashed page, the level 0 tree level
         // must contain an entry.
-        let layout = HashTreeLayout::new(Pages(1));
+        let layout = hash_tree_layout(Pages(1));
         assert_empty_level(layout.level3);
         assert_empty_level(layout.level2);
         assert_empty_level(layout.level1);
@@ -429,10 +444,18 @@ mod tests {
     }
 
     #[test]
+    fn top_level_returns_none_when_no_level_contains_hashes() {
+        let mut layout = hash_tree_layout(Pages(1));
+        layout.level0.num_hashes = Pages(0);
+
+        assert_eq!(layout.top_level(), None);
+    }
+
+    #[test]
     fn test_level0_boundary() {
         // While there's less than `HASH_ENTRIES_IN_PAGE` pages, it fits within
         // a single level 0 page, so the level 1 hash tree is not needed.
-        let layout = HashTreeLayout::new(Pages(HASH_ENTRIES_IN_PAGE));
+        let layout = hash_tree_layout(Pages(HASH_ENTRIES_IN_PAGE));
         assert_empty_level(layout.level3);
         assert_empty_level(layout.level2);
         assert_empty_level(layout.level1);
@@ -440,7 +463,7 @@ mod tests {
 
         // If there's more than `HASH_ENTRIES_IN_PAGE` pages, it won't fit
         // within a single level 0 page.
-        let layout = HashTreeLayout::new(Pages(HASH_ENTRIES_IN_PAGE + 1));
+        let layout = hash_tree_layout(Pages(HASH_ENTRIES_IN_PAGE + 1));
         assert_empty_level(layout.level3);
         assert_empty_level(layout.level2);
 
@@ -454,7 +477,7 @@ mod tests {
 
     #[test]
     fn test_level1_boundary() {
-        let layout = HashTreeLayout::new(Pages(HASH_ENTRIES_IN_PAGE.pow(2)));
+        let layout = hash_tree_layout(Pages(HASH_ENTRIES_IN_PAGE.pow(2)));
         assert_empty_level(layout.level3);
         assert_empty_level(layout.level2);
         assert_level(layout.level1, Pages(1), Pages(HASH_ENTRIES_IN_PAGE));
@@ -464,7 +487,7 @@ mod tests {
             Pages(HASH_ENTRIES_IN_PAGE.pow(2)),
         );
 
-        let layout = HashTreeLayout::new(Pages(HASH_ENTRIES_IN_PAGE.pow(2) + 1));
+        let layout = hash_tree_layout(Pages(HASH_ENTRIES_IN_PAGE.pow(2) + 1));
         assert_empty_level(layout.level3);
         assert_level(layout.level2, Pages(1), Pages(2));
         assert_level(layout.level1, Pages(2), Pages(HASH_ENTRIES_IN_PAGE + 1));
@@ -477,7 +500,7 @@ mod tests {
 
     #[test]
     fn test_level2_boundary() {
-        let layout = HashTreeLayout::new(Pages(HASH_ENTRIES_IN_PAGE.pow(3)));
+        let layout = hash_tree_layout(Pages(HASH_ENTRIES_IN_PAGE.pow(3)));
         assert_empty_level(layout.level3);
         assert_level(layout.level2, Pages(1), Pages(HASH_ENTRIES_IN_PAGE));
         assert_level(
@@ -491,7 +514,7 @@ mod tests {
             Pages(HASH_ENTRIES_IN_PAGE.pow(3)),
         );
 
-        let layout = HashTreeLayout::new(Pages(HASH_ENTRIES_IN_PAGE.pow(3) + 1));
+        let layout = hash_tree_layout(Pages(HASH_ENTRIES_IN_PAGE.pow(3) + 1));
         assert_level(layout.level3, Pages(1), Pages(2));
         assert_level(layout.level2, Pages(2), Pages(HASH_ENTRIES_IN_PAGE + 1));
         assert_level(
@@ -508,7 +531,7 @@ mod tests {
 
     #[test]
     fn test_max() {
-        let layout = HashTreeLayout::new(MAX_HASHED_PAGES);
+        let layout = hash_tree_layout(MAX_HASHED_PAGES);
         assert_level(layout.level3, Pages(1), Pages(HASH_ENTRIES_IN_PAGE));
         assert_level(
             layout.level2,

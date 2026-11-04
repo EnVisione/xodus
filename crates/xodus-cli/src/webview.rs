@@ -41,10 +41,14 @@ pub trait SessionHandler {
     }
 }
 
+enum WebviewContent {
+    Url { url: String, headers: HeaderMap },
+    Html(String),
+}
+
 pub struct WebviewRequest {
     title: String,
-    url: String,
-    headers: HeaderMap,
+    content: WebviewContent,
 }
 
 pub struct RuntimeCommands {
@@ -107,8 +111,14 @@ impl WebviewRequest {
     fn new(title: impl Into<String>, url: String, headers: HeaderMap) -> Self {
         Self {
             title: title.into(),
-            url,
-            headers,
+            content: WebviewContent::Url { url, headers },
+        }
+    }
+
+    pub(crate) fn local_html(title: impl Into<String>, html: impl Into<String>) -> Self {
+        Self {
+            title: title.into(),
+            content: WebviewContent::Html(html.into()),
         }
     }
 }
@@ -380,11 +390,15 @@ fn create_session<T: SessionHandler>(
         .ok_or_else(|| std::io::Error::other("window was not initialized"))?;
     window.set_title(&request.title);
 
+    let mut builder = match request.content {
+        WebviewContent::Html(html) => WebViewBuilder::new().with_html(html),
+        WebviewContent::Url { url, headers } => {
+            WebViewBuilder::new().with_url(&url).with_headers(headers)
+        }
+    };
     let proxy_ipc = proxy.clone();
-    let builder = WebViewBuilder::new()
-            .with_url(&request.url)
+    builder = builder
             .with_user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64; MSAppHost/3.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/70.0.3538.102 Safari/537.36 Edge/18.26100")
-            .with_headers(request.headers)
             .with_initialization_script("window.external = {notify: window.ipc.postMessage }")
             .with_ipc_handler(move |request| {
                 let body = request.body();
@@ -475,13 +489,16 @@ mod tests {
     use super::{finalize_request, host_context_script, login_request};
 
     #[cfg(target_os = "linux")]
-    use super::should_disable_dmabuf_renderer;
+    use super::{WebviewContent, should_disable_dmabuf_renderer};
 
     #[test]
     fn login_request_encodes_query_parameters() {
         let request = login_request("client&id".to_string(), "en-US&x".to_string())
             .expect("login request must build");
-        let url = reqwest::Url::parse(&request.url).expect("login URL must parse");
+        let WebviewContent::Url { url, .. } = request.content else {
+            panic!("login request must navigate to its remote authentication URL");
+        };
+        let url = reqwest::Url::parse(&url).expect("login URL must parse");
         let query: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
 
         assert_eq!(url.scheme(), "https");
@@ -519,10 +536,21 @@ mod tests {
             "https://login.live.com/ppsecure/InlineConnect.srf?mkt=en-US".to_string(),
         )
         .expect("secure inline authentication URL must remain supported");
-        assert_eq!(
-            request.url,
-            "https://login.live.com/ppsecure/InlineConnect.srf?mkt=en-US"
-        );
+        assert!(matches!(
+            request.content,
+            WebviewContent::Url { ref url, .. }
+                if url == "https://login.live.com/ppsecure/InlineConnect.srf?mkt=en-US"
+        ));
+    }
+
+    #[test]
+    fn local_html_request_cannot_inherit_remote_url_headers() {
+        let request = super::WebviewRequest::local_html("status", "<main>complete</main>");
+        assert_eq!(request.title, "status");
+        assert!(matches!(
+            request.content,
+            WebviewContent::Html(html) if html == "<main>complete</main>"
+        ));
     }
 
     #[test]

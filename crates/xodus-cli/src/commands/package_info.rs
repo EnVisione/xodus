@@ -9,10 +9,14 @@ use xodus::tokens::TokenManager;
 use crate::commands::apply_xsp::open_regular_input;
 use crate::package::{PackageInfo, get_content_id, get_package_info};
 
-async fn signed_revision(path: &Path, expected_content_id: &str) -> io::Result<String> {
+async fn signed_revision(
+    path: &Path,
+    expected_content_id: &str,
+    verify_pages: bool,
+) -> io::Result<(String, Option<u32>)> {
     let file = open_regular_input(path).await?;
     let key = PinnedXvdKey::microsoft_retail().map_err(io::Error::other)?;
-    let package = AuthenticatedXvd::open_signed(file, &key)
+    let mut package = AuthenticatedXvd::open_signed(file, &key)
         .await
         .map_err(io::Error::other)?;
     let content_id = uuid::Uuid::parse_str(expected_content_id)
@@ -24,7 +28,13 @@ async fn signed_revision(path: &Path, expected_content_id: &str) -> io::Result<S
             "signed XVD content ID does not match the selected product",
         ));
     }
-    Ok(format!("{}.{}", header.package_version, header.pduid))
+    let revision = format!("{}.{}", header.package_version, header.pduid);
+    let verified_pages = if verify_pages {
+        Some(package.verify_all().await.map_err(io::Error::other)?)
+    } else {
+        None
+    };
+    Ok((revision, verified_pages))
 }
 
 fn validate_signed_metadata_version(expected: &str, actual: &str) -> io::Result<()> {
@@ -37,20 +47,46 @@ fn validate_signed_metadata_version(expected: &str, actual: &str) -> io::Result<
     Ok(())
 }
 
-fn write_info(mut output: impl Write, info: &PackageInfo, signed_header: bool) -> io::Result<()> {
+fn write_info(
+    mut output: impl Write,
+    info: &PackageInfo,
+    signed_header: bool,
+    verified_pages: Option<u32>,
+) -> io::Result<()> {
     writeln!(output, "Content ID: {}", info.content_id)?;
     writeln!(output, "Version ID: {}", info.version_id)?;
     writeln!(output, "Version: {}", info.version)?;
+    let hash_of_hashes_status = if info.hash_of_hashes_available {
+        "reported"
+    } else {
+        "not reported"
+    };
+    writeln!(output, "HashOfHashes metadata: {hash_of_hashes_status}")?;
     if signed_header {
         writeln!(
             output,
             "Signed XVD header matches Microsoft package metadata."
         )?;
-        writeln!(output, "Package data pages were not checked.")?;
+        match verified_pages {
+            Some(count) => {
+                writeln!(output, "Verified {count} hash-tree-covered XVD data pages.")?;
+                writeln!(
+                    output,
+                    "Mutable XVD data, header padding, and embedded XVDs are outside this verification scope."
+                )?;
+            }
+            None => writeln!(output, "Package data pages were not checked.")?,
+        }
     }
     writeln!(output, "Files:")?;
     for file in &info.files {
         write!(output, "  {} ({} bytes)", file.name, file.size)?;
+        let hash_status = if file.provider_sha256_available {
+            "available"
+        } else {
+            "not provided"
+        };
+        write!(output, " [provider SHA-256: {hash_status}]")?;
         if let Some(delta) = &file.delta_version_id {
             write!(output, " [source version ID: {delta}]")?;
         }
@@ -66,9 +102,14 @@ pub async fn run(
     market: Option<String>,
     version_id: Option<String>,
     from_xvd: Option<String>,
+    verify_pages: bool,
 ) -> ExitCode {
     if version_id.is_some() && from_xvd.is_some() {
         eprintln!("Choose either --version-id or --from-xvd.");
+        return ExitCode::FAILURE;
+    }
+    if verify_pages && from_xvd.is_none() {
+        eprintln!("--verify-pages requires --from-xvd.");
         return ExitCode::FAILURE;
     }
     let content_id = match get_content_id(client, product, market).await {
@@ -78,15 +119,15 @@ pub async fn run(
             return ExitCode::FAILURE;
         }
     };
-    let signed = match from_xvd {
-        Some(path) => match signed_revision(Path::new(&path), &content_id).await {
-            Ok(revision) => Some(revision),
+    let (signed, verified_pages) = match from_xvd {
+        Some(path) => match signed_revision(Path::new(&path), &content_id, verify_pages).await {
+            Ok((revision, verified_pages)) => (Some(revision), verified_pages),
             Err(error) => {
-                eprintln!("Could not verify XVD header: {error}");
+                eprintln!("Could not verify local XVD: {error}");
                 return ExitCode::FAILURE;
             }
         },
-        None => None,
+        None => (None, None),
     };
     let revision = signed.as_deref().or(version_id.as_deref());
     let info = match get_package_info(client, tokens, &content_id, revision).await {
@@ -102,7 +143,7 @@ pub async fn run(
         eprintln!("{error}");
         return ExitCode::FAILURE;
     }
-    if let Err(error) = write_info(io::stdout().lock(), &info, signed.is_some()) {
+    if let Err(error) = write_info(io::stdout().lock(), &info, signed.is_some(), verified_pages) {
         eprintln!("Could not write package information: {error}");
         return ExitCode::FAILURE;
     }
@@ -120,7 +161,7 @@ mod tests {
         let file = directory.path().join("unsigned.xvd");
         std::fs::write(&file, [0_u8; 4096]).unwrap();
         assert!(
-            signed_revision(&file, "00000000-0000-0000-0000-000000000001")
+            signed_revision(&file, "00000000-0000-0000-0000-000000000001", false)
                 .await
                 .is_err()
         );
@@ -139,18 +180,39 @@ mod tests {
             content_id: "content".into(),
             version_id: "revision".into(),
             version: "1.2.3.4.id".into(),
+            hash_of_hashes_available: false,
             files: vec![PackageInfoFile {
                 name: "update.xsp".into(),
                 size: 42,
+                provider_sha256_available: false,
                 delta_version_id: Some("old".into()),
             }],
         };
         let mut output = Vec::new();
-        write_info(&mut output, &info, true).unwrap();
+        write_info(&mut output, &info, true, None).unwrap();
         let output = String::from_utf8(output).unwrap();
         assert!(output.contains("Signed XVD header matches"));
         assert!(output.contains("Package data pages were not checked"));
         assert!(output.contains("source version ID: old"));
+        assert!(output.contains("provider SHA-256: not provided"));
+        assert!(output.contains("HashOfHashes metadata: not reported"));
         assert!(!output.contains("https://"));
+    }
+
+    #[test]
+    fn output_reports_page_verification_and_its_limits() {
+        let info = PackageInfo {
+            content_id: "content".into(),
+            version_id: "revision".into(),
+            version: "1.2.3.4.id".into(),
+            hash_of_hashes_available: false,
+            files: Vec::new(),
+        };
+        let mut output = Vec::new();
+        write_info(&mut output, &info, true, Some(42)).unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("Verified 42 hash-tree-covered XVD data pages."));
+        assert!(output.contains("Mutable XVD data, header padding, and embedded XVDs"));
+        assert!(!output.contains("Package data pages were not checked"));
     }
 }

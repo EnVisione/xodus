@@ -137,6 +137,7 @@ impl BinaryTryParse for Filetime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parse::BinaryTryFromSliceError;
 
     #[test]
     fn test_version_cmp() {
@@ -176,6 +177,22 @@ mod tests {
         let bytes = i64::MAX.to_le_bytes();
         let error = Filetime::try_from_slice(&bytes).expect_err("out of range FILETIME");
 
-        assert_eq!(error, FiletimeParseError::OutOfRange { filetime: i64::MAX });
+        assert!(matches!(
+            error,
+            BinaryTryFromSliceError::Parse(FiletimeParseError::OutOfRange { filetime: i64::MAX })
+        ));
+    }
+
+    #[test]
+    fn filetime_rejects_short_and_long_slices_without_panicking() {
+        for (bytes, actual) in [(&[][..], 0), (&[0; 9][..], 9)] {
+            assert!(matches!(
+                Filetime::try_from_slice(bytes),
+                Err(BinaryTryFromSliceError::InvalidLength {
+                    expected: 8,
+                    actual: found
+                }) if found == actual
+            ));
+        }
     }
 }

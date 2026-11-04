@@ -8,8 +8,12 @@ use uuid::Uuid;
 
 use crate::layout::PAGE_SIZE;
 use crate::models::xvd::layout::{HASH_ENTRIES_IN_PAGE, HASH_ENTRY_LENGTH, XvdLayout};
-use crate::models::xvd::{XvdHeader, XvdHeaderParseError};
+use crate::models::xvd::{XVD_HEADER_INCL_SIGNATURE_SIZE, XvdHeader, XvdHeaderParseError};
 use crate::signature::{PinnedXvdKey, XvdSignatureError};
+
+const MAX_AUTHENTICATED_FILE_PAGE_HASHES: u64 = 64_000_000;
+const SIGNED_XVD_HEADER_LEN: usize = XVD_HEADER_INCL_SIGNATURE_SIZE as usize;
+const SIGNED_XVD_HEADER_PAGES: usize = SIGNED_XVD_HEADER_LEN / PAGE_SIZE;
 
 /// Identity obtained independently of the package bytes.
 #[derive(Debug, Clone, Copy)]
@@ -52,11 +56,11 @@ pub struct AuthenticatedPage {
     pub unit: u32,
 }
 
-/// Authenticates hash-tree and data pages without retaining package content.
-/// Header padding, embedded XVDs, and mutable data are outside its coverage.
+/// Authenticates the signed header page, zero header padding, and hash-tree data pages without retaining package content.
+/// Embedded XVDs and mutable data are not exposed.
 pub struct AuthenticatedXvd<R> {
     reader: R,
-    header_page: [u8; PAGE_SIZE],
+    signed_header: Box<[u8; SIGNED_XVD_HEADER_LEN]>,
     header: XvdHeader,
     layout: XvdLayout,
     tree_pages: [Option<CachedPage>; 4],
@@ -86,16 +90,27 @@ impl<R: AsyncRead + AsyncSeek + Unpin> AuthenticatedXvd<R> {
         key: &PinnedXvdKey,
     ) -> Result<Self, AuthenticatedXvdError> {
         reader.seek(SeekFrom::Start(0)).await?;
-        let mut bytes = XvdHeader::buffer();
-        reader.read_exact(&mut bytes).await?;
-        key.verify_header(&bytes)?;
-        let header = XvdHeader::try_from_array(&bytes)?;
+        let mut signed_header = Vec::new();
+        signed_header
+            .try_reserve_exact(SIGNED_XVD_HEADER_LEN)
+            .map_err(|_| io::Error::other("signed XVD header allocation failed"))?;
+        signed_header.resize(SIGNED_XVD_HEADER_LEN, 0);
+        reader.read_exact(&mut signed_header).await?;
+        key.verify_header(&signed_header)?;
+        let mut header_bytes = XvdHeader::buffer();
+        let first_page = signed_header
+            .get(..PAGE_SIZE)
+            .ok_or(AuthenticatedXvdError::InvalidTreeLayout)?;
+        header_bytes.copy_from_slice(first_page);
+        let header = XvdHeader::try_from_array(&header_bytes)?;
         let layout = header.layout()?;
-        let mut header_page = [0_u8; PAGE_SIZE];
-        header_page.copy_from_slice(&bytes);
+        let signed_header = signed_header
+            .into_boxed_slice()
+            .try_into()
+            .map_err(|_| AuthenticatedXvdError::InvalidTreeLayout)?;
         Ok(Self {
             reader,
-            header_page,
+            signed_header,
             header,
             layout,
             tree_pages: std::array::from_fn(|_| None),
@@ -111,6 +126,134 @@ impl<R: AsyncRead + AsyncSeek + Unpin> AuthenticatedXvd<R> {
         self.layout
     }
 
+    /// Return truncated SHA-256 hashes for every page in the signed XVD file.
+    ///
+    /// The result is ordered by physical file page so it can be used by XSP's
+    /// block-oriented verifier. The header and hash-tree pages are read through
+    /// their authenticated regions; data-page hashes come directly from the
+    /// authenticated tree. Embedded XVDs, mutable regions, and gaps are not
+    /// represented by this list.
+    pub async fn authenticated_file_page_hashes(
+        &mut self,
+    ) -> Result<Vec<[u8; 20]>, AuthenticatedXvdError> {
+        self.ensure_no_unauthenticated_regions()?;
+
+        let header_start = self.layout.header.start.to_bytes().0;
+        let header_length = self.layout.header.len.0;
+        let header_end = header_start
+            .checked_add(header_length)
+            .ok_or(AuthenticatedXvdError::InvalidTreeLayout)?;
+        let tree_start = self.layout.hash_tree.start.to_bytes().0;
+        let tree_length = self.layout.hash_tree.len.0;
+        let data_start = self.layout.user_data.start.to_bytes().0;
+        let tree_end = tree_start
+            .checked_add(tree_length)
+            .ok_or(AuthenticatedXvdError::InvalidTreeLayout)?;
+        if header_start != 0
+            || header_length != SIGNED_XVD_HEADER_LEN as u64
+            || header_length != (SIGNED_XVD_HEADER_PAGES * PAGE_SIZE) as u64
+            || tree_start != header_end
+            || !tree_length.is_multiple_of(PAGE_SIZE as u64)
+            || tree_end != data_start
+        {
+            return Err(AuthenticatedXvdError::InvalidTreeLayout);
+        }
+
+        let tree_page_count = tree_length / PAGE_SIZE as u64;
+        let data_page_count = u64::from(self.layout.hash_tree_layout.level0.num_hashes.0);
+        let header_page_count = header_length / PAGE_SIZE as u64;
+        let file_page_count = tree_page_count
+            .checked_add(data_page_count)
+            .and_then(|count| count.checked_add(header_page_count))
+            .ok_or(AuthenticatedXvdError::InvalidTreeLayout)?;
+        if file_page_count > MAX_AUTHENTICATED_FILE_PAGE_HASHES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "XVD page-hash list exceeds the bounded XSP update limit",
+            )
+            .into());
+        }
+        let capacity = usize::try_from(file_page_count)
+            .map_err(|_| AuthenticatedXvdError::InvalidTreeLayout)?;
+        let mut hashes = Vec::new();
+        hashes
+            .try_reserve_exact(capacity)
+            .map_err(|_| io::Error::other("XVD page-hash allocation failed"))?;
+
+        let mut page = [0_u8; PAGE_SIZE];
+        for index in 0..header_page_count {
+            let offset = index
+                .checked_mul(PAGE_SIZE as u64)
+                .ok_or(AuthenticatedXvdError::InvalidTreeLayout)?;
+            self.read_authenticated_page(offset, &mut page).await?;
+            hashes.push(truncated_page_hash(&page)?);
+        }
+
+        for index in 0..tree_page_count {
+            let offset = tree_start
+                .checked_add(
+                    index
+                        .checked_mul(PAGE_SIZE as u64)
+                        .ok_or(AuthenticatedXvdError::InvalidTreeLayout)?,
+                )
+                .ok_or(AuthenticatedXvdError::InvalidTreeLayout)?;
+            self.read_authenticated_page(offset, &mut page).await?;
+            hashes.push(truncated_page_hash(&page)?);
+        }
+
+        for page_index in 0..u32::try_from(data_page_count)
+            .map_err(|_| AuthenticatedXvdError::InvalidTreeLayout)?
+        {
+            hashes.push(self.page_hash(page_index).await?);
+        }
+
+        if hashes.len() != capacity {
+            return Err(AuthenticatedXvdError::InvalidTreeLayout);
+        }
+        Ok(hashes)
+    }
+
+    async fn read_authenticated_page(
+        &mut self,
+        offset: u64,
+        page: &mut [u8; PAGE_SIZE],
+    ) -> Result<(), AuthenticatedXvdError> {
+        let length = self.read_at(offset, page).await?;
+        if length != PAGE_SIZE {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "authenticated XVD page is truncated",
+            )
+            .into());
+        }
+        Ok(())
+    }
+
+    /// Reject XVD regions that are outside the signed header and hash-tree coverage.
+    pub fn ensure_no_unauthenticated_regions(&self) -> io::Result<()> {
+        if self.layout.header.start.0 != 0
+            || self.layout.header.len.0 != SIGNED_XVD_HEADER_LEN as u64
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "XVD header extent does not match the signed header",
+            ));
+        }
+        if self.layout.embedded_xvd.len.0 != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "embedded XVD verification is not supported",
+            ));
+        }
+        if self.layout.mutable_data.len.0 != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "mutable XVD data is outside the authenticated hash tree",
+            ));
+        }
+        Ok(())
+    }
+
     /// Authenticate all data pages covered by this XVD's signed hash tree.
     pub async fn verify_all(&mut self) -> Result<u32, AuthenticatedXvdError> {
         let count = self.layout.hash_tree_layout.level0.num_hashes.0;
@@ -120,7 +263,7 @@ impl<R: AsyncRead + AsyncSeek + Unpin> AuthenticatedXvd<R> {
         Ok(count)
     }
 
-    /// Read one contiguous portion of a signed header, authenticated tree page, or
+    /// Read one contiguous portion of the signed header, authenticated tree page, or
     /// hash-covered data page. Unsupported gaps are rejected, not returned as bytes.
     pub async fn read_at(
         &mut self,
@@ -130,10 +273,21 @@ impl<R: AsyncRead + AsyncSeek + Unpin> AuthenticatedXvd<R> {
         if output.is_empty() {
             return Ok(0);
         }
-        if offset < PAGE_SIZE as u64 {
-            let start = offset as usize;
-            let length = output.len().min(PAGE_SIZE - start);
-            output[..length].copy_from_slice(&self.header_page[start..start + length]);
+        if offset < SIGNED_XVD_HEADER_LEN as u64 {
+            let start =
+                usize::try_from(offset).map_err(|_| AuthenticatedXvdError::InvalidTreeLayout)?;
+            let length = output.len().min(SIGNED_XVD_HEADER_LEN - start);
+            let end = start
+                .checked_add(length)
+                .ok_or(AuthenticatedXvdError::InvalidTreeLayout)?;
+            let source = self
+                .signed_header
+                .get(start..end)
+                .ok_or(AuthenticatedXvdError::InvalidTreeLayout)?;
+            let destination = output
+                .get_mut(..length)
+                .ok_or(AuthenticatedXvdError::InvalidTreeLayout)?;
+            destination.copy_from_slice(source);
             return Ok(length);
         }
         let tree_start = self.layout.hash_tree.start.to_bytes().0;
@@ -196,7 +350,17 @@ impl<R: AsyncRead + AsyncSeek + Unpin> AuthenticatedXvd<R> {
         page: u32,
     ) -> Result<AuthenticatedPage, AuthenticatedXvdError> {
         let (expected_hash, unit) = self.authenticated_entry(page).await?;
-        let offset = self.layout.user_data.start.to_bytes().0 + u64::from(page) * PAGE_SIZE as u64;
+        let offset = u64::from(page)
+            .checked_mul(PAGE_SIZE as u64)
+            .and_then(|page_offset| {
+                self.layout
+                    .user_data
+                    .start
+                    .to_bytes()
+                    .0
+                    .checked_add(page_offset)
+            })
+            .ok_or(AuthenticatedXvdError::InvalidTreeLayout)?;
         if self.next_data_page.take() != Some(page) {
             self.reader.seek(SeekFrom::Start(offset)).await?;
         }
@@ -222,12 +386,26 @@ impl<R: AsyncRead + AsyncSeek + Unpin> AuthenticatedXvd<R> {
         let leaf = self.tree_pages[0]
             .as_ref()
             .ok_or(AuthenticatedXvdError::InvalidTreeLayout)?;
-        let entry_offset = entry_indices[0] as usize * HASH_ENTRY_LENGTH;
-        let expected_hash: [u8; 20] = leaf.bytes[entry_offset..entry_offset + 20]
+        let entry_offset = usize::try_from(entry_indices[0])
+            .ok()
+            .and_then(|index| index.checked_mul(HASH_ENTRY_LENGTH))
+            .ok_or(AuthenticatedXvdError::InvalidTreeLayout)?;
+        let hash_end = entry_offset
+            .checked_add(20)
+            .ok_or(AuthenticatedXvdError::InvalidTreeLayout)?;
+        let unit_end = hash_end
+            .checked_add(4)
+            .ok_or(AuthenticatedXvdError::InvalidTreeLayout)?;
+        let expected_hash: [u8; 20] = leaf
+            .bytes
+            .get(entry_offset..hash_end)
+            .ok_or(AuthenticatedXvdError::InvalidTreeLayout)?
             .try_into()
             .map_err(|_| AuthenticatedXvdError::InvalidTreeLayout)?;
         let unit = u32::from_le_bytes(
-            leaf.bytes[entry_offset + 20..entry_offset + 24]
+            leaf.bytes
+                .get(hash_end..unit_end)
+                .ok_or(AuthenticatedXvdError::InvalidTreeLayout)?
                 .try_into()
                 .map_err(|_| AuthenticatedXvdError::InvalidTreeLayout)?,
         );
@@ -240,7 +418,10 @@ impl<R: AsyncRead + AsyncSeek + Unpin> AuthenticatedXvd<R> {
         if page >= levels[0].num_hashes.0 {
             return Err(AuthenticatedXvdError::PageOutOfBounds { page });
         }
-        let top = usize::from(tree.top_level());
+        let top = usize::from(
+            tree.top_level()
+                .ok_or(AuthenticatedXvdError::InvalidTreeLayout)?,
+        );
         let mut entry_indices = [0_u32; 4];
         let mut page_indices = [0_u32; 4];
         let mut current = page;
@@ -262,9 +443,20 @@ impl<R: AsyncRead + AsyncSeek + Unpin> AuthenticatedXvd<R> {
                 .as_ref()
                 .is_some_and(|cached| cached.index == index);
             if !cached {
-                let offset = self.layout.hash_tree.start.to_bytes().0
-                    + levels[level].page_range.start.to_bytes().0
-                    + u64::from(index) * PAGE_SIZE as u64;
+                let page_index = u64::from(levels[level].page_range.start.0)
+                    .checked_add(u64::from(index))
+                    .ok_or(AuthenticatedXvdError::InvalidTreeLayout)?;
+                let offset = page_index
+                    .checked_mul(PAGE_SIZE as u64)
+                    .and_then(|page_offset| {
+                        self.layout
+                            .hash_tree
+                            .start
+                            .to_bytes()
+                            .0
+                            .checked_add(page_offset)
+                    })
+                    .ok_or(AuthenticatedXvdError::InvalidTreeLayout)?;
                 self.next_data_page = None;
                 self.reader.seek(SeekFrom::Start(offset)).await?;
                 let mut bytes = [0_u8; PAGE_SIZE];
@@ -276,8 +468,18 @@ impl<R: AsyncRead + AsyncSeek + Unpin> AuthenticatedXvd<R> {
                     let parent = self.tree_pages[level + 1]
                         .as_ref()
                         .ok_or(AuthenticatedXvdError::InvalidTreeLayout)?;
-                    let offset = entry_indices[level + 1] as usize * HASH_ENTRY_LENGTH;
-                    digest[..20] == parent.bytes[offset..offset + 20]
+                    let offset = usize::try_from(entry_indices[level + 1])
+                        .ok()
+                        .and_then(|index| index.checked_mul(HASH_ENTRY_LENGTH))
+                        .ok_or(AuthenticatedXvdError::InvalidTreeLayout)?;
+                    let end = offset
+                        .checked_add(20)
+                        .ok_or(AuthenticatedXvdError::InvalidTreeLayout)?;
+                    let expected = parent
+                        .bytes
+                        .get(offset..end)
+                        .ok_or(AuthenticatedXvdError::InvalidTreeLayout)?;
+                    digest[..20] == expected[..]
                 };
                 if !valid {
                     return Err(AuthenticatedXvdError::TreeMismatch { level, page: index });
@@ -288,6 +490,16 @@ impl<R: AsyncRead + AsyncSeek + Unpin> AuthenticatedXvd<R> {
 
         Ok(entry_indices)
     }
+}
+
+fn truncated_page_hash(page: &[u8; PAGE_SIZE]) -> Result<[u8; 20], AuthenticatedXvdError> {
+    let digest = Sha256::digest(page);
+    let prefix = digest
+        .get(..20)
+        .ok_or(AuthenticatedXvdError::InvalidTreeLayout)?;
+    let mut hash = [0_u8; 20];
+    hash.copy_from_slice(prefix);
+    Ok(hash)
 }
 
 #[cfg(test)]
@@ -405,13 +617,50 @@ mod tests {
         (pair, key, expected, header, layout)
     }
 
+    fn signed_header(
+        pair: &RsaKeyPair,
+        header_page: &[u8; PAGE_SIZE],
+    ) -> [u8; SIGNED_XVD_HEADER_LEN] {
+        let mut header = [0_u8; SIGNED_XVD_HEADER_LEN];
+        header[..PAGE_SIZE].copy_from_slice(header_page);
+        let (signature, signed) =
+            header[..PAGE_SIZE].split_at_mut(crate::models::xvd::HEADER_SIGNATURE_SIZE as usize);
+        pair.sign(&RSA_PSS_SHA256, &SystemRandom::new(), signed, signature)
+            .expect("synthetic signature");
+        header
+    }
+
     fn fixture(pages: u32) -> (Vec<u8>, PinnedXvdKey, ExpectedXvdIdentity, XvdLayout) {
-        let (pair, key, expected, mut header, layout) = signing_fixture(pages);
+        fixture_with_untrusted_regions(pages, 0, 0)
+    }
+
+    fn fixture_with_untrusted_regions(
+        pages: u32,
+        embedded_xvd_length: u32,
+        mutable_page_count: u8,
+    ) -> (Vec<u8>, PinnedXvdKey, ExpectedXvdIdentity, XvdLayout) {
+        let (pair, key, expected, mut header, _) = signing_fixture(pages);
+        header[0x288..0x28c].copy_from_slice(&embedded_xvd_length.to_le_bytes());
+        header[0x470] = mutable_page_count;
+        let layout = XvdHeader::try_from_slice(&header)
+            .expect("synthetic header must parse")
+            .layout()
+            .expect("synthetic layout must be valid");
         let tree = &layout.hash_tree_layout;
         let data_start = layout.user_data.start.to_bytes().0 as usize;
         let leaf_start = (layout.hash_tree.start.to_bytes().0
             + tree.level0.page_range.start.to_bytes().0) as usize;
         let mut file = vec![0_u8; data_start + pages as usize * PAGE_SIZE];
+        if embedded_xvd_length > 0 {
+            let start = layout.embedded_xvd.start.to_bytes().0 as usize;
+            let end = start + embedded_xvd_length as usize;
+            file[start..end].fill(0xe1);
+        }
+        if mutable_page_count > 0 {
+            let start = layout.mutable_data.start.to_bytes().0 as usize;
+            let end = start + layout.mutable_data.len.0 as usize;
+            file[start..end].fill(0xd2);
+        }
         for index in 0..pages as usize {
             let start = data_start + index * PAGE_SIZE;
             file[start..start + PAGE_SIZE].fill(index as u8);
@@ -423,7 +672,7 @@ mod tests {
             file[entry + 20..entry + 24].copy_from_slice(&(index as u32).to_le_bytes());
         }
         let levels = [tree.level0, tree.level1, tree.level2, tree.level3];
-        for level in 1..=usize::from(tree.top_level()) {
+        for level in 1..=usize::from(tree.top_level().expect("valid tree layout")) {
             let child_start = (layout.hash_tree.start.to_bytes().0
                 + levels[level - 1].page_range.start.to_bytes().0)
                 as usize;
@@ -440,17 +689,15 @@ mod tests {
             }
         }
         let top_start = (layout.hash_tree.start.to_bytes().0
-            + levels[usize::from(tree.top_level())]
+            + levels[usize::from(tree.top_level().expect("valid tree layout"))]
                 .page_range
                 .start
                 .to_bytes()
                 .0) as usize;
         let root = Sha256::digest(&file[top_start..top_start + PAGE_SIZE]);
         header[0x240..0x260].copy_from_slice(&root);
-        let (signature, signed) = header.split_at_mut(512);
-        pair.sign(&RSA_PSS_SHA256, &SystemRandom::new(), signed, signature)
-            .expect("synthetic signature");
-        file[..PAGE_SIZE].copy_from_slice(&header);
+        let signed_header = signed_header(&pair, &header);
+        file[..SIGNED_XVD_HEADER_LEN].copy_from_slice(&signed_header);
         (file, key, expected, layout)
     }
 
@@ -478,10 +725,8 @@ mod tests {
         }
         let root = Sha256::digest(&file[leaf_start..leaf_start + PAGE_SIZE]);
         header[0x240..0x260].copy_from_slice(&root);
-        let (signature, signed) = header.split_at_mut(512);
-        pair.sign(&RSA_PSS_SHA256, &SystemRandom::new(), signed, signature)
-            .unwrap();
-        file[..PAGE_SIZE].copy_from_slice(&header);
+        let signed_header = signed_header(&pair, &header);
+        file[..SIGNED_XVD_HEADER_LEN].copy_from_slice(&signed_header);
         (file, key, expected, layout)
     }
 
@@ -560,7 +805,8 @@ mod tests {
 
     #[tokio::test]
     async fn random_access_returns_only_authenticated_regions() {
-        let (file, key, expected, layout) = fixture(HASH_ENTRIES_IN_PAGE + 1);
+        let (file, key, expected, layout) =
+            fixture_with_untrusted_regions(HASH_ENTRIES_IN_PAGE + 1, PAGE_SIZE as u32, 1);
         let mut xvd = AuthenticatedXvd::open(Cursor::new(file.clone()), &key, expected)
             .await
             .unwrap();
@@ -572,7 +818,7 @@ mod tests {
             + PAGE_SIZE as u64;
         let data_offset = layout.user_data.start.to_bytes().0
             + u64::from(HASH_ENTRIES_IN_PAGE) * PAGE_SIZE as u64;
-        for offset in [0, root_offset, leaf_offset, data_offset] {
+        for offset in [0, PAGE_SIZE as u64, root_offset, leaf_offset, data_offset] {
             let mut actual = [0_u8; 37];
             let length = xvd.read_at(offset + 13, &mut actual).await.unwrap();
             assert_eq!(length, actual.len());
@@ -581,7 +827,8 @@ mod tests {
         }
         let mut output = [0_u8; 8];
         assert!(matches!(
-            xvd.read_at(PAGE_SIZE as u64, &mut output).await,
+            xvd.read_at(layout.embedded_xvd.start.to_bytes().0, &mut output)
+                .await,
             Err(AuthenticatedXvdError::UnauthenticatedOffset { .. })
         ));
         let end = layout.user_data.start.to_bytes().0
@@ -606,7 +853,8 @@ mod tests {
 
     #[tokio::test]
     async fn random_access_never_exposes_tampered_tree_or_data() {
-        let (file, key, expected, layout) = fixture(HASH_ENTRIES_IN_PAGE + 1);
+        let (file, key, expected, layout) =
+            fixture_with_untrusted_regions(HASH_ENTRIES_IN_PAGE + 1, PAGE_SIZE as u32, 1);
         let leaf_offset = layout.hash_tree.start.to_bytes().0
             + layout.hash_tree_layout.level0.page_range.start.to_bytes().0
             + PAGE_SIZE as u64;
@@ -632,7 +880,8 @@ mod tests {
     async fn authenticated_reader_supports_seeking_without_exposing_gaps() {
         use crate::authenticated_reader::AuthenticatedReader;
 
-        let (file, key, expected, layout) = fixture(HASH_ENTRIES_IN_PAGE + 1);
+        let (file, key, expected, layout) =
+            fixture_with_untrusted_regions(HASH_ENTRIES_IN_PAGE + 1, PAGE_SIZE as u32, 1);
         let xvd = AuthenticatedXvd::open(Cursor::new(file.clone()), &key, expected)
             .await
             .unwrap();
@@ -661,9 +910,114 @@ mod tests {
             .seek(SeekFrom::Start(PAGE_SIZE as u64))
             .await
             .unwrap();
+        reader.read_exact(&mut data).await.unwrap();
+        assert_eq!(&data, &file[PAGE_SIZE..PAGE_SIZE + data.len()]);
+        reader
+            .seek(SeekFrom::Start(layout.embedded_xvd.start.to_bytes().0))
+            .await
+            .unwrap();
         assert!(reader.read(&mut data).await.is_err());
         reader.seek(SeekFrom::End(0)).await.unwrap();
         assert_eq!(reader.read(&mut data).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn authenticated_xvd_rejects_untrusted_offsets_without_modifying_output() {
+        let (file, key, expected, layout) = fixture_with_untrusted_regions(2, PAGE_SIZE as u32, 1);
+        let mut xvd = AuthenticatedXvd::open(Cursor::new(file), &key, expected)
+            .await
+            .unwrap();
+        let offsets = [
+            layout.embedded_xvd.start.to_bytes().0,
+            layout.mutable_data.start.to_bytes().0,
+        ];
+
+        for offset in offsets {
+            let mut output = [0x5a; 8];
+            let error = xvd.read_at(offset, &mut output).await.unwrap_err();
+
+            assert!(matches!(
+                error,
+                AuthenticatedXvdError::UnauthenticatedOffset { offset: rejected }
+                    if rejected == offset
+            ));
+            assert_eq!(output, [0x5a; 8]);
+        }
+    }
+
+    #[tokio::test]
+    async fn authenticated_xvd_rejects_complete_coverage_claims_with_unsigned_regions() {
+        for (embedded_xvd_length, mutable_page_count, message) in [
+            (PAGE_SIZE as u32, 0, "embedded XVD"),
+            (0, 1, "mutable XVD data"),
+        ] {
+            let (file, key, expected, _) =
+                fixture_with_untrusted_regions(2, embedded_xvd_length, mutable_page_count);
+            let xvd = AuthenticatedXvd::open(Cursor::new(file), &key, expected)
+                .await
+                .unwrap();
+
+            let error = xvd
+                .ensure_no_unauthenticated_regions()
+                .expect_err("unsigned XVD regions must not be accepted as fully authenticated");
+            assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+            assert!(error.to_string().contains(message));
+        }
+    }
+
+    #[tokio::test]
+    async fn authenticated_file_page_hashes_match_every_signed_physical_page() {
+        let (file, key, expected, _) = fixture(HASH_ENTRIES_IN_PAGE + 1);
+        assert_eq!(file.len() % PAGE_SIZE, 0);
+        let (pages, remainder) = file.as_chunks::<PAGE_SIZE>();
+        assert!(remainder.is_empty());
+        let expected_hashes: Vec<[u8; 20]> = pages
+            .iter()
+            .map(|page| {
+                let digest = Sha256::digest(page);
+                let mut hash = [0_u8; 20];
+                hash.copy_from_slice(&digest[..20]);
+                hash
+            })
+            .collect();
+        let mut xvd = AuthenticatedXvd::open(Cursor::new(file), &key, expected)
+            .await
+            .unwrap();
+
+        let hashes = xvd.authenticated_file_page_hashes().await.unwrap();
+
+        assert_eq!(hashes, expected_hashes);
+    }
+
+    #[tokio::test]
+    async fn authenticated_file_page_hashes_reject_unsigned_regions() {
+        let (file, key, expected, _) = fixture_with_untrusted_regions(2, PAGE_SIZE as u32, 0);
+        let mut xvd = AuthenticatedXvd::open(Cursor::new(file), &key, expected)
+            .await
+            .unwrap();
+
+        let error = xvd
+            .authenticated_file_page_hashes()
+            .await
+            .expect_err("page hashes must not cover unsigned XVD regions");
+
+        assert!(matches!(
+            error,
+            AuthenticatedXvdError::Io(error) if error.kind() == io::ErrorKind::Unsupported
+        ));
+    }
+
+    #[tokio::test]
+    async fn authenticated_xvd_rejects_out_of_bounds_page_indices() {
+        let (file, key, expected, _) = fixture(2);
+        let mut xvd = AuthenticatedXvd::open(Cursor::new(file), &key, expected)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            xvd.read_page(u32::MAX).await,
+            Err(AuthenticatedXvdError::PageOutOfBounds { page: u32::MAX })
+        ));
     }
 
     #[tokio::test]
@@ -977,7 +1331,10 @@ mod tests {
         for pages in [1, HASH_ENTRIES_IN_PAGE.pow(2) + 1] {
             let (file, key, expected, layout) = fixture(pages);
             assert_eq!(
-                layout.hash_tree_layout.top_level(),
+                layout
+                    .hash_tree_layout
+                    .top_level()
+                    .expect("valid tree layout"),
                 if pages == 1 { 0 } else { 2 }
             );
             let mut xvd = AuthenticatedXvd::open(Cursor::new(file), &key, expected)
@@ -996,7 +1353,7 @@ mod tests {
         let pages = HASH_ENTRIES_IN_PAGE.pow(3) + 1;
         let (pair, key, expected, mut header, layout) = signing_fixture(pages);
         let tree = &layout.hash_tree_layout;
-        assert_eq!(tree.top_level(), 3);
+        assert_eq!(tree.top_level(), Some(3));
         let levels = [tree.level0, tree.level1, tree.level2, tree.level3];
         let target = pages - 1;
         let data = [0x5a; PAGE_SIZE];
@@ -1026,10 +1383,12 @@ mod tests {
             sparse.insert(offset, tree_page);
         }
         header[0x240..0x260].copy_from_slice(&digest);
-        let (signature, signed) = header.split_at_mut(512);
-        pair.sign(&RSA_PSS_SHA256, &SystemRandom::new(), signed, signature)
-            .expect("synthetic signature");
-        sparse.insert(0, header);
+        let signed_header = signed_header(&pair, &header);
+        let (header_pages, remainder) = signed_header.as_chunks::<PAGE_SIZE>();
+        assert!(remainder.is_empty());
+        for (index, page) in header_pages.iter().copied().enumerate() {
+            sparse.insert((index * PAGE_SIZE) as u64, page);
+        }
 
         let reader = SparseReader {
             pages: sparse.clone(),

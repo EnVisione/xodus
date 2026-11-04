@@ -12,6 +12,7 @@ use std::collections::HashMap;
 
 use bytes::Bytes;
 
+use crate::parse::BinaryParse;
 use crate::resources::error::PriParseError;
 use crate::resources::structs::{
     Candidate, ItemInfoEntry, ItemInfoEntryExt, ItemInfoGroupEntry, ItemInfoGroupEntryExt,
@@ -117,14 +118,33 @@ pub(crate) fn build(data: &Bytes) -> Result<ResourceMap, PriParseError> {
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    let mut iteminfos: Vec<(u32, u32)> = (0..header.iteminfo_table_entries)
-        .map(|_| {
-            cursor
-                .read::<ItemInfoEntry>()
-                .ok_or(PriParseError::truncated("iteminfo entry"))
-                .map(|e| (e.decision_index as u32, e.first_candidate_index as u32))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let iteminfo_count = usize::try_from(header.iteminfo_table_entries).map_err(|_| {
+        PriParseError::ResourceLimit {
+            context: "iteminfo entries",
+        }
+    })?;
+    let iteminfo_table_length =
+        iteminfo_count
+            .checked_mul(ItemInfoEntry::SIZE)
+            .ok_or(PriParseError::ResourceLimit {
+                context: "iteminfo entries",
+            })?;
+    let iteminfo_table = cursor
+        .take(iteminfo_table_length)
+        .ok_or(PriParseError::truncated("iteminfo entry"))?;
+    let mut iteminfos = Vec::new();
+    iteminfos
+        .try_reserve_exact(iteminfo_count)
+        .map_err(|_| PriParseError::ResourceLimit {
+            context: "iteminfo entries",
+        })?;
+    for entry_bytes in iteminfo_table.as_chunks::<{ ItemInfoEntry::SIZE }>().0 {
+        let entry = ItemInfoEntry::from_slice(entry_bytes);
+        iteminfos.push((
+            u32::from(entry.decision_index),
+            u32::from(entry.first_candidate_index),
+        ));
+    }
 
     // The table extension block's 12-byte header is entirely omitted  when its declared length is zero
     let table_extension = if header.table_extension_block_length > 0 {
@@ -157,22 +177,42 @@ pub(crate) fn build(data: &Bytes) -> Result<ResourceMap, PriParseError> {
         iteminfos.push((e.decision_index, e.first_candidate_index));
     }
 
-    let candidate_entries = (0..header.number_of_candidates)
-        .map(|_| {
-            cursor
-                .read::<Candidate>()
-                .ok_or(PriParseError::truncated("candidate"))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let candidate_count =
+        usize::try_from(header.number_of_candidates).map_err(|_| PriParseError::ResourceLimit {
+            context: "candidate entries",
+        })?;
+    let candidate_table_length =
+        candidate_count
+            .checked_mul(Candidate::SIZE)
+            .ok_or(PriParseError::ResourceLimit {
+                context: "candidate entries",
+            })?;
+    let candidate_table = cursor
+        .take(candidate_table_length)
+        .ok_or(PriParseError::truncated("candidate"))?;
+    let mut candidate_entries = Vec::new();
+    candidate_entries
+        .try_reserve_exact(candidate_count)
+        .map_err(|_| PriParseError::ResourceLimit {
+            context: "candidate entries",
+        })?;
+    for candidate_bytes in candidate_table.as_chunks::<{ Candidate::SIZE }>().0 {
+        candidate_entries.push(Candidate::from_slice(candidate_bytes));
+    }
     let embedded_data = cursor.take_bytes(
         header.embedded_data_block_length as usize,
         "embedded data block",
     )?;
 
-    let candidates = candidate_entries
-        .into_iter()
-        .map(|c| resolve_candidate(c, &embedded_data))
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut candidates = Vec::new();
+    candidates
+        .try_reserve_exact(candidate_entries.len())
+        .map_err(|_| PriParseError::ResourceLimit {
+            context: "candidate value allocation",
+        })?;
+    for candidate in candidate_entries {
+        candidates.push(resolve_candidate(candidate, &embedded_data)?);
+    }
 
     let mut items = HashMap::new();
     let mut item_count = 0_usize;
@@ -206,6 +246,9 @@ pub(crate) fn build(data: &Bytes) -> Result<ResourceMap, PriParseError> {
             let index_property = first_index_property
                 .checked_add(offset)
                 .ok_or(PriParseError::truncated("item index overflow"))?;
+            if items.contains_key(&index_property) {
+                return Err(PriParseError::DuplicateResourceItemIndexProperty { index_property });
+            }
             let iteminfo_index = first_iteminfo_index
                 .checked_add(offset)
                 .ok_or(PriParseError::truncated("iteminfo index overflow"))?
@@ -414,5 +457,55 @@ mod tests {
             } => assert_eq!(*referenced_file_index, 1),
             other => panic!("expected external candidate, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn rejects_duplicate_item_index_properties_in_extended_table() {
+        let mut data = sample_section().to_vec();
+        let extended_item_to_group_offset = 64;
+        data[extended_item_to_group_offset..extended_item_to_group_offset + 4]
+            .copy_from_slice(&20_u32.to_le_bytes());
+
+        let error = build(&Bytes::from(data))
+            .expect_err("duplicate item index properties must fail instead of overwrite");
+
+        assert!(matches!(
+            error,
+            PriParseError::DuplicateResourceItemIndexProperty { index_property: 20 }
+        ));
+    }
+
+    #[test]
+    fn rejects_truncated_iteminfo_table() {
+        let mut data = vec![0u8; 32];
+        data[16..20].copy_from_slice(&u32::MAX.to_le_bytes());
+
+        let result = build(&Bytes::from(data));
+
+        assert!(matches!(
+            result,
+            Err(PriParseError::Truncated {
+                context: "iteminfo entry"
+            }) | Err(PriParseError::ResourceLimit {
+                context: "iteminfo entries"
+            })
+        ));
+    }
+
+    #[test]
+    fn rejects_truncated_candidate_table() {
+        let mut data = vec![0u8; 32];
+        data[20..24].copy_from_slice(&u32::MAX.to_le_bytes());
+
+        let result = build(&Bytes::from(data));
+
+        assert!(matches!(
+            result,
+            Err(PriParseError::Truncated {
+                context: "candidate"
+            }) | Err(PriParseError::ResourceLimit {
+                context: "candidate entries"
+            })
+        ));
     }
 }

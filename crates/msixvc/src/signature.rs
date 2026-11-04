@@ -1,10 +1,14 @@
 use aws_lc_rs::signature::{RSA_PSS_2048_8192_SHA256, RsaPublicKeyComponents};
 use sha2::{Digest, Sha256};
 
+use crate::layout::PAGE_SIZE;
+use crate::models::xvd::{HEADER_SIGNATURE_SIZE, XVD_HEADER_INCL_SIGNATURE_SIZE};
+
 const BCRYPT_HEADER_LEN: usize = 24;
 const RSA_MODULUS_LEN: usize = 512;
-const SIGNATURE_LEN: usize = 512;
-const SIGNED_PAGE_LEN: usize = 4096;
+const SIGNATURE_LEN: usize = HEADER_SIGNATURE_SIZE as usize;
+const SIGNED_HEADER_LEN: usize = XVD_HEADER_INCL_SIGNATURE_SIZE as usize;
+const SIGNED_HEADER_PAGE_LEN: usize = PAGE_SIZE;
 
 /// SHA-256 of the retail gaming XVD signing key's BCrypt public-key blob.
 pub const MICROSOFT_RETAIL_XVD_KEY_SHA256: [u8; 32] = [
@@ -17,6 +21,7 @@ pub const MICROSOFT_RETAIL_XVD_KEY_SHA256: [u8; 32] = [
 pub struct PinnedXvdKey {
     modulus: [u8; RSA_MODULUS_LEN],
     exponent: Vec<u8>,
+    fingerprint_sha256: [u8; 32],
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -25,12 +30,14 @@ pub enum XvdSignatureError {
     FingerprintMismatch,
     #[error("the public key is not a supported RSA-4096 public key blob")]
     InvalidPublicKey,
-    #[error("the XVD header page is truncated")]
+    #[error("the signed XVD header is truncated")]
     TruncatedHeader,
     #[error("the XVD header is unsigned")]
     UnsignedHeader,
     #[error("the XVD header signature is invalid")]
     InvalidSignature,
+    #[error("the XVD header has nonzero bytes outside the signed page")]
+    NonZeroHeaderPadding,
 }
 
 impl PinnedXvdKey {
@@ -92,16 +99,33 @@ impl PinnedXvdKey {
         Ok(Self {
             modulus,
             exponent: exponent.to_vec(),
+            fingerprint_sha256: *expected_sha256,
         })
     }
 
-    /// Verify the first XVD page with RSA-PSS SHA-256 and a 32-byte salt.
+    /// Return the SHA-256 pin that was checked when this key was constructed.
+    pub fn fingerprint_sha256(&self) -> [u8; 32] {
+        self.fingerprint_sha256
+    }
+
+    /// Verify the signed XVD header page and require the remaining header padding to be zero.
     /// This does not validate package identity or any page in the hash tree.
     pub fn verify_header(&self, header: &[u8]) -> Result<(), XvdSignatureError> {
-        let page = header
-            .get(..SIGNED_PAGE_LEN)
+        let header_region = header
+            .get(..SIGNED_HEADER_LEN)
             .ok_or(XvdSignatureError::TruncatedHeader)?;
-        let (signature, signed) = page.split_at(SIGNATURE_LEN);
+        let signed_page = header_region
+            .get(..SIGNED_HEADER_PAGE_LEN)
+            .ok_or(XvdSignatureError::TruncatedHeader)?;
+        if header_region
+            .get(SIGNED_HEADER_PAGE_LEN..)
+            .ok_or(XvdSignatureError::TruncatedHeader)?
+            .iter()
+            .any(|byte| *byte != 0)
+        {
+            return Err(XvdSignatureError::NonZeroHeaderPadding);
+        }
+        let (signature, signed) = signed_page.split_at(SIGNATURE_LEN);
         if signature.iter().all(|byte| *byte == 0) {
             return Err(XvdSignatureError::UnsignedHeader);
         }
@@ -126,7 +150,7 @@ mod tests {
     }
 
     #[test]
-    fn signed_header_requires_pinned_key_and_unmodified_signed_page() {
+    fn signed_header_requires_pinned_key_and_unmodified_signed_extent() {
         assert!(PinnedXvdKey::microsoft_retail().is_ok());
         let pair = RsaKeyPair::generate(KeySize::Rsa4096).expect("synthetic key generation");
         let public = pair.public_key();
@@ -158,26 +182,32 @@ mod tests {
             Err(XvdSignatureError::FingerprintMismatch)
         ));
 
-        let mut page = [0u8; SIGNED_PAGE_LEN];
-        page[SIGNATURE_LEN..].fill(0x42);
-        let (signature, signed) = page.split_at_mut(SIGNATURE_LEN);
+        let mut header = [0u8; SIGNED_HEADER_LEN];
+        header[SIGNATURE_LEN..SIGNED_HEADER_PAGE_LEN].fill(0x42);
+        let (signature, signed) = header[..SIGNED_HEADER_PAGE_LEN].split_at_mut(SIGNATURE_LEN);
         pair.sign(&RSA_PSS_SHA256, &SystemRandom::new(), signed, signature)
             .expect("synthetic signature");
-        assert_eq!(key.verify_header(&page), Ok(()));
-        let mut extended = page.to_vec();
+        assert_eq!(key.verify_header(&header), Ok(()));
+        let mut extended = header.to_vec();
         extended.extend_from_slice(b"outside signed page");
         assert_eq!(key.verify_header(&extended), Ok(()));
         assert_eq!(
-            key.verify_header(&page[..SIGNED_PAGE_LEN - 1]),
+            key.verify_header(&header[..SIGNED_HEADER_LEN - 1]),
             Err(XvdSignatureError::TruncatedHeader)
         );
-        let mut tampered = page;
+        let mut tampered = header;
         tampered[SIGNATURE_LEN] ^= 1;
         assert_eq!(
             key.verify_header(&tampered),
             Err(XvdSignatureError::InvalidSignature)
         );
-        tampered = page;
+        tampered = header;
+        tampered[SIGNED_HEADER_LEN - 1] ^= 1;
+        assert_eq!(
+            key.verify_header(&tampered),
+            Err(XvdSignatureError::NonZeroHeaderPadding)
+        );
+        tampered = header;
         tampered[0] ^= 1;
         assert_eq!(
             key.verify_header(&tampered),
@@ -188,8 +218,8 @@ mod tests {
             key.verify_header(&tampered),
             Err(XvdSignatureError::UnsignedHeader)
         );
-        let mut wrong_salt = page;
-        let (signature, signed) = wrong_salt.split_at_mut(SIGNATURE_LEN);
+        let mut wrong_salt = header;
+        let (signature, signed) = wrong_salt[..SIGNED_HEADER_PAGE_LEN].split_at_mut(SIGNATURE_LEN);
         const WRONG_SALT: aws_lc_rs::signature::RsaSignatureEncoding =
             RSA_PSS_SHA256.with_pss_salt_length(RsaPssSaltLength::Custom(20));
         pair.sign(&WRONG_SALT, &SystemRandom::new(), signed, signature)
@@ -205,7 +235,7 @@ mod tests {
         let wrong_key =
             PinnedXvdKey::from_bcrypt_blob(&wrong_key, &wrong_pin).expect("well formed wrong key");
         assert_eq!(
-            wrong_key.verify_header(&page),
+            wrong_key.verify_header(&header),
             Err(XvdSignatureError::InvalidSignature)
         );
 

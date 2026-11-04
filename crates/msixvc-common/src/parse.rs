@@ -201,14 +201,17 @@ pub trait BinaryTryParse {
         Self::try_parse(BytesReader(array)).map(|(t, _reader)| t)
     }
 
-    /// Parse from a slice.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the slice's length is not equal to [`Self::SIZE`].
+    /// Parse from a slice, returning an error when its length is not exact.
     #[inline]
-    fn try_from_slice(slice: &[u8]) -> Result<Self::Output, Self::Error> {
+    fn try_from_slice(slice: &[u8]) -> Result<Self::Output, BinaryTryFromSliceError<Self::Error>> {
+        if slice.len() != Self::SIZE {
+            return Err(BinaryTryFromSliceError::InvalidLength {
+                expected: Self::SIZE,
+                actual: slice.len(),
+            });
+        }
         Self::try_from_array(GenericArray::from_slice(slice))
+            .map_err(BinaryTryFromSliceError::Parse)
     }
 
     /// Returns a zeroed buffer of the correct length for parsing.
@@ -216,6 +219,15 @@ pub trait BinaryTryParse {
     fn buffer() -> GenericArray<u8, Self::Size> {
         GenericArray::default()
     }
+}
+
+/// Error returned when a fallible fixed-size parser receives a slice of the wrong length.
+#[derive(Debug, thiserror::Error)]
+pub enum BinaryTryFromSliceError<E> {
+    #[error("binary input length mismatch: expected {expected} bytes, got {actual}")]
+    InvalidLength { expected: usize, actual: usize },
+    #[error(transparent)]
+    Parse(#[from] E),
 }
 
 impl<'a, Size: ArrayLength> BytesReader<'a, Size> {
@@ -464,6 +476,11 @@ mod tests {
         );
         assert_eq!(chunks[0].as_slice(), &[AlignedByte(1), AlignedByte(2)]);
         assert_eq!(chunks[1].as_slice(), &[AlignedByte(3), AlignedByte(4)]);
+        let round_trip: Vec<_> = chunks
+            .iter()
+            .flat_map(|chunk| chunk.iter().copied())
+            .collect();
+        assert_eq!(round_trip.as_slice(), data.as_slice());
         assert_eq!(
             chunks[0].as_ptr() as usize % std::mem::align_of::<AlignedByte>(),
             0

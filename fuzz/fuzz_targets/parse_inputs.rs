@@ -7,6 +7,7 @@ use std::task::{Context, Poll};
 
 use libfuzzer_sys::fuzz_target;
 use msixvc::{msixvc2, xsp::XspFile, xvd::XvdFile};
+use msixvc_common::resources::pri::Pri;
 use tokio::io::{AsyncRead, AsyncSeek, ReadBuf};
 use tokio::runtime::Runtime;
 
@@ -61,5 +62,6 @@ fuzz_target!(|input: &[u8]| {
     runtime().block_on(async {
         let _ = XspFile::parse_file(AsyncCursor(Cursor::new(input.to_vec()))).await;
         let _ = XvdFile::parse(AsyncCursor(Cursor::new(input.to_vec()))).await;
+        let _ = Pri::read(AsyncCursor(Cursor::new(input.to_vec()))).await;
     });
 });

@@ -1,5 +1,7 @@
 use std::collections::HashSet;
+use std::future::Future;
 use std::io;
+use std::time::Duration;
 
 use base64::Engine;
 use inquire::Select;
@@ -10,11 +12,23 @@ use xodus::models::secrets::Token;
 use xodus::tokens::TokenManager;
 
 const MAX_CONTENT_ID_REDIRECTS: usize = 8;
+const PACKAGE_METADATA_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_PACKAGE_ID_BYTES: usize = 512;
 const MAX_PACKAGE_CDN_ROOT_BYTES: usize = 4096;
 const MAX_PACKAGE_RELATIVE_URL_BYTES: usize = 4096;
 const MAX_PACKAGE_SUMMARY_FILES: usize = 4096;
 pub(crate) const MAX_FILE_HASH_BASE64_CHARS: usize = 64;
+
+async fn with_package_metadata_timeout<T>(
+    timeout: Duration,
+    timeout_message: &'static str,
+    request: impl Future<Output = Result<T, Box<dyn std::error::Error>>>,
+) -> Result<T, Box<dyn std::error::Error>> {
+    tokio::time::timeout(timeout, request).await.map_err(|_| {
+        Box::new(io::Error::new(io::ErrorKind::TimedOut, timeout_message))
+            as Box<dyn std::error::Error>
+    })?
+}
 
 fn package_download_url_capacity(
     cdn_root_count: usize,
@@ -121,6 +135,60 @@ fn validate_package_id(value: &str, name: &str) -> io::Result<()> {
     Ok(())
 }
 
+pub(crate) fn is_official_xbox_cdn_host(host: &str) -> bool {
+    let host = host.to_ascii_lowercase();
+    let Some(subdomains) = host.strip_suffix(".xboxlive.com") else {
+        return false;
+    };
+    !subdomains.is_empty()
+        && subdomains.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
+}
+
+/// Microsoft's Connected Cache endpoint list identifies `*.xboxlive.com:80` for PC Game Pass.
+/// This URL allowlist is routing policy only. The downloader permits a nonlocal HTTP transfer
+/// only for a selected retail XVD identity whose pinned signature, exact extent, and complete
+/// hash tree verify before promotion; metadata hashes and local digests alone are insufficient.
+pub(crate) fn is_approved_http_xbox_cdn_url(url: &reqwest::Url) -> bool {
+    url.scheme() == "http"
+        && url.port_or_known_default() == Some(80)
+        && url.host_str().is_some_and(is_official_xbox_cdn_host)
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
+}
+
+pub(crate) fn is_approved_https_xbox_cdn_url(url: &reqwest::Url) -> bool {
+    url.scheme() == "https"
+        && url.port_or_known_default() == Some(443)
+        && url.host_str().is_some_and(is_official_xbox_cdn_host)
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
+}
+
+pub(crate) fn is_loopback_http_url(url: &reqwest::Url) -> bool {
+    if url.scheme() != "http" {
+        return false;
+    }
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+}
+
 pub(crate) fn package_download_urls(
     cdn_root_paths: &[String],
     background_cdn_root_paths: &[String],
@@ -132,27 +200,32 @@ pub(crate) fn package_download_urls(
     let mut urls = Vec::new();
     urls.try_reserve(capacity)
         .map_err(|_| io::Error::other("package CDN URL allocation failed"))?;
-    for root in cdn_root_paths.iter().chain(background_cdn_root_paths) {
-        let parsed_root = reqwest::Url::parse(root).map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidData, "package CDN URL is invalid")
-        })?;
-        let joined = parsed_root.join(relative_url).map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidData, "package CDN URL is invalid")
-        })?;
-        if joined.scheme() != parsed_root.scheme()
-            || joined.host_str() != parsed_root.host_str()
-            || joined.port_or_known_default() != parsed_root.port_or_known_default()
-            || joined.query().is_some()
-            || joined.fragment().is_some()
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "package CDN relative URL escapes its root",
-            ));
-        }
-        let url = joined.to_string();
-        if !urls.iter().any(|candidate| candidate == &url) {
-            urls.push(url);
+    for scheme in ["https", "http"] {
+        for root in cdn_root_paths.iter().chain(background_cdn_root_paths) {
+            let parsed_root = reqwest::Url::parse(root).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidData, "package CDN URL is invalid")
+            })?;
+            if parsed_root.scheme() != scheme {
+                continue;
+            }
+            let joined = parsed_root.join(relative_url).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidData, "package CDN URL is invalid")
+            })?;
+            if joined.scheme() != parsed_root.scheme()
+                || joined.host_str() != parsed_root.host_str()
+                || joined.port_or_known_default() != parsed_root.port_or_known_default()
+                || joined.query().is_some()
+                || joined.fragment().is_some()
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "package CDN relative URL escapes its root",
+                ));
+            }
+            let url = joined.to_string();
+            if !urls.iter().any(|candidate| candidate == &url) {
+                urls.push(url);
+            }
         }
     }
 
@@ -195,27 +268,28 @@ fn validate_package_cdn_root(root: &str) -> io::Result<reqwest::Url> {
     }
     let parsed = reqwest::Url::parse(root)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "package CDN URL is invalid"))?;
-    let rejection = if parsed.scheme() != "https" {
-        Some("requires HTTPS")
-    } else if parsed.host_str().is_none() {
-        Some("requires a host")
-    } else if !parsed.username().is_empty() || parsed.password().is_some() {
-        Some("must not contain user information")
-    } else if parsed.query().is_some() {
-        Some("must not contain a query")
-    } else if parsed.fragment().is_some() {
-        Some("must not contain a fragment")
-    } else if !parsed.path().ends_with('/') {
-        Some("must name a directory ending with a slash")
-    } else if parsed
-        .path()
-        .split('/')
-        .any(|segment| segment == "." || segment == "..")
-    {
-        Some("must not contain dot path segments")
-    } else {
-        None
-    };
+    let rejection =
+        if !is_approved_https_xbox_cdn_url(&parsed) && !is_approved_http_xbox_cdn_url(&parsed) {
+            Some("requires an approved Xbox CDN host over HTTPS/443 or HTTP/80")
+        } else if parsed.host_str().is_none() {
+            Some("requires a host")
+        } else if !parsed.username().is_empty() || parsed.password().is_some() {
+            Some("must not contain user information")
+        } else if parsed.query().is_some() {
+            Some("must not contain a query")
+        } else if parsed.fragment().is_some() {
+            Some("must not contain a fragment")
+        } else if !parsed.path().ends_with('/') {
+            Some("must name a directory ending with a slash")
+        } else if parsed
+            .path()
+            .split('/')
+            .any(|segment| segment == "." || segment == "..")
+        {
+            Some("must not contain dot path segments")
+        } else {
+            None
+        };
     if let Some(rejection) = rejection {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -265,6 +339,56 @@ fn validate_package_details(
             &file.background_cdn_root_paths,
             &file.relative_url,
         )?;
+    }
+    Ok(())
+}
+
+fn merge_supplemental_cdn_roots(package: &mut PackageDetails) -> io::Result<()> {
+    let Some(metadata) = package.package_metadata.as_ref() else {
+        return Ok(());
+    };
+    if package.package_files.len() > MAX_PACKAGE_SUMMARY_FILES
+        || metadata.files.len() > MAX_PACKAGE_SUMMARY_FILES
+        || metadata.cdn_roots.len() > MAX_PACKAGE_SUMMARY_FILES
+        || metadata.background_cdn_root_paths.len() > MAX_PACKAGE_SUMMARY_FILES
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Xbox package metadata exceeds the item limit",
+        ));
+    }
+
+    for metadata_file in &metadata.files {
+        let mut matches = package.package_files.iter_mut().filter(|file| {
+            file.file_name == metadata_file.name
+                && file.file_size == metadata_file.size
+                && file.relative_url == metadata_file.relative_url
+        });
+        let Some(file) = matches.next() else {
+            continue;
+        };
+        if matches.next().is_some() {
+            continue;
+        }
+
+        merge_cdn_roots(&mut file.cdn_root_paths, &metadata.cdn_roots)?;
+        merge_cdn_roots(
+            &mut file.background_cdn_root_paths,
+            &metadata.background_cdn_root_paths,
+        )?;
+    }
+    Ok(())
+}
+
+fn merge_cdn_roots(existing: &mut Vec<String>, supplemental: &[String]) -> io::Result<()> {
+    for root in supplemental {
+        if validate_package_cdn_root(root).is_err() || existing.iter().any(|value| value == root) {
+            continue;
+        }
+        existing
+            .try_reserve(1)
+            .map_err(|_| io::Error::other("supplemental CDN root allocation failed"))?;
+        existing.push(root.clone());
     }
     Ok(())
 }
@@ -377,6 +501,7 @@ fn validate_package_file(file: &PackageFile, content_id: &str, version_id: &str)
 pub(crate) struct PackageInfoFile {
     pub name: String,
     pub size: u64,
+    pub provider_sha256_available: bool,
     pub delta_version_id: Option<String>,
 }
 
@@ -385,7 +510,30 @@ pub(crate) struct PackageInfo {
     pub content_id: String,
     pub version_id: String,
     pub version: String,
+    pub hash_of_hashes_available: bool,
     pub files: Vec<PackageInfoFile>,
+}
+
+pub(crate) fn select_package_file(
+    package_files: &[PackageFile],
+    requested_name: &str,
+) -> io::Result<PackageFile> {
+    let mut matches = package_files
+        .iter()
+        .filter(|file| file.file_name == requested_name);
+    let Some(file) = matches.next() else {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "selected file is not listed in the authenticated package metadata",
+        ));
+    };
+    if matches.next().is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "authenticated package metadata contains duplicate selected file names",
+        ));
+    }
+    Ok(file.clone())
 }
 
 fn package_info_from_response(
@@ -400,16 +548,22 @@ fn package_info_from_response(
         ));
     }
     validate_package_metadata(&package, content_id, revision)?;
+    let hash_of_hashes_available = package
+        .hash_of_hashes
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty());
     let mut files = Vec::new();
     files
         .try_reserve_exact(package.package_files.len())
         .map_err(|_| io::Error::other("package metadata allocation failed"))?;
     for file in package.package_files {
+        let provider_sha256_available = decode_file_hash(&file.file_hash)?.is_some();
         files.push(PackageInfoFile {
             name: file.file_name,
             size: u64::try_from(file.file_size).map_err(|_| {
                 io::Error::new(io::ErrorKind::InvalidData, "package file size is negative")
             })?,
+            provider_sha256_available,
             delta_version_id: file.delta_version_id,
         });
     }
@@ -417,6 +571,7 @@ fn package_info_from_response(
         content_id: package.content_id,
         version_id: package.version_id,
         version: package.version,
+        hash_of_hashes_available,
         files,
     })
 }
@@ -483,11 +638,19 @@ pub async fn get_content_id(
 
     for redirect_count in 0..=MAX_CONTENT_ID_REDIRECTS {
         register_content_id_redirect(&mut visited, &product, redirect_count)?;
-        let displaycatalog = find_products_by_id(
-            client,
-            product.clone(),
-            market.clone().unwrap_or("neutral".to_owned()),
-            vec!["en".to_string(), "neutral".to_string()],
+        let displaycatalog = with_package_metadata_timeout(
+            PACKAGE_METADATA_TIMEOUT,
+            "Xbox product metadata request timed out",
+            async {
+                find_products_by_id(
+                    client,
+                    product.clone(),
+                    market.clone().unwrap_or("neutral".to_owned()),
+                    vec!["en".to_string(), "neutral".to_string()],
+                )
+                .await
+                .map_err(|error| Box::new(error) as Box<dyn std::error::Error>)
+            },
         )
         .await?;
 
@@ -583,53 +746,118 @@ async fn get_packages_at_endpoint(
     tokens: &TokenManager,
     endpoint: reqwest::Url,
 ) -> Result<PackageDetails, Box<dyn std::error::Error>> {
-    let dev_token = tokens.get_device_sts_token()?;
-    let Token::Legacy(dev_token) = dev_token else {
-        return Err(Box::new(std::io::Error::other("Invalid STS token")));
-    };
-    let user_token = tokens.get_user_sts_token()?;
-    let Token::Legacy(legacy) = user_token else {
-        return Err(Box::new(std::io::Error::other("Unsupported user token")));
-    };
+    with_package_metadata_timeout(
+        PACKAGE_METADATA_TIMEOUT,
+        "Xbox package metadata request timed out",
+        async {
+            let dev_token = tokens.get_device_sts_token()?;
+            let Token::Legacy(dev_token) = dev_token else {
+                return Err(Box::new(std::io::Error::other("Invalid STS token"))
+                    as Box<dyn std::error::Error>);
+            };
+            let user_token = tokens.get_user_sts_token()?;
+            let Token::Legacy(legacy) = user_token else {
+                return Err(Box::new(std::io::Error::other("Unsupported user token"))
+                    as Box<dyn std::error::Error>);
+            };
 
-    let xsts_token =
-        xodus::api::xbox::run(client, dev_token, legacy, "http://update.xboxlive.com").await?;
+            let xsts_token =
+                xodus::api::xbox::run(client, dev_token, legacy, "http://update.xboxlive.com")
+                    .await?;
 
-    let response = client
-        .get(endpoint)
-        .header("x-xbl-contract-version", "3")
-        .header(
-            "Authorization",
-            xodus::api::xbox::get_xsts_auth_header(xsts_token)?,
-        )
-        .send()
-        .await?;
-    if response.url().scheme() != "https" {
-        return Err(Box::new(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "package request redirected to an insecure scheme",
-        )));
-    }
-    let response = response.error_for_status()?;
+            let response = client
+                .get(endpoint)
+                .header("x-xbl-contract-version", "3")
+                .header(
+                    "Authorization",
+                    xodus::api::xbox::get_xsts_auth_header(xsts_token)?,
+                )
+                .send()
+                .await?;
+            if response.url().scheme() != "https" {
+                return Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "package request redirected to an insecure scheme",
+                )) as Box<dyn std::error::Error>);
+            }
+            let response = response.error_for_status()?;
 
-    let res: PackageResponse = xodus::api::xbox::decode_json_response(response).await?;
+            let res: PackageResponse = xodus::api::xbox::decode_json_response(response).await?;
 
-    let PackageResponse::Found(package) = res else {
-        return Err(Box::new(std::io::Error::other(
-            "Package was not found, is it owned by the user?",
-        )));
-    };
-    Ok(package)
+            let PackageResponse::Found(mut package) = res else {
+                return Err(Box::new(std::io::Error::other(
+                    "Package was not found, is it owned by the user?",
+                )) as Box<dyn std::error::Error>);
+            };
+            merge_supplemental_cdn_roots(&mut package)?;
+            Ok(package)
+        },
+    )
+    .await
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         MAX_CONTENT_ID_REDIRECTS, MAX_PACKAGE_ID_BYTES, append_subproduct,
-        package_download_url_capacity, package_endpoint_url, register_content_id_redirect,
-        validate_package_cdn_root, validate_package_details,
+        is_approved_http_xbox_cdn_url, is_approved_https_xbox_cdn_url, is_loopback_http_url,
+        is_official_xbox_cdn_host, package_download_url_capacity, package_download_urls,
+        package_endpoint_url, register_content_id_redirect, validate_package_cdn_root,
+        validate_package_details, with_package_metadata_timeout,
     };
-    use xodus::models::packagespc::{PackageDetails, PackageFile};
+    use xodus::models::packagespc::{MetadataFile, PackageDetails, PackageFile, PackageMetadata};
+
+    #[tokio::test]
+    async fn package_metadata_timeout_cancels_a_stalled_request_and_preserves_fast_results() {
+        use std::io;
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        use std::time::Duration;
+
+        struct DropFlag(Arc<AtomicBool>);
+
+        impl Drop for DropFlag {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let dropped = Arc::new(AtomicBool::new(false));
+        let request = {
+            let dropped = Arc::clone(&dropped);
+            async move {
+                let _guard = DropFlag(dropped);
+                std::future::pending::<Result<(), Box<dyn std::error::Error>>>().await
+            }
+        };
+        let error = with_package_metadata_timeout(
+            Duration::from_millis(1),
+            "test metadata request timed out",
+            request,
+        )
+        .await
+        .expect_err("a stalled metadata request must time out");
+
+        assert_eq!(
+            error
+                .downcast_ref::<io::Error>()
+                .expect("timeout must preserve its I/O error kind")
+                .kind(),
+            io::ErrorKind::TimedOut
+        );
+        assert!(dropped.load(Ordering::SeqCst));
+
+        let value = with_package_metadata_timeout(
+            Duration::from_secs(1),
+            "fast metadata request timed out",
+            async { Ok::<_, Box<dyn std::error::Error>>(42) },
+        )
+        .await
+        .expect("a completed metadata request must pass through");
+        assert_eq!(value, 42);
+    }
 
     fn package() -> PackageDetails {
         PackageDetails {
@@ -643,7 +871,7 @@ mod tests {
                 file_size: 42,
                 file_hash: String::new(),
                 key_blob: String::new(),
-                cdn_root_paths: vec!["https://cdn.example/".to_owned()],
+                cdn_root_paths: vec!["https://assets1.xboxlive.com/".to_owned()],
                 background_cdn_root_paths: Vec::new(),
                 relative_url: "content/version/package.msixvc".to_owned(),
                 update_type: 0,
@@ -652,10 +880,82 @@ mod tests {
                 modified_date: String::new(),
             }],
             version: "1.0.0.0".to_owned(),
+            package_metadata: None,
             hash_of_hashes: None,
             update_predownload: false,
             availability_date: String::new(),
         }
+    }
+
+    #[test]
+    fn supplemental_cdn_roots_require_an_exact_file_match_and_valid_origin() {
+        let mut package = package();
+        package.package_files[0].cdn_root_paths = vec!["http://assets1.xboxlive.com/".into()];
+        package.package_metadata = Some(Box::new(PackageMetadata {
+            estimated_total_download_size: 42,
+            background_cdn_root_paths: vec!["https://d1.xboxlive.com/cache/".into()],
+            cdn_roots: vec![
+                "https://assets2.xboxlive.com/cache/".into(),
+                "https://cdn.example/cache/".into(),
+            ],
+            files: vec![
+                MetadataFile {
+                    name: "package.msixvc".into(),
+                    size: 42,
+                    relative_url: "content/version/package.msixvc".into(),
+                    license: String::new(),
+                },
+                MetadataFile {
+                    name: "package.msixvc".into(),
+                    size: 41,
+                    relative_url: "content/version/package.msixvc".into(),
+                    license: String::new(),
+                },
+            ],
+        }));
+
+        super::merge_supplemental_cdn_roots(&mut package)
+            .expect("matching supplemental roots merge");
+        validate_package_details(&package, "content-id", None)
+            .expect("merged service roots must pass existing package validation");
+
+        let file = &package.package_files[0];
+        assert_eq!(
+            file.cdn_root_paths,
+            [
+                "http://assets1.xboxlive.com/",
+                "https://assets2.xboxlive.com/cache/"
+            ]
+        );
+        assert_eq!(
+            file.background_cdn_root_paths,
+            ["https://d1.xboxlive.com/cache/"]
+        );
+        assert_eq!(
+            package_download_urls(
+                &file.cdn_root_paths,
+                &file.background_cdn_root_paths,
+                &file.relative_url,
+            )
+            .expect("validated roots construct safe URLs"),
+            [
+                "https://assets2.xboxlive.com/cache/content/version/package.msixvc",
+                "https://d1.xboxlive.com/cache/content/version/package.msixvc",
+                "http://assets1.xboxlive.com/content/version/package.msixvc"
+            ]
+        );
+    }
+
+    #[test]
+    fn supplemental_cdn_roots_reject_oversized_package_file_lists() {
+        let mut package = package();
+        let file = package.package_files[0].clone();
+        package.package_files = vec![file; super::MAX_PACKAGE_SUMMARY_FILES + 1];
+        package.package_metadata = Some(Box::new(PackageMetadata::default()));
+
+        let error = super::merge_supplemental_cdn_roots(&mut package)
+            .expect_err("oversized package file lists must be rejected before matching");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     }
 
     #[test]
@@ -676,6 +976,33 @@ mod tests {
             assert!(!output.contains(private));
         }
         assert_eq!(info.files[0].name, "package.msixvc");
+        assert!(!info.files[0].provider_sha256_available);
+        assert!(!info.hash_of_hashes_available);
+    }
+
+    #[test]
+    fn metadata_summary_reports_provider_sha256_presence_without_the_digest() {
+        let mut package = package();
+        package.package_files[0].file_hash =
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_owned();
+
+        let info = super::package_info_from_response(package, "content-id", None).unwrap();
+        assert!(info.files[0].provider_sha256_available);
+
+        let output = format!("{info:?}");
+        assert!(!output.contains("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="));
+    }
+
+    #[test]
+    fn metadata_summary_reports_hash_of_hashes_presence_without_its_value() {
+        let mut package = package();
+        package.hash_of_hashes = Some("provider-hash-of-hashes-value".to_owned());
+
+        let info = super::package_info_from_response(package, "content-id", None).unwrap();
+        assert!(info.hash_of_hashes_available);
+
+        let output = format!("{info:?}");
+        assert!(!output.contains("provider-hash-of-hashes-value"));
     }
 
     #[test]
@@ -768,9 +1095,108 @@ mod tests {
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
         assert_eq!(
             error.to_string(),
-            "package CDN root rejected, requires HTTPS"
+            "package CDN root rejected, requires an approved Xbox CDN host over HTTPS/443 or HTTP/80"
         );
         assert!(!error.to_string().contains("cdn.example"));
+    }
+
+    #[test]
+    fn xbox_http_cdn_allowlist_requires_a_real_subdomain_and_port_80() {
+        let approved = reqwest::Url::parse("http://assets1.xboxlive.com:80/").unwrap();
+        assert!(is_approved_http_xbox_cdn_url(&approved));
+        assert!(is_official_xbox_cdn_host("assets1.xboxlive.com"));
+        assert!(!is_official_xbox_cdn_host("xboxlive.com"));
+
+        for raw in [
+            "http://xboxlive.com/",
+            "http://assets1.xboxlive.com.evil.example/",
+            "http://evilxboxlive.com/",
+            "http://bad..xboxlive.com/",
+            "http://assets1.xboxlive.com:8080/",
+            "http://user@assets1.xboxlive.com/",
+            "http://assets1.xboxlive.com/?token=private",
+            "http://assets1.xboxlive.com/#fragment",
+        ] {
+            let url = reqwest::Url::parse(raw).expect("test URL must parse");
+            assert!(
+                !is_approved_http_xbox_cdn_url(&url),
+                "unapproved HTTP CDN URL accepted: {raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn xbox_https_cdn_allowlist_requires_a_real_subdomain_and_port_443() {
+        let approved = reqwest::Url::parse("https://dlassets-ssl.xboxlive.com:443/").unwrap();
+        assert!(is_approved_https_xbox_cdn_url(&approved));
+
+        for raw in [
+            "https://xboxlive.com/",
+            "https://assets1.xboxlive.com.evil.example/",
+            "https://evilxboxlive.com/",
+            "https://bad..xboxlive.com/",
+            "https://assets1.xboxlive.com:8443/",
+            "https://user@assets1.xboxlive.com/",
+            "https://assets1.xboxlive.com/?token=private",
+            "https://assets1.xboxlive.com/#fragment",
+        ] {
+            let url = reqwest::Url::parse(raw).expect("test URL must parse");
+            assert!(
+                !is_approved_https_xbox_cdn_url(&url),
+                "unapproved HTTPS CDN URL accepted: {raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn package_url_builder_accepts_only_documented_xbox_cdn_origins() {
+        let urls = package_download_urls(
+            &["http://assets1.xboxlive.com:80/".to_owned()],
+            &[],
+            "content/version/package.msixvc",
+        )
+        .expect("the approved Xbox endpoint should be constructible");
+        assert_eq!(
+            urls,
+            vec!["http://assets1.xboxlive.com/content/version/package.msixvc"]
+        );
+
+        assert_eq!(
+            package_download_urls(
+                &["https://dlassets-ssl.xboxlive.com:443/".to_owned()],
+                &[],
+                "content/version/package.msixvc",
+            )
+            .expect("the approved Xbox TLS endpoint should be constructible"),
+            vec!["https://dlassets-ssl.xboxlive.com/content/version/package.msixvc"]
+        );
+
+        for root in [
+            "http://cdn.example/",
+            "http://assets1.xboxlive.com:8080/",
+            "http://assets1.xboxlive.com/?token=private/",
+            "https://cdn.example/",
+            "https://assets1.xboxlive.com:8443/",
+        ] {
+            assert!(
+                package_download_urls(&[root.to_owned()], &[], "file.xvd").is_err(),
+                "unapproved package CDN root accepted: {root}"
+            );
+        }
+    }
+
+    #[test]
+    fn loopback_http_helper_rejects_nonlocal_hosts() {
+        for raw in ["http://localhost:8080/", "http://127.0.0.1:8080/"] {
+            assert!(is_loopback_http_url(&reqwest::Url::parse(raw).unwrap()));
+        }
+        for raw in [
+            "http://assets1.xboxlive.com/",
+            "https://localhost/",
+            "http://example.invalid/",
+        ] {
+            assert!(!is_loopback_http_url(&reqwest::Url::parse(raw).unwrap()));
+        }
     }
 
     #[test]
@@ -856,6 +1282,28 @@ mod tests {
     }
 
     #[test]
+    fn package_file_selection_requires_one_exact_metadata_name() {
+        let package = package();
+        let selected = super::select_package_file(&package.package_files, "package.msixvc")
+            .expect("the exact metadata file name should select one file");
+        assert_eq!(selected.file_name, "package.msixvc");
+
+        let error = super::select_package_file(&package.package_files, "PACKAGE.MSIXVC")
+            .expect_err("file selection must not broaden to case-insensitive matches");
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+
+        let error = super::select_package_file(&package.package_files, "update.xsp")
+            .expect_err("a file absent from metadata must fail");
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+
+        let mut duplicate_files = package.package_files.clone();
+        duplicate_files.push(duplicate_files[0].clone());
+        let error = super::select_package_file(&duplicate_files, "package.msixvc")
+            .expect_err("ambiguous metadata selection must fail closed");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
     fn package_response_validation_rejects_invalid_file_hash() {
         let mut package = package();
         package.package_files[0].file_hash = "not-a-digest".to_owned();
@@ -874,7 +1322,7 @@ mod tests {
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
         assert_eq!(
             error.to_string(),
-            "package CDN root rejected, requires HTTPS"
+            "package CDN root rejected, requires an approved Xbox CDN host over HTTPS/443 or HTTP/80"
         );
     }
 

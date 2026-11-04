@@ -105,7 +105,7 @@ pub fn run(path: String, destination: String) -> ExitCode {
     };
     if let Err(error) = promote_owned_transaction(transaction, output_root, &mut entries) {
         eprintln!("MSIXVC2 uninstall promotion failed: {error}");
-        return ExitCode::FAILURE;
+        return crate::transaction_status::exit_code_for_transaction_error(&error);
     }
 
     println!(
@@ -277,7 +277,7 @@ mod tests {
                 archive.to_string_lossy().into_owned(),
                 destination.to_string_lossy().into_owned(),
             ),
-            ExitCode::FAILURE
+            ExitCode::from(crate::transaction_status::ROLLED_BACK_EXIT_STATUS)
         );
         assert_eq!(
             std::fs::read(&outside).expect("outside target must remain readable"),

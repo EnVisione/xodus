@@ -13,7 +13,7 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use crate::parse::{BinaryParse, BinaryTryParse};
 use crate::resources::error::PriParseError;
 use crate::resources::index::PriIndex;
-use crate::resources::index::util::{Cursor, bytes_slice, slice_range};
+use crate::resources::index::util::{Cursor, bytes_slice, slice_range, try_parse_slice};
 use crate::resources::query::{QualifierContext, ResolvedValue};
 use crate::resources::structs::{
     PriDescriptor, ResourceHeader, SectionFooter, SectionHeader, SectionType, TableOfContentsEntry,
@@ -74,20 +74,29 @@ impl Pri {
         }
         let buffer = Bytes::from(buffer);
 
-        let header = ResourceHeader::try_from_slice(
+        let header = try_parse_slice::<ResourceHeader>(
             slice_range(&buffer, 0, ResourceHeader::SIZE)
                 .ok_or(PriParseError::truncated("resource header"))?,
+            "resource header",
         )?;
 
-        let mut offset = header.table_of_contents_offset as usize;
-        let mut entries = Vec::with_capacity(header.number_of_sections as usize);
-        for _ in 0..header.number_of_sections {
-            let entry = TableOfContentsEntry::from_slice(
-                slice_range(&buffer, offset, TableOfContentsEntry::SIZE)
-                    .ok_or(PriParseError::truncated("table of contents entry"))?,
-            );
-            offset += TableOfContentsEntry::SIZE;
-            entries.push(entry);
+        let toc_offset = usize::try_from(header.table_of_contents_offset)
+            .map_err(|_| PriParseError::truncated("table of contents"))?;
+        let section_count = usize::from(header.number_of_sections);
+        let toc_length = section_count
+            .checked_mul(TableOfContentsEntry::SIZE)
+            .ok_or(PriParseError::truncated("table of contents"))?;
+        let toc = slice_range(&buffer, toc_offset, toc_length)
+            .ok_or(PriParseError::truncated("table of contents"))?;
+
+        let mut entries = Vec::new();
+        entries
+            .try_reserve_exact(section_count)
+            .map_err(|_| PriParseError::ResourceLimit {
+                context: "table of contents entries",
+            })?;
+        for entry_bytes in toc.as_chunks::<{ TableOfContentsEntry::SIZE }>().0 {
+            entries.push(TableOfContentsEntry::from_slice(entry_bytes));
         }
 
         let mut data = Vec::with_capacity(entries.len());
@@ -169,7 +178,11 @@ fn section_data(
     first_section_offset: u32,
     entry: &TableOfContentsEntry,
 ) -> Result<Bytes, PriParseError> {
-    let header_start = first_section_offset as usize + entry.section_offset as usize;
+    let header_start = checked_offset(
+        first_section_offset as usize,
+        entry.section_offset as usize,
+        "section header offset",
+    )?;
     let header = SectionHeader::from_slice(
         slice_range(buffer, header_start, SectionHeader::SIZE)
             .ok_or(PriParseError::truncated("section header"))?,
@@ -185,8 +198,17 @@ fn section_data(
             "section length (shorter than its own header and footer)",
         ))?;
 
-    let data_start = header_start + SectionHeader::SIZE;
+    let data_start = checked_offset(header_start, SectionHeader::SIZE, "section data offset")?;
     bytes_slice(buffer, data_start, data_length, "section data")
+}
+
+fn checked_offset(
+    base: usize,
+    relative: usize,
+    context: &'static str,
+) -> Result<usize, PriParseError> {
+    base.checked_add(relative)
+        .ok_or(PriParseError::truncated(context))
 }
 
 #[cfg(test)]
@@ -195,6 +217,16 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn checked_offset_rejects_overflow() {
+        assert!(matches!(
+            checked_offset(usize::MAX, 1, "test offset"),
+            Err(PriParseError::Truncated {
+                context: "test offset"
+            })
+        ));
+    }
+
     #[tokio::test]
     async fn rejects_unbounded_input_before_parsing() {
         let result = Pri::read(tokio::io::repeat(0)).await;
@@ -202,6 +234,21 @@ mod tests {
             result,
             Err(PriParseError::ResourceLimit {
                 context: "input size"
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn rejects_truncated_table_of_contents_before_reserving_entries() {
+        let mut pri = build_pri(Vec::new());
+        pri[24..26].copy_from_slice(&u16::MAX.to_le_bytes());
+
+        let result = Pri::read(pri.as_slice()).await;
+
+        assert!(matches!(
+            result,
+            Err(PriParseError::Truncated {
+                context: "table of contents"
             })
         ));
     }

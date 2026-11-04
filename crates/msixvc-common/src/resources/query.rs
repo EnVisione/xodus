@@ -191,7 +191,7 @@ fn evaluate_qualifier(
             .enumerate()
             .filter_map(|(position, preferred)| {
                 let specificity = language_match_score(preferred, value)?;
-                Some(specificity.saturating_add(1000u32.saturating_sub(position as u32)))
+                Some(specificity.saturating_add(language_preference_penalty(position)))
             })
             .max(),
         QualifierType::Scale => match_numeric(ctx.scale, value),
@@ -246,6 +246,10 @@ fn language_match_score(preferred: &str, candidate: &str) -> Option<u32> {
 
 fn primary_subtag(tag: &str) -> &str {
     tag.split_once('-').map_or(tag, |(primary, _)| primary)
+}
+
+fn language_preference_penalty(position: usize) -> u32 {
+    u32::try_from(position).map_or(0, |position| 1000_u32.saturating_sub(position))
 }
 
 fn resolve_candidate(
@@ -349,6 +353,11 @@ mod tests {
         assert!(exact > specific_to_neutral);
         assert!(exact > neutral_to_specific);
         assert!(language_match_score("en-US", "fr").is_none());
+    }
+
+    #[test]
+    fn language_preference_penalty_saturates_for_large_positions() {
+        assert_eq!(language_preference_penalty(usize::MAX), 0);
     }
 
     #[test]

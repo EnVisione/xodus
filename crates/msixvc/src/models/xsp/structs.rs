@@ -10,7 +10,7 @@ pub struct XspHeader {
     pub content_id: uuid::Uuid,
     pub plan_id: uuid::Uuid,
     pub xsp_id: uuid::Uuid,
-    pub page_size: u32,
+    pub record_table_offset: u32,
     pub record_count: u32,
     pub total_download: u64,
     pub disk_space_required: u64,
@@ -40,7 +40,7 @@ impl BinaryTryParse for XspHeader {
 
         let r = r.magic(Self::MAGIC).map_err(Self::Error::InvalidMagic)?;
 
-        let (block_size_or_payload, r) = r.read::<U32>(); // Or payload offset
+        let (record_table_offset, r) = r.read::<U32>();
         let (_unknown_val, r) = r.array::<4>();
         let (vduid, r) = r.read::<Uuid>();
         let (_uduid, r) = r.read::<Uuid>();
@@ -80,7 +80,7 @@ impl BinaryTryParse for XspHeader {
                 content_id: vduid,
                 plan_id,
                 xsp_id,
-                page_size: block_size_or_payload,
+                record_table_offset,
                 record_count,
                 total_download: total_bytes,
                 disk_space_required,

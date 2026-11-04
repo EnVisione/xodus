@@ -26,6 +26,10 @@ pub enum PriParseError {
     Truncated { context: &'static str },
     #[error("PRI input exceeds the supported limit for {context}")]
     ResourceLimit { context: &'static str },
+    #[error("resource map contains duplicate item index property {index_property}")]
+    DuplicateResourceItemIndexProperty { index_property: u32 },
+    #[error("hierarchical schema contains duplicate resource path {path:?}")]
+    DuplicateResourcePath { path: String },
     #[error("Encountered a candidate of unsupported type {0}, cannot resolve its value")]
     UnsupportedCandidateType(u8),
     #[error("Unexpected IO error {0:?}")]

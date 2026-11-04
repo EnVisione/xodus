@@ -153,9 +153,17 @@ impl TokenManager {
         let remaining = (token.not_after - chrono::Utc::now())
             .to_std()
             .unwrap_or(std::time::Duration::ZERO);
-        let _ = self
-            .ephemeral
-            .set_with_expiry(key, &bytes, Instant::now() + remaining);
+        let Some(expires_at) = Self::checked_xsts_cache_deadline(Instant::now(), remaining) else {
+            return;
+        };
+        let _ = self.ephemeral.set_with_expiry(key, &bytes, expires_at);
+    }
+
+    fn checked_xsts_cache_deadline(
+        now: Instant,
+        remaining: std::time::Duration,
+    ) -> Option<Instant> {
+        now.checked_add(remaining)
     }
 
     // ---- shared TokenStore read/modify/write helper ---------------------------
@@ -339,6 +347,17 @@ mod tests {
             manager
                 .get_cached_xsts("https://service.example.test")
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn xsts_cache_deadline_rejects_unrepresentable_expiration() {
+        assert!(
+            TokenManager::checked_xsts_cache_deadline(
+                std::time::Instant::now(),
+                std::time::Duration::MAX
+            )
+            .is_none()
         );
     }
 }

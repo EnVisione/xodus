@@ -173,9 +173,6 @@ impl<R: AsyncRead> PageStream<R> {
             }
         }
 
-        // `this.filled` is exactly `PAGE_SIZE`, so the page buffer is now full.
-        assert_eq!(*this.filled, PAGE_SIZE);
-
         // `this.filled` mustn't be set to 0 here because we want to be able to
         // obtain the filled buffer through `Self::buffer`. The next call to
         // `poll_next_page` will clear the buffer in order to start a new poll.

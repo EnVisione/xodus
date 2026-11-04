@@ -11,11 +11,21 @@ use crate::commands::streaming::{
     open_package_input, open_package_output, package_path_components, promote_owned_transaction,
     promotion_entries_with_ownership, recover_transactions,
 };
+use crate::package_manifest::{
+    local_package_catalog_root, verify_msixvc2_archive_catalog_entry_at,
+};
 
 const MAX_INSTALL_UNCOMPRESSED_BYTES: u64 = 1_u64 << 40;
 const MAX_OWNERSHIP_BYTES: usize = 64 * 1024 * 1024;
 const MAX_OWNERSHIP_ENTRIES: usize = 1_048_576;
 const OWNERSHIP_HEADER: &str = "xodus-msixvc2-members-v1";
+
+#[derive(Clone, Copy)]
+pub(crate) enum InstallMode {
+    Install,
+    Adopt,
+    Repair,
+}
 
 fn validate_available_space(required: u64, available: u64) -> io::Result<()> {
     let required_with_reserve = required
@@ -256,16 +266,88 @@ fn verify_legacy_ownership(
     Ok(owned)
 }
 
+#[cfg(test)]
 pub fn run(path: String, destination: String) -> ExitCode {
-    run_with_hook_and_label(path, destination, || false, "staged", false)
+    run_interruptible(path, destination, InstallMode::Install, || false)
 }
 
+#[cfg(test)]
 pub fn run_adopting(path: String, destination: String) -> ExitCode {
-    run_with_hook_and_label(path, destination, || false, "staged", true)
+    run_interruptible(path, destination, InstallMode::Adopt, || false)
 }
 
+#[cfg(test)]
 pub fn repair(path: String, destination: String) -> ExitCode {
-    run_with_hook_and_label(path, destination, || false, "restored", false)
+    run_interruptible(path, destination, InstallMode::Repair, || false)
+}
+
+#[cfg(test)]
+pub(crate) fn run_interruptible<F>(
+    path: String,
+    destination: String,
+    mode: InstallMode,
+    should_interrupt: F,
+) -> ExitCode
+where
+    F: FnMut() -> bool,
+{
+    let (operation, adopt_existing) = match mode {
+        InstallMode::Install => ("staged", false),
+        InstallMode::Adopt => ("staged", true),
+        InstallMode::Repair => ("restored", false),
+    };
+    run_with_hook_and_label(
+        path,
+        destination,
+        should_interrupt,
+        operation,
+        adopt_existing,
+        None,
+    )
+}
+
+pub(crate) fn run_cataloged_interruptible<F>(
+    path: String,
+    destination: String,
+    mode: InstallMode,
+    should_interrupt: F,
+) -> ExitCode
+where
+    F: FnMut() -> bool,
+{
+    let catalog_root = match local_package_catalog_root() {
+        Ok(root) => root,
+        Err(error) => {
+            eprintln!("MSIXVC2 install could not locate its package catalog: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    run_cataloged_interruptible_at(path, destination, mode, should_interrupt, &catalog_root)
+}
+
+fn run_cataloged_interruptible_at<F>(
+    path: String,
+    destination: String,
+    mode: InstallMode,
+    should_interrupt: F,
+    catalog_root: &Path,
+) -> ExitCode
+where
+    F: FnMut() -> bool,
+{
+    let (operation, adopt_existing) = match mode {
+        InstallMode::Install => ("staged", false),
+        InstallMode::Adopt => ("staged", true),
+        InstallMode::Repair => ("restored", false),
+    };
+    run_with_hook_and_label(
+        path,
+        destination,
+        should_interrupt,
+        operation,
+        adopt_existing,
+        Some(catalog_root),
+    )
 }
 
 #[cfg(test)]
@@ -273,7 +355,12 @@ fn run_with_hook<F>(path: String, destination: String, mut should_interrupt: F) 
 where
     F: FnMut() -> bool,
 {
-    run_with_hook_and_label(path, destination, &mut should_interrupt, "staged", false)
+    run_interruptible(
+        path,
+        destination,
+        InstallMode::Install,
+        &mut should_interrupt,
+    )
 }
 
 fn run_with_hook_and_label<F>(
@@ -282,6 +369,7 @@ fn run_with_hook_and_label<F>(
     mut should_interrupt: F,
     operation: &str,
     adopt_existing: bool,
+    catalog_root: Option<&Path>,
 ) -> ExitCode
 where
     F: FnMut() -> bool,
@@ -294,6 +382,20 @@ where
             return ExitCode::FAILURE;
         }
     };
+    if let Some(catalog_root) = catalog_root {
+        let Some(file_name) = archive_path.file_name().and_then(|name| name.to_str()) else {
+            eprintln!("MSIXVC2 install rejected an archive path without a valid file name");
+            return ExitCode::FAILURE;
+        };
+        if let Err(error) =
+            verify_msixvc2_archive_catalog_entry_at(catalog_root, file_name, &mut package_file)
+        {
+            eprintln!(
+                "MSIXVC2 install rejected an archive that failed catalog verification: {error}"
+            );
+            return ExitCode::FAILURE;
+        }
+    }
     let archive = match inspect(&mut package_file) {
         Ok(archive) => archive,
         Err(error) => {
@@ -393,26 +495,44 @@ where
         }
     };
 
+    let mut cancellation_requested = false;
     let extract_result = visit_entries(
         &mut package_file,
         MAX_INSTALL_UNCOMPRESSED_BYTES,
         |entry, input| {
             let mut output = open_package_output(&payload_root, &entry.name)?;
-            io::copy(input, &mut output)?;
+            let mut transfer_buffer = [0_u8; 8192];
+            loop {
+                if should_interrupt() {
+                    cancellation_requested = true;
+                    return Err(io::Error::new(
+                        io::ErrorKind::Interrupted,
+                        "MSIXVC2 install interrupted during staged write",
+                    ));
+                }
+                let read = input.read(&mut transfer_buffer)?;
+                if read == 0 {
+                    break;
+                }
+                output.write_all(&transfer_buffer[..read])?;
+            }
             output.flush()?;
             output.sync_all()?;
-            if should_interrupt() {
-                return Err(io::Error::new(
-                    io::ErrorKind::Interrupted,
-                    "MSIXVC2 install interrupted after staged write",
-                ));
-            }
             Ok(())
         },
     );
     if let Err(error) = extract_result {
+        if cancellation_requested {
+            eprintln!("MSIXVC2 transaction cancelled before promotion");
+            return ExitCode::from(crate::CANCELLED_EXIT_STATUS);
+        }
         eprintln!("MSIXVC2 install failed before promotion: {error}");
         return ExitCode::FAILURE;
+    }
+
+    if should_interrupt() {
+        eprintln!("MSIXVC2 transaction cancelled before promotion");
+        return ExitCode::from(crate::CANCELLED_EXIT_STATUS);
     }
 
     let write_record = || -> io::Result<()> {
@@ -425,9 +545,14 @@ where
         return ExitCode::FAILURE;
     }
 
+    if should_interrupt() {
+        eprintln!("MSIXVC2 transaction cancelled before promotion");
+        return ExitCode::from(crate::CANCELLED_EXIT_STATUS);
+    }
+
     if let Err(error) = promote_owned_transaction(transaction, output_root, &mut entries) {
         eprintln!("MSIXVC2 install promotion failed: {error}");
-        return ExitCode::FAILURE;
+        return crate::transaction_status::exit_code_for_transaction_error(&error);
     }
 
     println!(
@@ -443,13 +568,147 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::commands::streaming::{MSIXVC2_OWNERSHIP_FILE, recover_transactions};
+    use crate::package_manifest::{
+        PackageCatalogIdentity, PackageRevisionCatalogEntry, VerifiedPackageDownload,
+        update_local_package_revision_catalog_at,
+    };
+    use sha2::{Digest, Sha256};
 
-    use super::{open_archive, repair, run, run_adopting, run_with_hook, validate_available_space};
+    use super::{
+        InstallMode, open_archive, repair, run, run_adopting, run_cataloged_interruptible_at,
+        run_with_hook, validate_available_space,
+    };
 
     fn fixture(name: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../msixvc/testdata/msixvc2")
             .join(name)
+    }
+
+    fn catalog_fixture(root: &std::path::Path, archive: &std::path::Path) {
+        let archive_bytes = std::fs::read(archive).expect("synthetic fixture must be readable");
+        let entry = PackageRevisionCatalogEntry::from_verified_download(
+            PackageCatalogIdentity {
+                content_id: "synthetic-msixvc2-content",
+                version_id: "synthetic-msixvc2-version",
+                version: "1.0.0.0",
+                source_version_id: None,
+            },
+            VerifiedPackageDownload {
+                file_name: archive
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .expect("synthetic archive name must be UTF-8"),
+                file_size: archive_bytes.len() as u64,
+                full_file_sha256: Sha256::digest(&archive_bytes).into(),
+                requested_scheme: "https",
+                requested_host: "assets1.xboxlive.com",
+                provider_sha256: None,
+                signer_key_sha256: None,
+                signed_root_sha256: None,
+            },
+        )
+        .expect("synthetic HTTPS Xbox catalog record must be valid");
+        update_local_package_revision_catalog_at(root, &entry)
+            .expect("synthetic package catalog record must be written");
+    }
+
+    #[test]
+    fn cataloged_install_and_repair_use_the_authenticated_download_record() {
+        let temporary = tempfile::tempdir().expect("temporary workspace must exist");
+        let archive = temporary.path().join("fixture.msixvc2");
+        std::fs::copy(fixture("xodus-fixture-base.msixvc"), &archive)
+            .expect("synthetic fixture must be copied");
+        let catalog = temporary.path().join("catalog");
+        catalog_fixture(&catalog, &archive);
+        let destination = temporary.path().join("install");
+
+        assert_eq!(
+            run_cataloged_interruptible_at(
+                archive.to_string_lossy().into_owned(),
+                destination.to_string_lossy().into_owned(),
+                InstallMode::Install,
+                || false,
+                &catalog,
+            ),
+            std::process::ExitCode::SUCCESS
+        );
+        std::fs::write(destination.join("UserData/AppxManifest.xml"), b"damaged")
+            .expect("synthetic installed member must be modified");
+        assert_eq!(
+            run_cataloged_interruptible_at(
+                archive.to_string_lossy().into_owned(),
+                destination.to_string_lossy().into_owned(),
+                InstallMode::Repair,
+                || false,
+                &catalog,
+            ),
+            std::process::ExitCode::SUCCESS
+        );
+        assert_ne!(
+            std::fs::read(destination.join("UserData/AppxManifest.xml"))
+                .expect("repair must restore the synthetic member"),
+            b"damaged"
+        );
+    }
+
+    #[test]
+    fn cataloged_install_rejects_uncataloged_archive_before_destination_creation() {
+        let temporary = tempfile::tempdir().expect("temporary workspace must exist");
+        let archive = temporary.path().join("uncataloged.msixvc2");
+        std::fs::copy(fixture("xodus-fixture-base.msixvc"), &archive)
+            .expect("synthetic fixture must be copied");
+        let catalog = temporary.path().join("empty-catalog");
+        std::fs::create_dir(&catalog).expect("empty catalog directory must exist");
+        let destination = temporary.path().join("install");
+
+        assert_eq!(
+            run_cataloged_interruptible_at(
+                archive.to_string_lossy().into_owned(),
+                destination.to_string_lossy().into_owned(),
+                InstallMode::Install,
+                || false,
+                &catalog,
+            ),
+            std::process::ExitCode::FAILURE
+        );
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn cataloged_install_rejects_tampered_archive_before_destination_creation() {
+        let temporary = tempfile::tempdir().expect("temporary workspace must exist");
+        let archive = temporary.path().join("tampered.msixvc2");
+        std::fs::copy(fixture("xodus-fixture-base.msixvc"), &archive)
+            .expect("synthetic fixture must be copied");
+        let catalog = temporary.path().join("catalog");
+        catalog_fixture(&catalog, &archive);
+        let mut archive_bytes = std::fs::read(&archive).expect("synthetic archive must be read");
+        *archive_bytes
+            .first_mut()
+            .expect("synthetic archive must not be empty") ^= 0xff;
+        std::fs::write(&archive, archive_bytes).expect("tampered archive must be written");
+        let destination = temporary.path().join("install");
+        std::fs::create_dir(&destination).expect("previous package root must exist");
+        std::fs::write(destination.join("keep.txt"), b"verified")
+            .expect("previous package sentinel must be written");
+
+        assert_eq!(
+            run_cataloged_interruptible_at(
+                archive.to_string_lossy().into_owned(),
+                destination.to_string_lossy().into_owned(),
+                InstallMode::Install,
+                || false,
+                &catalog,
+            ),
+            std::process::ExitCode::FAILURE
+        );
+        assert_eq!(
+            std::fs::read(destination.join("keep.txt"))
+                .expect("previous package sentinel must remain readable"),
+            b"verified"
+        );
+        assert!(!destination.join("UserData/AppxManifest.xml").exists());
     }
 
     #[test]
@@ -477,6 +736,62 @@ mod tests {
                     .file_name()
                     .to_string_lossy()
                     .starts_with(".xodus-streaming-txn-"))
+        );
+    }
+
+    #[test]
+    fn cancellation_during_install_preserves_the_previous_package_state() {
+        let temporary = tempfile::tempdir().expect("temporary destination must exist");
+        let destination = temporary.path().join("install");
+        let base_package = destination.join("Boxes/7a342636-4ffe-4966-91d1-207da876ba09.box");
+        let update_package = destination.join("Boxes/204a0f88-704c-4bcb-8a1a-3823119302ce.box");
+
+        assert_eq!(
+            run(
+                fixture("xodus-fixture-base.msixvc")
+                    .to_string_lossy()
+                    .into_owned(),
+                destination.to_string_lossy().into_owned(),
+            ),
+            std::process::ExitCode::SUCCESS
+        );
+        let previous = std::fs::read(&base_package).expect("base package must be installed");
+
+        let mut check_count = 0;
+        let status = run_with_hook(
+            fixture("xodus-fixture-update.msixvc")
+                .to_string_lossy()
+                .into_owned(),
+            destination.to_string_lossy().into_owned(),
+            || {
+                check_count += 1;
+                check_count > 1
+            },
+        );
+
+        assert_eq!(
+            status,
+            std::process::ExitCode::from(crate::CANCELLED_EXIT_STATUS)
+        );
+        assert_eq!(
+            std::fs::read(&base_package).expect("cancellation must preserve the prior package"),
+            previous
+        );
+        assert!(
+            !update_package.exists(),
+            "cancelled package must not promote"
+        );
+        assert!(
+            std::fs::read_dir(&destination)
+                .expect("destination must remain readable")
+                .all(|entry| {
+                    !entry
+                        .expect("destination entry must be readable")
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".xodus-streaming-txn-")
+                }),
+            "cancelled staging transaction must be cleaned"
         );
     }
 

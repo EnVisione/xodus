@@ -62,7 +62,18 @@ fn checked_http_position(current: u64, copied: usize, total: u64) -> io::Result<
 }
 
 fn checked_active_http_offset(current: u64, received: usize, total: u64) -> io::Result<u64> {
-    checked_http_position(current, received, total)
+    let received = u64::try_from(received)
+        .map_err(|_| Error::new(ErrorKind::InvalidData, "received length does not fit u64"))?;
+    let next = current
+        .checked_add(received)
+        .ok_or_else(|| Error::new(ErrorKind::InvalidData, "active stream offset overflow"))?;
+    if next > total {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "received extent beyond declared total",
+        ));
+    }
+    Ok(next)
 }
 
 fn checked_cache_position(current: u64, advanced: usize, limit: u64) -> io::Result<u64> {
@@ -893,9 +904,7 @@ async fn open_http_stream(
                     format!("expected 200 OK, got {}", response.status()),
                 ));
             }
-            let len = response
-                .headers()
-                .get(CONTENT_LENGTH)
+            let len = crate::http_error::single_header_value(response.headers(), &CONTENT_LENGTH)?
                 .ok_or_else(|| Error::new(ErrorKind::InvalidData, "missing Content-Length"))?
                 .to_str()
                 .map_err(|err| Error::new(ErrorKind::InvalidData, err))?
@@ -910,12 +919,11 @@ async fn open_http_stream(
                     format!("expected 206 Partial Content, got {}", response.status()),
                 ));
             }
-            let content_range = response
-                .headers()
-                .get(CONTENT_RANGE)
-                .ok_or_else(|| Error::new(ErrorKind::InvalidData, "missing Content-Range"))?
-                .to_str()
-                .map_err(|err| Error::new(ErrorKind::InvalidData, err))?;
+            let content_range =
+                crate::http_error::single_header_value(response.headers(), &CONTENT_RANGE)?
+                    .ok_or_else(|| Error::new(ErrorKind::InvalidData, "missing Content-Range"))?
+                    .to_str()
+                    .map_err(|err| Error::new(ErrorKind::InvalidData, err))?;
             let (range, total) = content_range
                 .split_once('/')
                 .ok_or_else(|| Error::new(ErrorKind::InvalidData, "invalid Content-Range"))?;
@@ -940,9 +948,13 @@ async fn open_http_stream(
             let len = total
                 .parse::<u64>()
                 .map_err(|err| Error::new(ErrorKind::InvalidData, err))?;
-            let content_length = response
-                .content_length()
-                .ok_or_else(|| Error::new(ErrorKind::InvalidData, "missing Content-Length"))?;
+            let content_length =
+                crate::http_error::single_header_value(response.headers(), &CONTENT_LENGTH)?
+                    .ok_or_else(|| Error::new(ErrorKind::InvalidData, "missing Content-Length"))?
+                    .to_str()
+                    .map_err(|error| Error::new(ErrorKind::InvalidData, error))?
+                    .parse::<u64>()
+                    .map_err(|error| Error::new(ErrorKind::InvalidData, error))?;
             validate_partial_http_response_extent(actual_start, actual_end, len, content_length)?;
             let end_offset = actual_end
                 .checked_add(1)
@@ -1047,7 +1059,7 @@ fn validate_http_request_url(url: &reqwest::Url) -> std::io::Result<()> {
 }
 
 fn validate_http_response_encoding(headers: &HeaderMap) -> std::io::Result<()> {
-    let Some(value) = headers.get(CONTENT_ENCODING) else {
+    let Some(value) = crate::http_error::single_header_value(headers, &CONTENT_ENCODING)? else {
         return Ok(());
     };
     let value = value
@@ -1551,6 +1563,47 @@ mod tests {
             .expect("identity content encoding must preserve raw package bytes");
     }
 
+    #[tokio::test]
+    async fn http_read_rejects_duplicate_content_range_before_streaming() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("duplicate-header test server must bind");
+        let address = listener
+            .local_addr()
+            .expect("duplicate-header test server address must be available");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) =
+                tokio::time::timeout(tokio::time::Duration::from_secs(5), listener.accept())
+                    .await
+                    .expect("HTTP reader request must arrive")
+                    .expect("HTTP reader request must connect");
+            tokio::time::timeout(
+                tokio::time::Duration::from_secs(5),
+                tokio::io::AsyncWriteExt::write_all(
+                    &mut stream,
+                    b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-3/4\r\nContent-Range: bytes 0-3/4\r\nContent-Length: 4\r\nConnection: close\r\n\r\ntest",
+                ),
+            )
+            .await
+            .expect("duplicate-header response must not stall")
+            .expect("duplicate-header response must write");
+        });
+
+        let result = super::open_http_stream(
+            reqwest::Client::new(),
+            format!("http://{address}/file"),
+            Some(0),
+        )
+        .await;
+        server
+            .await
+            .expect("duplicate-header test server must finish");
+        assert!(
+            result.is_err(),
+            "duplicate Content-Range headers must fail closed"
+        );
+    }
+
     #[test]
     fn http_read_rejects_logical_position_beyond_total() {
         let error = super::checked_http_position(9, 2, 10)
@@ -1597,6 +1650,7 @@ mod tests {
             .expect_err("active offset overflow must fail");
 
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("active stream offset overflow"));
     }
 
     #[test]
@@ -1605,6 +1659,11 @@ mod tests {
             .expect_err("received extent beyond the declared total must fail");
 
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            error
+                .to_string()
+                .contains("received extent beyond declared total")
+        );
     }
 
     #[test]

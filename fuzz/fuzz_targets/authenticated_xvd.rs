@@ -9,7 +9,7 @@ use aws_lc_rs::signature::{KeyPair, RSA_PSS_SHA256};
 use libfuzzer_sys::fuzz_target;
 use msixvc::authenticated_xvd::AuthenticatedXvd;
 use msixvc::layout::PAGE_SIZE;
-use msixvc::models::xvd::{XvdHeader, layout::HASH_ENTRY_LENGTH};
+use msixvc::models::xvd::{XVD_HEADER_INCL_SIGNATURE_SIZE, XvdHeader, layout::HASH_ENTRY_LENGTH};
 use msixvc::signature::PinnedXvdKey;
 use msixvc_common::parse::BinaryTryParse;
 use sha2::{Digest, Sha256};
@@ -66,10 +66,12 @@ fn fixture() -> &'static Fixture {
         }
         header[0x240..0x260]
             .copy_from_slice(&Sha256::digest(&bytes[tree_start..tree_start + PAGE_SIZE]));
-        let (signature, signed) = header.split_at_mut(512);
+        let mut signed_header = vec![0_u8; XVD_HEADER_INCL_SIGNATURE_SIZE as usize];
+        signed_header[..PAGE_SIZE].copy_from_slice(&header);
+        let (signature, signed) = signed_header[..PAGE_SIZE].split_at_mut(512);
         pair.sign(&RSA_PSS_SHA256, &SystemRandom::new(), signed, signature)
             .unwrap();
-        bytes[..PAGE_SIZE].copy_from_slice(&header);
+        bytes[..signed_header.len()].copy_from_slice(&signed_header);
         runtime().block_on(async {
             let mut xvd = AuthenticatedXvd::open_signed(Cursor::new(bytes.clone()), &key)
                 .await

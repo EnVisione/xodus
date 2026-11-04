@@ -11,7 +11,7 @@
 use bytes::Bytes;
 
 use crate::parse::byteorder::little_endian::U16;
-use crate::parse::{BinaryParse, BinaryTryParse};
+use crate::parse::{BinaryParse, BinaryTryFromSliceError, BinaryTryParse};
 use crate::resources::error::PriParseError;
 
 /// Borrows `len` bytes starting at `offset` out of `data`, or a
@@ -19,6 +19,20 @@ use crate::resources::error::PriParseError;
 pub(crate) fn slice_range(data: &[u8], offset: usize, len: usize) -> Option<&[u8]> {
     let end = offset.checked_add(len)?;
     data.get(offset..end)
+}
+
+pub(crate) fn try_parse_slice<T>(
+    slice: &[u8],
+    context: &'static str,
+) -> Result<T::Output, PriParseError>
+where
+    T: BinaryTryParse,
+    PriParseError: From<T::Error>,
+{
+    T::try_from_slice(slice).map_err(|error| match error {
+        BinaryTryFromSliceError::InvalidLength { .. } => PriParseError::Truncated { context },
+        BinaryTryFromSliceError::Parse(error) => PriParseError::from(error),
+    })
 }
 
 /// Like [`slice_range`], but returns an owned, cheaply-clonable [`Bytes`] view
@@ -83,11 +97,11 @@ impl<'a> Cursor<'a> {
         T: BinaryTryParse,
         PriParseError: From<T::Error>,
     {
-        T::try_from_slice(
+        try_parse_slice::<T>(
             self.take_slice(T::SIZE)
                 .ok_or(PriParseError::Truncated { context })?,
+            context,
         )
-        .map_err(PriParseError::from)
     }
 
     pub(crate) fn read_u16_array(&mut self, count: usize) -> Option<Vec<u16>> {

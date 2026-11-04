@@ -53,6 +53,7 @@ const ROOT_RESOLVE_FLAGS: ResolveFlags =
 #[cfg(not(target_os = "linux"))]
 const ROOT_RESOLVE_FLAGS: () = ();
 const TRANSACTION_DIRECTORY_PREFIX: &str = ".xodus-streaming-txn-";
+pub(crate) const DOWNLOAD_RESUME_PREFIX: &str = ".xodus-download-resume-";
 const TRANSACTION_PAYLOAD_DIRECTORY: &str = ".xodus-streaming-payload";
 const TRANSACTION_BACKUP_DIRECTORY: &str = ".xodus-streaming-backup";
 const TRANSACTION_JOURNAL: &str = ".xodus-streaming-journal";
@@ -68,6 +69,7 @@ const MAX_STREAMING_OWNERSHIP_BYTES: usize = 64 * 1024 * 1024;
 const MAX_STREAMING_OWNERSHIP_ENTRIES: usize = 1_048_576;
 pub(crate) const MSIXVC2_OWNERSHIP_FILE: &str = ".xodus-msixvc2-members";
 const MAX_TRANSACTION_JOURNAL_BYTES: usize = 64 * 1024 * 1024;
+const MAX_TRANSACTION_ENTRIES: usize = 1_048_576;
 
 fn invalid_package_path(message: impl Into<String>) -> io::Error {
     io::Error::new(ErrorKind::InvalidData, message.into())
@@ -247,6 +249,9 @@ pub(crate) fn package_path_components(path: &str) -> io::Result<Vec<&str>> {
             || component
                 .get(..TRANSACTION_DIRECTORY_PREFIX.len())
                 .is_some_and(|prefix| prefix.eq_ignore_ascii_case(TRANSACTION_DIRECTORY_PREFIX))
+            || component
+                .get(..DOWNLOAD_RESUME_PREFIX.len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(DOWNLOAD_RESUME_PREFIX))
         {
             return Err(invalid_package_path(
                 "package path uses a reserved transaction name",
@@ -266,6 +271,86 @@ pub(crate) fn open_package_output_readwrite(
     package_path: &str,
 ) -> io::Result<std::fs::File> {
     open_package_output_with_access(root, package_path, OFlags::RDWR)
+}
+
+fn validate_download_resume_name(package_path: &str) -> io::Result<&str> {
+    let Some(name) = package_path.strip_prefix(DOWNLOAD_RESUME_PREFIX) else {
+        return Err(invalid_package_path("download resume file name is invalid"));
+    };
+    let Some((digest, extension)) = name.split_once('.') else {
+        return Err(invalid_package_path("download resume file name is invalid"));
+    };
+    if digest.len() != 64
+        || !digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        || !matches!(extension, "part" | "state")
+    {
+        return Err(invalid_package_path("download resume file name is invalid"));
+    }
+    Ok(package_path)
+}
+
+fn open_download_resume_entry(
+    root: &Path,
+    package_path: &str,
+    flags: OFlags,
+    mode: Mode,
+) -> io::Result<std::fs::File> {
+    let name = validate_download_resume_name(package_path)?;
+    let directory = open_package_root(root, "download resume root is not a directory")?;
+    let file = std::fs::File::from(
+        open_resolved(
+            &directory,
+            name,
+            flags | OFlags::CLOEXEC,
+            mode,
+            OUTPUT_RESOLVE_FLAGS,
+        )
+        .map_err(io::Error::from)?,
+    );
+    if !file.metadata()?.is_file() {
+        return Err(invalid_package_path(
+            "download resume entry is not a regular file",
+        ));
+    }
+    Ok(file)
+}
+
+pub(crate) fn open_download_resume_output(
+    root: &Path,
+    package_path: &str,
+) -> io::Result<std::fs::File> {
+    open_download_resume_entry(
+        root,
+        package_path,
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NONBLOCK,
+        Mode::RUSR | Mode::WUSR,
+    )
+}
+
+pub(crate) fn open_download_resume_input(
+    root: &Path,
+    package_path: &str,
+) -> io::Result<std::fs::File> {
+    open_download_resume_entry(
+        root,
+        package_path,
+        OFlags::RDONLY | OFlags::NONBLOCK,
+        Mode::empty(),
+    )
+}
+
+pub(crate) fn open_download_resume_output_existing_readwrite(
+    root: &Path,
+    package_path: &str,
+) -> io::Result<std::fs::File> {
+    open_download_resume_entry(
+        root,
+        package_path,
+        OFlags::RDWR | OFlags::NONBLOCK,
+        Mode::empty(),
+    )
 }
 
 fn open_package_output_with_access(
@@ -347,7 +432,7 @@ pub(crate) fn open_package_input(root: &Path, package_path: &str) -> io::Result<
     Ok(file)
 }
 
-fn package_relative_path(package_path: &str) -> io::Result<PathBuf> {
+pub(crate) fn package_relative_path(package_path: &str) -> io::Result<PathBuf> {
     let mut relative = PathBuf::new();
     for component in package_path_components(package_path)? {
         relative.push(component);
@@ -541,12 +626,107 @@ fn relative_path_text(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
+fn validate_transaction_entry_count(count: usize) -> io::Result<()> {
+    if count > MAX_TRANSACTION_ENTRIES {
+        return Err(invalid_package_path(
+            "transaction journal has too many entries",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_transaction_journal_size(
+    entries: &[PromotionEntry],
+    complete: bool,
+    max_bytes: usize,
+) -> io::Result<()> {
+    if complete {
+        if "complete\n".len() > max_bytes {
+            return Err(invalid_package_path(
+                "transaction journal exceeds the supported size",
+            ));
+        }
+        return Ok(());
+    }
+
+    validate_transaction_entry_count(entries.len())?;
+    let state_length = PromotionState::RestorePending.as_str().len();
+    let mut journal_length = 0_usize;
+    for entry in entries {
+        let line_length = [
+            state_length,
+            entry.staged_relative.to_string_lossy().len(),
+            entry.final_relative.to_string_lossy().len(),
+            entry.backup_relative.to_string_lossy().len(),
+            8,
+        ]
+        .into_iter()
+        .try_fold(0_usize, |length, part| length.checked_add(part))
+        .ok_or_else(|| invalid_package_path("transaction journal size overflows"))?;
+        journal_length = journal_length
+            .checked_add(line_length)
+            .ok_or_else(|| invalid_package_path("transaction journal size overflows"))?;
+        if journal_length > max_bytes {
+            return Err(invalid_package_path(
+                "transaction journal exceeds the supported size",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn write_transaction_journal(
     root: &Path,
     entries: &[PromotionEntry],
     complete: bool,
 ) -> io::Result<()> {
+    write_transaction_journal_with_limit(root, entries, complete, MAX_TRANSACTION_JOURNAL_BYTES)
+}
+
+fn write_transaction_journal_with_limit(
+    root: &Path,
+    entries: &[PromotionEntry],
+    complete: bool,
+    max_bytes: usize,
+) -> io::Result<()> {
+    write_transaction_journal_with_limit_and_hook(root, entries, complete, max_bytes, |_| {})
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum JournalWriteCheckpoint {
+    TemporaryCreated,
+    ContentsWritten,
+    FileSynced,
+    JournalRenamed,
+    ParentSynced,
+}
+
+impl JournalWriteCheckpoint {
+    #[cfg(test)]
+    fn index(self) -> usize {
+        match self {
+            Self::TemporaryCreated => 0,
+            Self::ContentsWritten => 1,
+            Self::FileSynced => 2,
+            Self::JournalRenamed => 3,
+            Self::ParentSynced => 4,
+        }
+    }
+}
+
+fn write_transaction_journal_with_limit_and_hook<F>(
+    root: &Path,
+    entries: &[PromotionEntry],
+    complete: bool,
+    max_bytes: usize,
+    mut checkpoint: F,
+) -> io::Result<()>
+where
+    F: FnMut(JournalWriteCheckpoint),
+{
+    validate_transaction_journal_size(entries, complete, max_bytes)?;
     let mut journal = open_transaction_file(root, TRANSACTION_JOURNAL_TEMP, true)?;
+    checkpoint(JournalWriteCheckpoint::TemporaryCreated);
     if complete {
         writeln!(journal, "complete")?;
     } else {
@@ -563,10 +743,15 @@ fn write_transaction_journal(
             )?;
         }
     }
+    checkpoint(JournalWriteCheckpoint::ContentsWritten);
     journal.sync_all()?;
+    checkpoint(JournalWriteCheckpoint::FileSynced);
     drop(journal);
     std::fs::rename(root.join(TRANSACTION_JOURNAL_TEMP), journal_path(root))?;
-    sync_parent_directory(&journal_path(root))
+    checkpoint(JournalWriteCheckpoint::JournalRenamed);
+    sync_parent_directory(&journal_path(root))?;
+    checkpoint(JournalWriteCheckpoint::ParentSynced);
+    Ok(())
 }
 
 fn read_transaction_journal(root: &Path) -> io::Result<Option<Vec<PromotionEntry>>> {
@@ -579,13 +764,9 @@ fn read_transaction_journal(root: &Path) -> io::Result<Option<Vec<PromotionEntry
     }
 
     let line_count = contents.lines().count();
+    validate_transaction_entry_count(line_count)?;
     let mut seen = HashSet::new();
-    seen.try_reserve(line_count)
-        .map_err(|_| invalid_package_path("transaction journal path index allocation failed"))?;
     let mut entries = Vec::new();
-    entries
-        .try_reserve(line_count)
-        .map_err(|_| invalid_package_path("transaction journal entry allocation failed"))?;
     for line in contents.lines() {
         let mut fields = line.split('\t');
         let state = PromotionState::parse(fields.next().unwrap_or_default())?;
@@ -648,11 +829,18 @@ fn read_transaction_journal(root: &Path) -> io::Result<Option<Vec<PromotionEntry
                 "transaction journal backup path does not match its final path",
             ));
         }
-        if !seen.insert(final_relative.clone()) {
+        if seen.contains(&final_relative) {
             return Err(invalid_package_path(
                 "transaction journal contains a duplicate package path",
             ));
         }
+        seen.try_reserve(1).map_err(|_| {
+            invalid_package_path("transaction journal path index allocation failed")
+        })?;
+        entries
+            .try_reserve(1)
+            .map_err(|_| invalid_package_path("transaction journal entry allocation failed"))?;
+        seen.insert(final_relative.clone());
         entries.push(PromotionEntry {
             staged_relative,
             final_relative,
@@ -702,7 +890,10 @@ fn open_transaction_journal(root: &Path, writable: bool) -> io::Result<std::fs::
     open_transaction_file(root, TRANSACTION_JOURNAL, writable)
 }
 
-fn read_bounded_transaction_journal<R: Read>(reader: R, max_bytes: usize) -> io::Result<String> {
+fn read_bounded_transaction_journal<R: Read>(
+    mut reader: R,
+    max_bytes: usize,
+) -> io::Result<String> {
     let read_limit = u64::try_from(max_bytes)
         .map_err(|_| invalid_package_path("transaction journal size limit is invalid"))?
         .checked_add(1)
@@ -710,10 +901,35 @@ fn read_bounded_transaction_journal<R: Read>(reader: R, max_bytes: usize) -> io:
     let read_limit_usize = usize::try_from(read_limit)
         .map_err(|_| invalid_package_path("transaction journal size limit is invalid"))?;
     let mut contents = Vec::new();
-    contents
-        .try_reserve_exact(read_limit_usize)
-        .map_err(|_| invalid_package_path("transaction journal allocation failed"))?;
-    reader.take(read_limit).read_to_end(&mut contents)?;
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let remaining = read_limit_usize
+            .checked_sub(contents.len())
+            .ok_or_else(|| invalid_package_path("transaction journal size overflows"))?;
+        if remaining == 0 {
+            break;
+        }
+        let request = remaining.min(buffer.len());
+        let read = {
+            let target = buffer.get_mut(..request).ok_or_else(|| {
+                invalid_package_path("transaction journal buffer range is invalid")
+            })?;
+            match reader.read(target) {
+                Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+                result => result?,
+            }
+        };
+        if read == 0 {
+            break;
+        }
+        let chunk = buffer
+            .get(..read)
+            .ok_or_else(|| invalid_package_path("transaction journal read length is invalid"))?;
+        contents
+            .try_reserve(read)
+            .map_err(|_| invalid_package_path("transaction journal allocation failed"))?;
+        contents.extend_from_slice(chunk);
+    }
     if contents.len() > max_bytes {
         return Err(invalid_package_path(
             "transaction journal exceeds the supported size",
@@ -749,7 +965,7 @@ fn package_entry_is_regular(root: &Path, relative: &Path) -> io::Result<bool> {
     Ok(file.metadata()?.is_file())
 }
 
-fn rename_package_entry(
+pub(crate) fn rename_package_entry(
     source_root: &Path,
     source_relative: &Path,
     target_root: &Path,
@@ -762,7 +978,7 @@ fn rename_package_entry(
     renameat(&source_parent, source_name, &target_parent, target_name).map_err(io::Error::from)
 }
 
-fn remove_package_entry(root: &Path, relative: &Path) -> io::Result<()> {
+pub(crate) fn remove_package_entry(root: &Path, relative: &Path) -> io::Result<()> {
     let parent = match open_package_parent(root, relative, false) {
         Ok(parent) => parent,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
@@ -930,11 +1146,8 @@ fn rollback_after_failure(
     error: io::Error,
 ) -> io::Error {
     match rollback_transaction(transaction_root, output_root, entries) {
-        Ok(()) => error,
-        Err(rollback_error) => io::Error::new(
-            error.kind(),
-            format!("{error}; rollback incomplete: {rollback_error}"),
-        ),
+        Ok(()) => crate::transaction_status::rolled_back_error(error),
+        Err(rollback_error) => crate::transaction_status::quarantined_error(error, rollback_error),
     }
 }
 
@@ -1173,13 +1386,30 @@ where
     if let Err(error) =
         promote_transaction_inner(&transaction_root, output_root, entries, should_interrupt)
     {
+        if crate::transaction_status::is_rolled_back_error(&error)
+            && !crate::transaction_status::is_quarantined_error(&error)
+        {
+            return match transaction.close() {
+                Ok(()) => Err(error),
+                Err(cleanup_error) => Err(io::Error::new(
+                    error.kind(),
+                    RetainedPromotionError {
+                        error,
+                        transaction_root,
+                        cleanup_error: Some(cleanup_error),
+                    },
+                )),
+            };
+        }
+
         let retained = transaction.keep();
         return Err(io::Error::new(
             error.kind(),
-            format!(
-                "promotion reported an error; its commit status may be uncertain; recovery data retained at {}: {error}",
-                retained.display()
-            ),
+            RetainedPromotionError {
+                error,
+                transaction_root: retained,
+                cleanup_error: None,
+            },
         ));
     }
     transaction.close().map_err(|error| {
@@ -1191,6 +1421,54 @@ where
             ),
         )
     })
+}
+
+#[derive(Debug)]
+struct RetainedPromotionError {
+    error: io::Error,
+    transaction_root: PathBuf,
+    cleanup_error: Option<io::Error>,
+}
+
+impl std::fmt::Display for RetainedPromotionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(cleanup_error) = &self.cleanup_error {
+            write!(
+                formatter,
+                "rollback restored the prior package state, but transaction cleanup failed at {}: {}; original failure: {}",
+                self.transaction_root.display(),
+                cleanup_error,
+                self.error
+            )
+        } else if crate::transaction_status::is_quarantined_error(&self.error) {
+            write!(
+                formatter,
+                "promotion failed and rollback is incomplete; transaction quarantined for recovery at {}: {}",
+                self.transaction_root.display(),
+                self.error
+            )
+        } else if crate::transaction_status::is_rolled_back_error(&self.error) {
+            write!(
+                formatter,
+                "promotion failed after rollback restored the prior package state; recovery data retained at {}: {}",
+                self.transaction_root.display(),
+                self.error
+            )
+        } else {
+            write!(
+                formatter,
+                "promotion failed; recovery data retained at {}: {}",
+                self.transaction_root.display(),
+                self.error
+            )
+        }
+    }
+}
+
+impl std::error::Error for RetainedPromotionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
 }
 
 pub(crate) fn promote_owned_transaction(
@@ -1442,12 +1720,14 @@ fn streaming_ownership_record(
 ) -> io::Result<Vec<u8>> {
     validate_streaming_ownership_title(prior, content_id)?;
     let previous_count = prior.map_or(0, |ownership| ownership.paths.len());
-    let capacity = previous_count
-        .checked_add(files.len())
-        .ok_or_else(|| invalid_package_path("streaming ownership count overflows"))?;
+    if previous_count > MAX_STREAMING_OWNERSHIP_ENTRIES {
+        return Err(invalid_package_path(
+            "streaming ownership record has too many paths",
+        ));
+    }
     let mut names = HashSet::new();
     names
-        .try_reserve(capacity)
+        .try_reserve(previous_count)
         .map_err(|_| io::Error::other("streaming ownership allocation failed"))?;
     if let Some(ownership) = prior {
         for path in &ownership.paths {
@@ -1455,16 +1735,15 @@ fn streaming_ownership_record(
             name.try_reserve_exact(path.len())
                 .map_err(|_| io::Error::other("streaming ownership allocation failed"))?;
             name.push_str(path);
-            names.insert(name);
+            insert_bounded_ownership_name(&mut names, name, MAX_STREAMING_OWNERSHIP_ENTRIES)?;
         }
     }
     for name in files.keys() {
-        names.insert(normalized_streaming_member(name)?);
-    }
-    if names.len() > MAX_STREAMING_OWNERSHIP_ENTRIES {
-        return Err(invalid_package_path(
-            "streaming ownership record has too many paths",
-        ));
+        insert_bounded_ownership_name(
+            &mut names,
+            normalized_streaming_member(name)?,
+            MAX_STREAMING_OWNERSHIP_ENTRIES,
+        )?;
     }
     let mut sorted = Vec::new();
     sorted
@@ -1494,6 +1773,26 @@ fn streaming_ownership_record(
         record.push(b'\n');
     }
     Ok(record)
+}
+
+fn insert_bounded_ownership_name(
+    names: &mut HashSet<String>,
+    name: String,
+    max_entries: usize,
+) -> io::Result<()> {
+    if names.contains(&name) {
+        return Ok(());
+    }
+    if names.len() >= max_entries {
+        return Err(invalid_package_path(
+            "streaming ownership record has too many paths",
+        ));
+    }
+    names
+        .try_reserve(1)
+        .map_err(|_| io::Error::other("streaming ownership allocation failed"))?;
+    names.insert(name);
+    Ok(())
 }
 
 fn check_streaming_collisions(
@@ -1699,6 +1998,12 @@ pub(crate) struct StreamingIdentity {
     version: String,
 }
 
+impl StreamingIdentity {
+    pub(crate) fn resume_identity(&self) -> String {
+        format!("{}:{}:{}", self.content_id, self.package_id, self.version)
+    }
+}
+
 pub(crate) fn parse_streaming_identity(
     content_id: &str,
     revision: &str,
@@ -1820,24 +2125,38 @@ fn validate_streaming_source_url(source: &str) -> io::Result<()> {
     }
 }
 
+fn select_streaming_download_client(
+    client: &reqwest::Client,
+    package_selected_from_metadata: bool,
+) -> io::Result<reqwest::Client> {
+    if package_selected_from_metadata {
+        crate::commands::download::build_package_cdn_client()
+    } else {
+        Ok(client.clone())
+    }
+}
+
 async fn run_with_cancellation<Operation, Cancellation>(
     operation: Operation,
     cancellation: Cancellation,
 ) -> ExitCode
 where
-    Operation: Future<Output = bool>,
+    Operation: Future<Output = ExitCode>,
     Cancellation: Future<Output = io::Result<()>>,
 {
     tokio::select! {
-        result = operation => {
-            if result { ExitCode::SUCCESS } else { ExitCode::FAILURE }
-        }
+        result = operation => result,
         signal = cancellation => {
             match signal {
-                Ok(()) => eprintln!("streaming cancelled"),
-                Err(error) => eprintln!("failed to listen for streaming cancellation: {error}"),
+                Ok(()) => {
+                    eprintln!("streaming cancelled");
+                    ExitCode::from(crate::CANCELLED_EXIT_STATUS)
+                }
+                Err(error) => {
+                    eprintln!("failed to listen for streaming cancellation: {error}");
+                    ExitCode::FAILURE
+                }
             }
-            ExitCode::FAILURE
         }
     }
 }
@@ -2012,6 +2331,13 @@ pub async fn run(
             };
             (urls, Some(expected_length), Some(identity))
         };
+        let download_client = match select_streaming_download_client(client, expected.is_some()) {
+            Ok(client) => client,
+            Err(error) => {
+                eprintln!("could not configure package CDN client: {error}");
+                return ExitCode::FAILURE;
+            }
+        };
         let progress_position = Arc::new(AtomicU64::new(0));
         let mut selected_url = None;
         let mut http_file = None;
@@ -2020,7 +2346,7 @@ pub async fn run(
             let progress_position = Arc::clone(&progress_position);
             let progress_tx = tx.clone();
             match streaming::HttpRead::open_with_expected_len(
-                client.clone(),
+                download_client.clone(),
                 candidate.clone(),
                 expected_length,
                 Some(move |c: u64, _| {
@@ -2063,7 +2389,7 @@ pub async fn run(
         return run_with_cancellation(
             run_cli_reader(
                 StreamingRun {
-                    client,
+                    client: &download_client,
                     tokens,
                     destination,
                     try_skip_ntfs,
@@ -2089,7 +2415,7 @@ async fn run_cli_reader<Reader>(
     reader: Reader,
     length: u64,
     mut rx: Receiver<ProgressEvent>,
-) -> bool
+) -> ExitCode
 where
     Reader: AsyncRead + Unpin + Send + 'static,
 {
@@ -2138,10 +2464,20 @@ where
 
         total_progess.abandon();
     });
-    run_reader(run, reader, length).await
+    let mut failure_exit_code = ExitCode::FAILURE;
+    if run_reader(run, reader, length, &mut failure_exit_code).await {
+        ExitCode::SUCCESS
+    } else {
+        failure_exit_code
+    }
 }
 
-async fn run_reader<Reader>(run: StreamingRun<'_>, reader: Reader, l: u64) -> bool
+async fn run_reader<Reader>(
+    run: StreamingRun<'_>,
+    reader: Reader,
+    l: u64,
+    failure_exit_code: &mut ExitCode,
+) -> bool
 where
     Reader: AsyncRead + Unpin + Send + 'static,
 {
@@ -2680,6 +3016,7 @@ where
     }
     if let Err(err) = promote_owned_transaction(transaction, out, &mut entries) {
         eprintln!("failed to promote package cache: {err}");
+        *failure_exit_code = crate::transaction_status::exit_code_for_transaction_error(&err);
         return false;
     }
     true
@@ -2691,6 +3028,70 @@ mod tests {
     use std::io::{self, Cursor, Write};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[tokio::test]
+    async fn metadata_streaming_rejects_redirect_outside_official_cdn_before_connecting() {
+        use std::time::Duration;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let target_listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("redirect target fixture must bind");
+        let target_address = target_listener
+            .local_addr()
+            .expect("redirect target fixture address must exist");
+        let origin_listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("package origin fixture must bind");
+        let origin_address = origin_listener
+            .local_addr()
+            .expect("package origin fixture address must exist");
+        let origin_server = tokio::spawn(async move {
+            let (mut stream, _) = origin_listener
+                .accept()
+                .await
+                .expect("initial package request must arrive");
+            let mut request = [0_u8; 1024];
+            let received = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut request))
+                .await
+                .expect("initial package request must arrive within the test bound")
+                .expect("initial package request must be readable");
+            assert!(received > 0, "initial package request must include headers");
+            let location = format!("https://{target_address}/package");
+            let response = format!(
+                "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("package redirect fixture response must be writable");
+        });
+
+        let shared_client = reqwest::Client::builder()
+            .redirect(xodus::api::secure_redirect_policy())
+            .build()
+            .expect("shared API client fixture must build");
+        let package_client = super::select_streaming_download_client(&shared_client, true)
+            .expect("metadata-selected packages must use the restricted CDN client");
+        let response = package_client
+            .get(format!("http://{origin_address}/package"))
+            .send()
+            .await;
+        assert!(
+            response.is_err(),
+            "metadata-selected package redirects must remain inside the Xbox CDN policy"
+        );
+        origin_server
+            .await
+            .expect("package origin fixture must finish");
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), target_listener.accept())
+                .await
+                .is_err(),
+            "an untrusted HTTPS redirect target must not receive a connection"
+        );
+    }
 
     #[test]
     fn streaming_identity_matches_selected_content_package_and_version() {
@@ -2747,6 +3148,21 @@ mod tests {
         ] {
             assert!(super::parse_streaming_identity(&content_id.to_string(), invalid).is_err());
         }
+    }
+
+    #[test]
+    fn bounded_ownership_name_set_deduplicates_before_enforcing_its_limit() {
+        let mut names = std::collections::HashSet::new();
+        super::insert_bounded_ownership_name(&mut names, "content/a.bin".to_owned(), 1)
+            .expect("first unique ownership path must fit");
+        super::insert_bounded_ownership_name(&mut names, "content/a.bin".to_owned(), 1)
+            .expect("a duplicate path must not consume another entry");
+
+        let error = super::insert_bounded_ownership_name(&mut names, "content/b.bin".to_owned(), 1)
+            .expect_err("a new path must not exceed the entry limit");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(names.len(), 1);
     }
 
     fn ownership_fixture_files() -> HashMap<String, SegmentFile> {
@@ -2912,7 +3328,10 @@ mod tests {
             expected: None,
             adopt_existing: false,
         };
-        assert!(!super::run_reader(run, input, super::PAGE_SIZE as u64).await);
+        let mut failure_exit_code = std::process::ExitCode::FAILURE;
+        assert!(
+            !super::run_reader(run, input, super::PAGE_SIZE as u64, &mut failure_exit_code,).await
+        );
         assert!(!destination.join(".xodus-streaming.msixvc").exists());
         assert!(std::fs::read_dir(&destination).unwrap().all(|entry| {
             !entry
@@ -3061,14 +3480,28 @@ mod tests {
         let status = super::run_with_cancellation(
             async move {
                 let _marker = marker;
-                std::future::pending::<bool>().await
+                std::future::pending::<std::process::ExitCode>().await
             },
             async { Ok::<(), io::Error>(()) },
         )
         .await;
 
-        assert_eq!(status, std::process::ExitCode::FAILURE);
+        assert_eq!(
+            status,
+            std::process::ExitCode::from(crate::CANCELLED_EXIT_STATUS)
+        );
         assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn streaming_cancellation_listener_failure_remains_a_failure() {
+        let status =
+            super::run_with_cancellation(std::future::pending::<std::process::ExitCode>(), async {
+                Err(io::Error::other("signal listener failed"))
+            })
+            .await;
+
+        assert_eq!(status, std::process::ExitCode::FAILURE);
     }
 
     #[test]
@@ -3100,6 +3533,36 @@ mod tests {
         let result = read_bounded_transaction_journal(Cursor::new(b"12345"), 4);
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn transaction_journal_reader_rejects_excessive_entry_count() {
+        let temporary = tempfile::tempdir().unwrap();
+        let transaction_root = temporary.path().join("transaction");
+        std::fs::create_dir(&transaction_root).unwrap();
+        let journal = transaction_root.join(TRANSACTION_JOURNAL);
+        std::fs::write(journal, "x\n".repeat(super::MAX_TRANSACTION_ENTRIES + 1)).unwrap();
+
+        let error = read_transaction_journal(&transaction_root)
+            .expect_err("excessive transaction journal entries must fail before allocation");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("too many entries"));
+    }
+
+    #[test]
+    fn transaction_journal_writer_rejects_oversized_entries_before_opening_temp_file() {
+        let temporary = tempfile::tempdir().unwrap();
+        let (transaction, _) = new_transaction(temporary.path()).unwrap();
+        let entries = promotion_entries(&[("new.bin".to_owned(), "new.bin".to_owned())]).unwrap();
+
+        let error =
+            super::write_transaction_journal_with_limit(transaction.path(), &entries, false, 1)
+                .expect_err("an oversized journal must fail before replacing transaction state");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(!transaction.path().join(TRANSACTION_JOURNAL).exists());
+        assert!(!transaction.path().join(TRANSACTION_JOURNAL_TEMP).exists());
     }
 
     #[test]
@@ -3221,6 +3684,72 @@ mod tests {
             b"fixture"
         );
         assert!(!temporary.path().join("data.bin").exists());
+    }
+
+    #[test]
+    fn package_paths_reject_download_resume_state_names() {
+        let path = format!("{}example.part", super::DOWNLOAD_RESUME_PREFIX);
+        assert!(package_path_components(&path).is_err());
+    }
+
+    #[test]
+    fn download_resume_helpers_accept_only_private_flat_names() {
+        use std::io::{Read as _, Seek as _, Write as _};
+
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("package-root");
+        std::fs::create_dir(&root).unwrap();
+        let digest = "a".repeat(64);
+        let name = format!("{}{digest}.part", super::DOWNLOAD_RESUME_PREFIX);
+
+        let mut output = super::open_download_resume_output(&root, &name).unwrap();
+        output.write_all(b"partial bytes").unwrap();
+        output.sync_all().unwrap();
+        let mut existing =
+            super::open_download_resume_output_existing_readwrite(&root, &name).unwrap();
+        existing.seek(std::io::SeekFrom::Start(8)).unwrap();
+        existing.write_all(b"data!").unwrap();
+        existing.sync_all().unwrap();
+
+        let mut bytes = Vec::new();
+        super::open_download_resume_input(&root, &name)
+            .unwrap()
+            .read_to_end(&mut bytes)
+            .unwrap();
+        assert_eq!(bytes, b"partial data!");
+        assert!(super::open_download_resume_input(&root, "../outside.part").is_err());
+        assert!(super::open_download_resume_input(&root, &format!("{name}/child")).is_err());
+    }
+
+    #[test]
+    fn download_resume_output_does_not_truncate_an_existing_reserved_file() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("package-root");
+        std::fs::create_dir(&root).unwrap();
+        let digest = "c".repeat(64);
+        let name = format!("{}{digest}.state", super::DOWNLOAD_RESUME_PREFIX);
+        std::fs::write(root.join(&name), b"existing state").unwrap();
+
+        assert!(super::open_download_resume_output(&root, &name).is_err());
+        assert_eq!(std::fs::read(root.join(name)).unwrap(), b"existing state");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn download_resume_output_rejects_symlinked_reserved_files() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("package-root");
+        let outside = temporary.path().join("outside.bin");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(&outside, b"outside").unwrap();
+        let digest = "b".repeat(64);
+        let name = format!("{}{digest}.part", super::DOWNLOAD_RESUME_PREFIX);
+        symlink(&outside, root.join(&name)).unwrap();
+
+        assert!(super::open_download_resume_output(&root, &name).is_err());
+        assert_eq!(std::fs::read(outside).unwrap(), b"outside");
     }
 
     #[tokio::test]
@@ -4201,7 +4730,162 @@ mod tests {
         );
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         assert!(error.to_string().contains("promotion refused"));
-        assert!(error.to_string().contains("rollback incomplete"));
+        assert!(
+            error.to_string().contains("quarantined for recovery"),
+            "unexpected transaction error: {error:?}"
+        );
+        assert_eq!(
+            crate::transaction_status::exit_code_for_transaction_error(&error),
+            std::process::ExitCode::from(crate::transaction_status::QUARANTINED_EXIT_STATUS)
+        );
+    }
+
+    #[test]
+    fn completed_transaction_rollback_reports_rolled_back_exit_status() {
+        let temporary = tempfile::tempdir().unwrap();
+        let output = temporary.path().join("output");
+        std::fs::create_dir(&output).unwrap();
+        let prior_file = output.join("replacement.bin");
+        std::fs::write(&prior_file, b"prior package").unwrap();
+        let (transaction, payload) = new_transaction(&output).unwrap();
+        let transaction_root = transaction.path().to_path_buf();
+        std::fs::write(payload.join("replacement.bin"), b"new package").unwrap();
+        let specs = [
+            ("replacement.bin".to_owned(), "replacement.bin".to_owned()),
+            ("missing.bin".to_owned(), "missing.bin".to_owned()),
+        ];
+        let mut entries = promotion_entries(&specs).unwrap();
+
+        let error = super::promote_owned_transaction(transaction, &output, &mut entries)
+            .expect_err("a missing later staged file must roll back an earlier promotion");
+
+        assert!(
+            error
+                .to_string()
+                .contains("rollback restored the prior package state")
+        );
+        assert_eq!(std::fs::read(prior_file).unwrap(), b"prior package");
+        assert!(
+            !transaction_root.exists(),
+            "a completed rollback must remove its no-longer-needed transaction directory"
+        );
+        assert_eq!(
+            crate::transaction_status::exit_code_for_transaction_error(&error),
+            std::process::ExitCode::from(crate::transaction_status::ROLLED_BACK_EXIT_STATUS)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn incomplete_rollback_retains_quarantine_and_reports_distinct_status() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let output = temporary.path().join("output");
+        std::fs::create_dir(&output).unwrap();
+        let active_parent = output.join("package");
+        std::fs::create_dir(&active_parent).unwrap();
+        let outside = temporary.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        let active_file = active_parent.join("game.bin");
+        std::fs::write(&active_file, b"prior package").unwrap();
+        let (transaction, payload) = new_transaction(&output).unwrap();
+        std::fs::write(payload.join("game.bin"), b"replacement package").unwrap();
+        let mut entries =
+            promotion_entries(&[("game.bin".to_owned(), "package/game.bin".to_owned())]).unwrap();
+        let backup = transaction.path().join(&entries[0].backup_relative);
+        let transaction_root = transaction.path().to_path_buf();
+        let mut checkpoint = 0;
+        let mut damage_recovery_state_after_promotion = || {
+            checkpoint += 1;
+            if checkpoint == 5 {
+                std::fs::remove_file(&backup).expect("test must remove the promoted backup");
+                std::fs::remove_file(&active_file).expect("test must remove the promoted file");
+                std::fs::remove_dir(&active_parent).expect("test must remove the empty parent");
+                symlink(&outside, &active_parent).expect("test must create hostile parent link");
+            }
+            false
+        };
+
+        let error = super::promote_owned_transaction_inner(
+            transaction,
+            &output,
+            &mut entries,
+            &mut damage_recovery_state_after_promotion,
+        )
+        .expect_err("failed recovery data must be retained for later recovery");
+
+        assert_eq!(checkpoint, 5);
+        assert!(transaction_root.is_dir());
+        assert!(active_parent.is_symlink());
+        assert!(!outside.join("game.bin").exists());
+        assert!(
+            error.to_string().contains("quarantined for recovery"),
+            "unexpected transaction error: {error:?}"
+        );
+        assert_eq!(
+            crate::transaction_status::exit_code_for_transaction_error(&error),
+            std::process::ExitCode::from(crate::transaction_status::QUARANTINED_EXIT_STATUS)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transaction_journal_recovery_survives_crash_during_atomic_replacement() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let test_temp_root = std::env::var_os("XODUS_JOURNAL_CRASH_TEST_ROOT");
+        for checkpoint in 0..=4 {
+            let temporary = match test_temp_root.as_deref() {
+                Some(root) => tempfile::tempdir_in(root).unwrap(),
+                None => tempfile::tempdir().unwrap(),
+            };
+            let output = temporary.path().join("output");
+            std::fs::create_dir(&output).unwrap();
+            std::fs::write(output.join("game.bin"), b"verified").unwrap();
+
+            let (transaction, _) = new_transaction(&output).unwrap();
+            let transaction_root = transaction.path().to_path_buf();
+            let mut prior_entries =
+                promotion_entries(&[("game.bin".to_owned(), "game.bin".to_owned())]).unwrap();
+            prior_entries[0].had_previous = true;
+            prior_entries[0].state = PromotionState::BackupPending;
+            write_transaction_journal(transaction.path(), &prior_entries, false).unwrap();
+            super::rename_package_entry(
+                &output,
+                &prior_entries[0].final_relative,
+                transaction.path(),
+                &prior_entries[0].backup_relative,
+            )
+            .unwrap();
+            super::sync_package_parent(&output, &prior_entries[0].final_relative).unwrap();
+            super::sync_package_parent(transaction.path(), &prior_entries[0].backup_relative)
+                .unwrap();
+
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "commands::streaming::tests::transaction_journal_crash_helper",
+                    "--nocapture",
+                ])
+                .env("XODUS_JOURNAL_CRASH_ROOT", &transaction_root)
+                .env("XODUS_JOURNAL_CRASH_CHECKPOINT", checkpoint.to_string())
+                .current_dir(temporary.path())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap();
+
+            assert_eq!(
+                status.signal(),
+                Some(nix::libc::SIGKILL),
+                "journal crash helper must reach checkpoint {checkpoint}"
+            );
+            recover_transactions(&output).unwrap();
+            assert_eq!(std::fs::read(output.join("game.bin")).unwrap(), b"verified");
+            assert!(!transaction_root.exists());
+            assert_eq!(std::fs::read_dir(&output).unwrap().count(), 1);
+        }
     }
 
     #[cfg(unix)]
@@ -4307,6 +4991,39 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn transaction_journal_crash_helper() {
+        let Some(root) = std::env::var_os("XODUS_JOURNAL_CRASH_ROOT") else {
+            return;
+        };
+        let checkpoint = std::env::var("XODUS_JOURNAL_CRASH_CHECKPOINT")
+            .unwrap()
+            .parse::<usize>()
+            .unwrap();
+        let mut entries =
+            promotion_entries(&[("game.bin".to_owned(), "game.bin".to_owned())]).unwrap();
+        entries[0].had_previous = true;
+        entries[0].state = PromotionState::BackedUp;
+
+        let _ = super::write_transaction_journal_with_limit_and_hook(
+            &std::path::PathBuf::from(root),
+            &entries,
+            false,
+            super::MAX_TRANSACTION_JOURNAL_BYTES,
+            |observed| {
+                if observed.index() == checkpoint {
+                    nix::sys::signal::kill(
+                        nix::unistd::getpid(),
+                        nix::sys::signal::Signal::SIGKILL,
+                    )
+                    .expect("test process must be killed at the selected journal boundary");
+                }
+            },
+        );
+        panic!("journal crash helper completed without reaching checkpoint {checkpoint}");
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn transaction_promotion_crash_helper() {
         let Some(output) = std::env::var_os("XODUS_CRASH_OUTPUT") else {
             return;
@@ -4383,12 +5100,94 @@ mod tests {
     }
 
     #[test]
+    fn transaction_locks_allow_independent_title_roots() {
+        let temporary = tempfile::tempdir().expect("temporary transaction parent must exist");
+        let first_root = temporary.path().join("title-one");
+        let second_root = temporary.path().join("title-two");
+        std::fs::create_dir_all(&first_root).expect("first title root must exist");
+        std::fs::create_dir_all(&second_root).expect("second title root must exist");
+
+        let first_lock = acquire_transaction_lock(&first_root)
+            .expect("first title transaction must acquire its lock");
+        let second_lock = acquire_transaction_lock(&second_root)
+            .expect("independent title transaction must remain operable");
+        assert!(
+            acquire_transaction_lock(&first_root).is_err(),
+            "same-title mutation must remain excluded while its lock is held"
+        );
+
+        drop(first_lock);
+        let first_again = acquire_transaction_lock(&first_root)
+            .expect("first title lock must become available after release");
+        drop(first_again);
+        drop(second_lock);
+    }
+
+    #[test]
     fn transaction_lock_rejects_concurrent_mutation() {
         let temporary = tempfile::tempdir().unwrap();
         let first = acquire_transaction_lock(temporary.path()).unwrap();
         assert!(acquire_transaction_lock(temporary.path()).is_err());
         drop(first);
         assert!(acquire_transaction_lock(temporary.path()).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transaction_lock_excludes_other_processes() {
+        let temporary = tempfile::tempdir().expect("temporary transaction root must exist");
+        let independent_root = temporary.path().join("independent-title");
+        std::fs::create_dir(&independent_root).expect("independent title root must exist");
+        let lock = acquire_transaction_lock(temporary.path())
+            .expect("parent process must acquire the title lock");
+
+        let run_child = |expected_held: bool| {
+            let status = std::process::Command::new(
+                std::env::current_exe().expect("test executable path must be available"),
+            )
+            .args([
+                "--exact",
+                "commands::streaming::tests::transaction_lock_process_helper",
+            ])
+            .env("XODUS_TRANSACTION_LOCK_TEST_ROOT", temporary.path())
+            .env("XODUS_TRANSACTION_LOCK_INDEPENDENT_ROOT", &independent_root)
+            .env(
+                "XODUS_TRANSACTION_LOCK_EXPECTED_HELD",
+                if expected_held { "1" } else { "0" },
+            )
+            .current_dir(temporary.path())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("child lock-check process must finish");
+            assert!(status.success(), "child lock-check process must pass");
+        };
+
+        run_child(true);
+        drop(lock);
+        run_child(false);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transaction_lock_process_helper() {
+        let Some(root) = std::env::var_os("XODUS_TRANSACTION_LOCK_TEST_ROOT") else {
+            return;
+        };
+        let expected_held = std::env::var("XODUS_TRANSACTION_LOCK_EXPECTED_HELD")
+            .expect("parent must set lock expectation")
+            == "1";
+        let result = acquire_transaction_lock(std::path::Path::new(&root));
+        assert_eq!(
+            result.is_ok(),
+            !expected_held,
+            "cross-process title lock state must match the parent expectation"
+        );
+        let independent_root = std::env::var_os("XODUS_TRANSACTION_LOCK_INDEPENDENT_ROOT")
+            .expect("parent must set independent title root");
+        let independent_lock = acquire_transaction_lock(std::path::Path::new(&independent_root))
+            .expect("independent title must remain operable in another process");
+        drop(independent_lock);
     }
 
     #[test]

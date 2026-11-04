@@ -616,7 +616,16 @@ impl SignaturePolicyCache {
         match matching_endpoint {
             Some(ep) => {
                 debug!("Identified signing policy for request");
-                let policy_index = ep.signature_policy_index.unwrap() as usize;
+                let policy_index = ep.signature_policy_index.ok_or_else(|| {
+                    Error::GeneralError(
+                        "Matched endpoint is missing a signature policy index".into(),
+                    )
+                })?;
+                let policy_index = usize::try_from(policy_index).map_err(|_| {
+                    Error::GeneralError(format!(
+                        "SignaturePolicy index {policy_index} must be non-negative"
+                    ))
+                })?;
                 let policy =
                     endpoints
                         .signature_policies
@@ -710,6 +719,25 @@ mod test {
             "../testdata/title_endpoints.json"
         ))
         .unwrap()
+    }
+
+    fn get_title_endpoints_with_policy_index(index: Option<i32>) -> TitleEndpointsResponse {
+        TitleEndpointsResponse {
+            end_points: vec![response::TitleEndpoint {
+                protocol: "https".into(),
+                host: "example.test".into(),
+                host_type: "fqdn".into(),
+                path: None,
+                relying_party: None,
+                sub_relying_party: None,
+                token_type: None,
+                signature_policy_index: index,
+                server_cert_index: None,
+            }],
+            signature_policies: vec![SigningPolicy::default()],
+            certs: Vec::new(),
+            root_certs: Vec::new(),
+        }
     }
 
     fn get_request_signer() -> RequestSigner {
@@ -862,6 +890,41 @@ mod test {
                 .unwrap(),
             policy_1
         )
+    }
+
+    #[tokio::test]
+    async fn invalid_signature_policy_indexes_are_rejected_safely() {
+        let mut missing_index =
+            SignaturePolicyCache::new(get_title_endpoints_with_policy_index(None));
+        assert!(missing_index
+            .find_policy_for_url("https://example.test")
+            .await
+            .expect("missing signing policy index must not fail")
+            .is_none());
+
+        let mut negative_index =
+            SignaturePolicyCache::new(get_title_endpoints_with_policy_index(Some(-1)));
+        let error = negative_index
+            .find_policy_for_url("https://example.test")
+            .await
+            .expect_err("negative signing policy indexes must be rejected");
+        assert!(matches!(
+            error,
+            Error::GeneralError(message)
+                if message == "SignaturePolicy index -1 must be non-negative"
+        ));
+
+        let mut out_of_bounds_index =
+            SignaturePolicyCache::new(get_title_endpoints_with_policy_index(Some(i32::MAX)));
+        let error = out_of_bounds_index
+            .find_policy_for_url("https://example.test")
+            .await
+            .expect_err("out-of-range signing policy indexes must be rejected");
+        assert!(matches!(
+            error,
+            Error::GeneralError(message)
+                if message == format!("SignaturePolicy at index {} not found!", i32::MAX)
+        ));
     }
 
     #[test]
